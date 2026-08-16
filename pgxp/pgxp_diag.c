@@ -73,6 +73,7 @@ static int last_backend = -1;
 static unsigned last_mode = ~0u;
 static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
+static uint32_t vertex_samples;
 
 static uint64_t hash_bytes(uint64_t hash, const void* data, size_t size)
 {
@@ -205,6 +206,7 @@ void PGXP_DiagInit(void)
 	last_mode = ~0u;
 	memset(load_samples, 0, sizeof(load_samples));
 	dispatch_samples = 0;
+	vertex_samples = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -306,7 +308,8 @@ void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
 }
 
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
-		uint32_t value, float x, float y, float w, int valid_w,
+		unsigned slot, uint32_t value, const PGXP_value* shadow,
+		float x, float y, float w, int valid_w,
 		int valid_xy, int value_match)
 {
 	switch (source)
@@ -325,6 +328,19 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 			window.vertex_native_value_mismatch++;
 		if (!valid_xy && !value_match)
 			window.vertex_native_both++;
+
+		if (vertex_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
+		{
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_vertex_native] n=%u mf=%u slot=%u "
+				"psx=%08x shadow=%08x flags=%08x gflags=%u "
+				"lflags=%u hflags=%u count=%u valid=%d/%d\n",
+				vertex_samples + 1, mode_frame, slot, value,
+				shadow->value, shadow->flags, shadow->gFlags,
+				shadow->lFlags, shadow->hFlags, shadow->count,
+				valid_xy, value_match);
+			vertex_samples++;
+		}
 	}
 	hash_event((uint8_t)(4 + source), value, (uint32_t)valid_w);
 	window.event_hash = hash_bytes(window.event_hash, &x, sizeof(x));
