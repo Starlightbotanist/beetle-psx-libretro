@@ -21,7 +21,7 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_LOAD_SAMPLES 96u
 #define PGXP_DIAG_ADDRESS_PAGES 16u
 #define PGXP_DIAG_MEMORY_STATES 3u
-#define PGXP_DIAG_STORE8_SLOTS 32768u
+#define PGXP_DIAG_STORE8_SLOTS (2048u * 1024u / 4u)
 
 enum PGXP_diag_address_region
 {
@@ -99,9 +99,21 @@ static unsigned last_mode = ~0u;
 static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
+static uint32_t vertex_sample_addr[PGXP_DIAG_LOAD_SAMPLES];
+static uint32_t vertex_sample_value[PGXP_DIAG_LOAD_SAMPLES];
 static PGXP_diag_gpu_provenance fifo_provenance[32];
 static PGXP_diag_store8 store8_provenance[PGXP_DIAG_STORE8_SLOTS];
 static PGXP_diag_gpu_provenance cb_provenance[16];
+
+static int vertex_sample_seen(uint32_t addr, uint32_t value)
+{
+	uint32_t i;
+
+	for (i = 0; i < vertex_samples; i++)
+		if (vertex_sample_addr[i] == addr && vertex_sample_value[i] == value)
+			return 1;
+	return 0;
+}
 
 static uint64_t hash_bytes(uint64_t hash, const void* data, size_t size)
 {
@@ -427,8 +439,12 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		if (!valid_xy && !value_match)
 			window.vertex_native_both++;
 
-		if (vertex_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
+		if (vertex_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb &&
+		    !vertex_sample_seen(cb_provenance[slot].addr,
+			    cb_provenance[slot].value))
 		{
+			vertex_sample_addr[vertex_samples] = cb_provenance[slot].addr;
+			vertex_sample_value[vertex_samples] = cb_provenance[slot].value;
 			log_cb(RETRO_LOG_INFO,
 				"[pgxp_vertex_native] n=%u mf=%u slot=%u "
 				"psx=%08x shadow=%08x flags=%08x gflags=%u "

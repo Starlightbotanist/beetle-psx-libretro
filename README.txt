@@ -1,14 +1,15 @@
-Beetle PSX HW - PGXP byte-store address/tag diagnostic v8
+Beetle PSX HW - PGXP unique-fallback byte-store diagnostic v9
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
 This records the most recent byte store behind each bounded native vertex
 fallback, including its address, value, frame, and the PGXP shadow state before
-the store invalidated it. A larger direct table avoids the observed alternating
-command-buffer collision. Each record now distinguishes an address hit from an
-exact invalidation-tag match. FIFO and command-buffer provenance remains
-available.
+the store invalidated it. A collision-free RAM-word table retains every CPU
+byte-store record. Duplicate source-address/command-word pairs are suppressed
+so repeating 2D geometry cannot exhaust the bounded sample budget. Each record
+distinguishes an address hit from an exact invalidation-tag match. FIFO and
+command-buffer provenance remains available.
 Existing broad Memory Only counters remain available. This build is
 diagnostic only: it does not change PGXP validity, address conversion,
 or rendering decisions.
@@ -23,8 +24,8 @@ controlled baseline:
   PGXP Vertex Cache: Off
 
 Run the same visible-defect section in Spyro 1, Spyro 3, and Gran Turismo 2.
-The first 96 native fallbacks in each core session are logged, so load directly
-into gameplay and avoid spending the sample budget in menus.
+The first 96 unique source-address/command-word native fallbacks in each core
+session are logged. Load directly into the visible-defect gameplay section.
 
 LOG TAGS
 
