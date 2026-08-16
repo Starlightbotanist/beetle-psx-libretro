@@ -107,6 +107,9 @@ typedef struct
 	uint64_t lineage_sra5_matches;
 	uint64_t lineage_preserve_sll5;
 	uint64_t lineage_preserve_sra5;
+	uint64_t lineage_identity_candidates;
+	uint64_t lineage_identity_matches;
+	uint64_t lineage_identity_preserve;
 	uint64_t lineage_store2;
 	uint64_t lineage_store3;
 	uint64_t lineage_fifo;
@@ -128,6 +131,7 @@ static uint32_t vertex_sample_value[PGXP_DIAG_LOAD_SAMPLES];
 static PGXP_diag_gpu_provenance fifo_provenance[32];
 static PGXP_diag_store8 store8_provenance[PGXP_DIAG_STORE8_SLOTS];
 static PGXP_diag_lineage lineage_reg[32];
+static uint32_t lineage_reg_touched;
 static PGXP_diag_lineage lineage_mem[PGXP_DIAG_STORE8_SLOTS];
 static PGXP_diag_gpu_provenance cb_provenance[16];
 
@@ -274,6 +278,7 @@ void PGXP_DiagInit(void)
 	memset(fifo_provenance, 0, sizeof(fifo_provenance));
 	memset(store8_provenance, 0, sizeof(store8_provenance));
 	memset(lineage_reg, 0, sizeof(lineage_reg));
+	lineage_reg_touched = 0;
 	memset(lineage_mem, 0, sizeof(lineage_mem));
 	memset(cb_provenance, 0, sizeof(cb_provenance));
 	dispatch_samples = 0;
@@ -294,6 +299,14 @@ void PGXP_DiagCPUDispatch(uint32_t instr, uint32_t addr, unsigned dest,
 	uint32_t after_mask = invalid_register_mask();
 	uint32_t after_flags = dest < 32 ? CPU_reg[dest].flags : 0;
 	uint16_t after_gflags = dest < 32 ? CPU_reg[dest].gFlags : 0;
+
+	if (dest < 32)
+	{
+		uint32_t bit = UINT32_C(1) << dest;
+		if (!(lineage_reg_touched & bit))
+			memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+		lineage_reg_touched &= ~bit;
+	}
 
 	if (dispatch_samples >= 32 || !log_cb)
 		return;
@@ -395,6 +408,7 @@ void PGXP_DiagMFC2(uint32_t instr, uint32_t value)
 	lineage->gte_reg = (instr >> 11) & 31;
 	lineage->stage = 1;
 	lineage->valid = 1;
+	lineage_reg_touched |= UINT32_C(1) << dest;
 }
 
 void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
@@ -405,6 +419,7 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 	uint32_t shift = (instr >> 6) & 31;
 	PGXP_diag_lineage prior = lineage_reg[source];
 
+	lineage_reg_touched |= UINT32_C(1) << dest;
 	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
 	if (!arithmetic && shift == 5)
 		window.lineage_sll5_candidates++;
@@ -450,6 +465,35 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 	else
 		window.lineage_preserve_sll5++;
 	return 1;
+}
+
+void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
+		uint32_t before, uint32_t after)
+{
+	PGXP_diag_lineage prior = lineage_reg[source];
+	PGXP_value result;
+	uint32_t expected;
+
+	window.lineage_identity_candidates++;
+	lineage_reg_touched |= UINT32_C(1) << dest;
+	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	if (source == 0 || before != after || !prior.valid)
+		return;
+	expected = prior.stage == 3 ? prior.sra_value :
+		prior.stage == 2 ? prior.sll_value : prior.mfc2_value;
+	if (expected != before)
+		return;
+	window.lineage_identity_matches++;
+
+	Validate(&CPU_reg[source], before);
+	result = CPU_reg[source];
+	if ((result.flags & VALID_01) != VALID_01 || result.value != before)
+		return;
+	result.value = after;
+	CPU_reg[dest] = result;
+	lineage_reg[dest] = prior;
+	window.lineage_identity_preserve++;
+	return;
 }
 
 void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
@@ -760,7 +804,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
 		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
-		"store=%llu/%llu fifo=%llu\n",
+		"identity=%llu/%llu/%llu store=%llu/%llu fifo=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)window.lineage_mfc2,
 		(unsigned long long)window.lineage_sll5_matches,
@@ -769,6 +813,9 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_sra5_candidates,
 		(unsigned long long)window.lineage_preserve_sll5,
 		(unsigned long long)window.lineage_preserve_sra5,
+		(unsigned long long)window.lineage_identity_matches,
+		(unsigned long long)window.lineage_identity_candidates,
+		(unsigned long long)window.lineage_identity_preserve,
 		(unsigned long long)window.lineage_store2,
 		(unsigned long long)window.lineage_store3,
 		(unsigned long long)window.lineage_fifo);

@@ -110,6 +110,8 @@ void PGXP_CPU_ADDI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 
 	CPU_reg[rt(instr)] = ret;
 	CPU_reg[rt(instr)].value = rtVal;
+	if (imm(instr) == 0)
+		PGXP_DiagIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
 }
 
 void PGXP_CPU_ADDIU(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
@@ -176,6 +178,8 @@ void PGXP_CPU_ORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 
 	ret.value = rtVal;
 	CPU_reg[rt(instr)] = ret;
+	if (imm(instr) == 0)
+		PGXP_DiagIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
 }
 
 void PGXP_CPU_XORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
@@ -202,6 +206,8 @@ void PGXP_CPU_XORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 
 	ret.value = rtVal;
 	CPU_reg[rt(instr)] = ret;
+	if (imm(instr) == 0)
+		PGXP_DiagIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
 }
 
 void PGXP_CPU_SLTI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
@@ -296,6 +302,10 @@ void PGXP_CPU_ADD(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 	ret.value = rdVal;
 
 	CPU_reg[rd(instr)] = ret;
+	if (rs(instr) == 0)
+		PGXP_DiagIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
+	else if (rt(instr) == 0)
+		PGXP_DiagIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
 }
 
 void PGXP_CPU_ADDU(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
@@ -445,12 +455,20 @@ void PGXP_CPU_OR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
 {
 	/* Rd = Rs | Rt */
 	PGXP_CPU_AND(instr, rdVal, rsVal, rtVal);
+	if (rs(instr) == 0)
+		PGXP_DiagIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
+	else if (rt(instr) == 0)
+		PGXP_DiagIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
 }
 
 void PGXP_CPU_XOR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
 {
 	/* Rd = Rs ^ Rt */
 	PGXP_CPU_AND(instr, rdVal, rsVal, rtVal);
+	if (rs(instr) == 0)
+		PGXP_DiagIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
+	else if (rt(instr) == 0)
+		PGXP_DiagIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
 }
 
 void PGXP_CPU_NOR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
