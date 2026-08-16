@@ -1401,7 +1401,7 @@ void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic)
 {
-	PGXP_DiagShift(instr, before, after, arithmetic);
+	PGXP_DiagPreserveShift(instr, before, after, arithmetic);
 }
 #endif
 

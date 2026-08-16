@@ -105,6 +105,8 @@ typedef struct
 	uint64_t lineage_sll5_matches;
 	uint64_t lineage_sra5_candidates;
 	uint64_t lineage_sra5_matches;
+	uint64_t lineage_preserve_sll5;
+	uint64_t lineage_preserve_sra5;
 	uint64_t lineage_store2;
 	uint64_t lineage_store3;
 	uint64_t lineage_fifo;
@@ -426,6 +428,30 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 	}
 }
 
+int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
+		uint32_t after, int arithmetic)
+{
+	uint32_t source = (instr >> 16) & 31;
+	uint32_t dest = (instr >> 11) & 31;
+	PGXP_value result;
+
+	Validate(&CPU_reg[source], before);
+	result = CPU_reg[source];
+	PGXP_DiagShift(instr, before, after, arithmetic);
+	if ((result.flags & VALID_01) != VALID_01 || result.value != before ||
+	    !lineage_reg[dest].valid ||
+	    lineage_reg[dest].stage != (arithmetic ? 3u : 2u))
+		return 0;
+
+	result.value = after;
+	CPU_reg[dest] = result;
+	if (arithmetic)
+		window.lineage_preserve_sra5++;
+	else
+		window.lineage_preserve_sll5++;
+	return 1;
+}
+
 void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 {
 	uint32_t source = (instr >> 16) & 31;
@@ -733,13 +759,16 @@ void PGXP_DiagFrame(int backend)
 		vc[3], vc[4], vc[5], vc[6]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
-		"sll5=%llu/%llu sra5=%llu/%llu store=%llu/%llu fifo=%llu\n",
+		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
+		"store=%llu/%llu fifo=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)window.lineage_mfc2,
 		(unsigned long long)window.lineage_sll5_matches,
 		(unsigned long long)window.lineage_sll5_candidates,
 		(unsigned long long)window.lineage_sra5_matches,
 		(unsigned long long)window.lineage_sra5_candidates,
+		(unsigned long long)window.lineage_preserve_sll5,
+		(unsigned long long)window.lineage_preserve_sra5,
 		(unsigned long long)window.lineage_store2,
 		(unsigned long long)window.lineage_store3,
 		(unsigned long long)window.lineage_fifo);

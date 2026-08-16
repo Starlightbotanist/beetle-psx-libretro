@@ -1,12 +1,14 @@
-Beetle PSX HW - PGXP MFC2 FIFO/vertex diagnostic v12
+Beetle PSX HW - PGXP MFC2/SLL5/SRA5 preservation test v13
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
-This traces value-verified MFC2 to SLL 5 to in-place SRA 5 lineage through a
-full-word store, RAM, the GPU FIFO, and each bounded native vertex fallback.
-It does not preserve or modify precise coordinates. Sixty-frame summaries
-count every MFC2, SLL5 and in-place SRA5 candidate/match, stage-2/stage-3 store,
+This test preserves precise X/Y through a value-verified MFC2 to SLL 5 to
+in-place SRA 5 sequence, matching the narrow case proven by v12. The behavior
+change is compiled only under PGXP_DIAG and refuses invalid or mismatched source
+shadows. Sixty-frame summaries
+count every MFC2, SLL5 and in-place SRA5 candidate/match, successful
+preservation, stage-2/stage-3 store,
 and FIFO arrival to locate where incomplete chains stop. Bounded event logs now
 record lineage-bearing FIFO words and every renderer vertex that consumes one,
 regardless of whether it is tracked, cached, or native. Duplicate fallback pairs
