@@ -1,12 +1,13 @@
-Beetle PSX HW - PGXP vertex-fallback provenance diagnostic v4
+Beetle PSX HW - PGXP FIFO provenance diagnostic v5
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
-This records bounded command-buffer provenance when rendering falls back to a
-native vertex, including the command-buffer slot, GP0 word, shadow word, and
-validity metadata. Existing broad Memory Only counters remain available. This
-build is diagnostic only: it does not change PGXP validity, address conversion,
+This records bounded FIFO and command-buffer provenance when rendering falls
+back to a native vertex, including the original GPU write address, GP0 word,
+source shadow state, command-buffer shadow state, and validity metadata.
+Existing broad Memory Only counters remain available. This build is
+diagnostic only: it does not change PGXP validity, address conversion,
 or rendering decisions.
 
 TEST
@@ -26,6 +27,7 @@ in menus. One representative run is enough for the first pass.
 LOG TAGS
 
   [pgxp_vertex_native] bounded native-fallback command-buffer provenance
+  [pgxp_vertex_source] FIFO source metadata for each bounded fallback
   [pgxp_frame]         existing 60-frame broad summary
   [pgxp_cpu_boot]      first 360 CPU-mode frames, now including register masks
   [pgxp_load]          first 96 unsupported CPU loads in a core session

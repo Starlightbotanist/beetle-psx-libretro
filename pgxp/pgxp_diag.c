@@ -39,6 +39,15 @@ typedef struct
 
 typedef struct
 {
+	uint32_t addr;
+	uint32_t value;
+	uint32_t shadow_value;
+	uint32_t shadow_flags;
+	uint32_t shadow_count;
+} PGXP_diag_gpu_provenance;
+
+typedef struct
+{
 	uint64_t mem_reads;
 	uint64_t mem_writes;
 	uint64_t mem_invalid_reads;
@@ -74,6 +83,8 @@ static unsigned last_mode = ~0u;
 static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
+static PGXP_diag_gpu_provenance fifo_provenance[32];
+static PGXP_diag_gpu_provenance cb_provenance[16];
 
 static uint64_t hash_bytes(uint64_t hash, const void* data, size_t size)
 {
@@ -205,6 +216,8 @@ void PGXP_DiagInit(void)
 	last_backend = -1;
 	last_mode = ~0u;
 	memset(load_samples, 0, sizeof(load_samples));
+	memset(fifo_provenance, 0, sizeof(fifo_provenance));
+	memset(cb_provenance, 0, sizeof(cb_provenance));
 	dispatch_samples = 0;
 	vertex_samples = 0;
 }
@@ -298,6 +311,27 @@ void PGXP_DiagMemoryWrite(uint32_t addr, uint32_t value, int valid_address)
 	hash_event(2, addr, value);
 }
 
+void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
+		const PGXP_value* shadow)
+{
+	PGXP_diag_gpu_provenance* provenance;
+
+	if (pos >= 32)
+		return;
+	provenance = &fifo_provenance[pos];
+	provenance->addr = addr;
+	provenance->value = value;
+	provenance->shadow_value = shadow ? shadow->value : 0;
+	provenance->shadow_flags = shadow ? shadow->flags : 0;
+	provenance->shadow_count = shadow ? shadow->count : 0;
+}
+
+void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos)
+{
+	if (slot < 16 && fifo_pos < 32)
+		cb_provenance[slot] = fifo_provenance[fifo_pos];
+}
+
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
 {
 	window.gte_vertices++;
@@ -339,6 +373,16 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 				shadow->value, shadow->flags, shadow->gFlags,
 				shadow->lFlags, shadow->hFlags, shadow->count,
 				valid_xy, value_match);
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_vertex_source] n=%u mf=%u slot=%u "
+				"src_addr=%08x src_psx=%08x "
+				"src_shadow=%08x src_flags=%08x src_count=%u\n",
+				vertex_samples + 1, mode_frame, slot,
+				cb_provenance[slot].addr,
+				cb_provenance[slot].value,
+				cb_provenance[slot].shadow_value,
+				cb_provenance[slot].shadow_flags,
+				cb_provenance[slot].shadow_count);
 			vertex_samples++;
 		}
 	}

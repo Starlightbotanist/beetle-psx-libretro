@@ -23,6 +23,9 @@ void PGXP_DiagCPUDispatch(uint32_t instr, uint32_t addr, unsigned dest,
 		uint32_t before_mask, uint32_t before_flags,
 		uint16_t before_gflags);
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value);
+void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
+		const PGXP_value* shadow);
+void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos);
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		unsigned slot, uint32_t value, const PGXP_value* shadow,
 		float x, float y, float w, int valid_w,
@@ -39,6 +42,8 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value);
 #define PGXP_DiagCPUInvalidMask() UINT32_C(0)
 #define PGXP_DiagCPUDispatch(instr, addr, dest, before_mask, before_flags, before_gflags) ((void)0)
 #define PGXP_DiagGTEVertex(x, y, z, value) ((void)0)
+#define PGXP_DiagFIFOWrite(pos, addr, value, shadow) ((void)0)
+#define PGXP_DiagCBWrite(slot, fifo_pos) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, valid_w, valid_xy, value_match) ((void)0)
 #define PGXP_DiagNCLIP(native_value, precise_value) ((void)0)
 
