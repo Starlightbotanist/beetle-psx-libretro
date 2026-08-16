@@ -1,13 +1,14 @@
-Beetle PSX HW - PGXP associative byte-store diagnostic v7
+Beetle PSX HW - PGXP byte-store address/tag diagnostic v8
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
 This records the most recent byte store behind each bounded native vertex
 fallback, including its address, value, frame, and the PGXP shadow state before
-the store invalidated it. A four-way provenance table preserves records from
-alternating command buffers that collided in v6. FIFO and command-buffer
-provenance remains available.
+the store invalidated it. A larger direct table avoids the observed alternating
+command-buffer collision. Each record now distinguishes an address hit from an
+exact invalidation-tag match. FIFO and command-buffer provenance remains
+available.
 Existing broad Memory Only counters remain available. This build is
 diagnostic only: it does not change PGXP validity, address conversion,
 or rendering decisions.
@@ -29,7 +30,7 @@ LOG TAGS
 
   [pgxp_vertex_native] bounded native-fallback command-buffer provenance
   [pgxp_vertex_source] FIFO source metadata for each bounded fallback
-  [pgxp_vertex_store8] most recent byte store for each source word
+  [pgxp_vertex_store8] most recent byte store plus address/tag match state
   [pgxp_frame]         existing 60-frame broad summary
   [pgxp_cpu_boot]      first 360 CPU-mode frames, now including register masks
   [pgxp_load]          first 96 unsupported CPU loads in a core session
