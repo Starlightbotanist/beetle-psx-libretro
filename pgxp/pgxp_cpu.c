@@ -4,6 +4,7 @@
 #include "pgxp_cpu.h"
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
+#include "pgxp_diag.h"
 
 
 #include "limits.h"
@@ -1334,6 +1335,8 @@ void PGXP_CPU_LW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Rt = Mem[Rs + Im] */
 	ValidateAndCopyMem(&CPU_reg[rt(instr)], addr, rtVal);
+	PGXP_DiagCPULoad(instr, addr, rtVal, &CPU_reg[rt(instr)],
+		PGXP_DiagGetMemoryState(addr));
 }
 
 void PGXP_CPU_LWR(uint32_t instr, uint32_t rtVal, uint32_t addr)
@@ -1349,6 +1352,8 @@ void PGXP_CPU_LH(uint32_t instr, uint16_t rtVal, uint32_t addr)
 	psx_value val;
 	val.sd = (int32_t)(int16_t)rtVal;
 	ValidateAndCopyMem16(&CPU_reg[rt(instr)], addr, val.d, 1);
+	PGXP_DiagCPULoad(instr, addr, val.d, &CPU_reg[rt(instr)],
+		PGXP_DiagGetMemoryState(addr));
 }
 
 void PGXP_CPU_LHU(uint32_t instr, uint16_t rtVal, uint32_t addr)
@@ -1358,17 +1363,23 @@ void PGXP_CPU_LHU(uint32_t instr, uint16_t rtVal, uint32_t addr)
 	val.d = rtVal;
 	val.w.h = 0;
 	ValidateAndCopyMem16(&CPU_reg[rt(instr)], addr, val.d, 0);
+	PGXP_DiagCPULoad(instr, addr, val.d, &CPU_reg[rt(instr)],
+		PGXP_DiagGetMemoryState(addr));
 }
 
 /* Load 8-bit */
 void PGXP_CPU_LB(uint32_t instr, uint8_t rtVal, uint32_t addr)
 {
 	InvalidLoad(addr, instr, 116);
+	PGXP_DiagCPULoad(instr, addr, (uint32_t)(int32_t)(int8_t)rtVal,
+		&CPU_reg[rt(instr)], PGXP_DiagGetMemoryState(addr));
 }
 
 void PGXP_CPU_LBU(uint32_t instr, uint8_t rtVal, uint32_t addr)
 {
 	InvalidLoad(addr, instr, 116);
+	PGXP_DiagCPULoad(instr, addr, rtVal, &CPU_reg[rt(instr)],
+		PGXP_DiagGetMemoryState(addr));
 }
 
 /* Store 32-bit word */
@@ -1519,10 +1530,42 @@ int PGXP_CPU_Tracks(uint32_t instr)
  *   hiVal,loVal : HI/LO results (mult/div) or HI/LO sources (mfhi/mflo/...)
  *   addr  : effective memory address (loads/stores)
  * The recompiler passes the values it has; unused ones are ignored. */
+#if PGXP_DIAG
+static unsigned PGXP_DiagDestination(uint32_t instr)
+{
+   switch (op(instr))
+   {
+      case 0x00:
+         switch (func(instr))
+         {
+            case 0x11: case 0x13:
+            case 0x18: case 0x19: case 0x1A: case 0x1B:
+               return 32;
+            default:
+               return rd(instr);
+         }
+      case 0x08: case 0x09: case 0x0A: case 0x0B:
+      case 0x0C: case 0x0D: case 0x0E: case 0x0F:
+      case 0x20: case 0x21: case 0x22: case 0x23:
+      case 0x24: case 0x25: case 0x26:
+         return rt(instr);
+      default:
+         return 32;
+   }
+}
+#endif
+
 void PGXP_CPU_Dispatch(uint32_t instr,
                        uint32_t rdVal, uint32_t rsVal, uint32_t rtVal,
                        uint32_t hiVal, uint32_t loVal, uint32_t addr)
 {
+#if PGXP_DIAG
+   unsigned diag_dest = PGXP_DiagDestination(instr);
+   uint32_t diag_before_mask = PGXP_DiagCPUInvalidMask();
+   uint32_t diag_before_flags = diag_dest < 32 ? CPU_reg[diag_dest].flags : 0;
+   uint16_t diag_before_gflags = diag_dest < 32 ? CPU_reg[diag_dest].gFlags : 0;
+#endif
+
    switch (op(instr))
    {
       case 0x00: /* SPECIAL */
@@ -1580,4 +1623,9 @@ void PGXP_CPU_Dispatch(uint32_t instr,
       case 0x2E: PGXP_CPU_SWR(instr, rtVal, addr);           break;
       default: break;
    }
+
+#if PGXP_DIAG
+   PGXP_DiagCPUDispatch(instr, addr, diag_dest, diag_before_mask,
+                        diag_before_flags, diag_before_gflags);
+#endif
 }

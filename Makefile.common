@@ -142,6 +142,12 @@ ifeq ($(HAVE_CHD), 1)
    endif
 endif
 
+# Compile PGXP diagnostics out of normal builds. Diagnostic builds opt in
+# explicitly with `make PGXP_DIAG=1` (or the equivalent platform variable).
+ifeq ($(PGXP_DIAG),1)
+   FLAGS += -DPGXP_DIAG=1
+endif
+
 ifeq ($(HAVE_LIGHTREC), 1)
    FLAGS += -DHAVE_LIGHTREC
 
@@ -329,6 +335,7 @@ endif
    endif
 
 SOURCES_C +=   $(CORE_DIR)/pgxp/pgxp_cpu.c \
+               $(CORE_DIR)/pgxp/pgxp_diag.c \
                $(CORE_DIR)/pgxp/pgxp_gpu.c \
                $(CORE_DIR)/pgxp/pgxp_gte.c \
                $(CORE_DIR)/pgxp/pgxp_main.c \

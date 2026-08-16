@@ -27,6 +27,7 @@
 #include "../state_helpers.h"
 #include "../pgxp/pgxp_gte.h"
 #include "../pgxp/pgxp_main.h"
+#include "../pgxp/pgxp_diag.h"
 #include "gte.h"
 
 extern bool psx_gte_overclock;
@@ -1923,6 +1924,7 @@ static int32_t NCLIP(uint32_t instr)
       memcpy(&v2, &XY_FIFO(2), sizeof(v2));
       if (PGXP_NCLIP_valid(v0, v1, v2)) {
          sum = PGXP_NCLIP();
+         PGXP_DiagNCLIP((int32_t)(a + b + c), sum);
          used_pgxp = true;
       }
    }

@@ -3049,11 +3049,11 @@ static void pgxp_cop2_notify(struct lightrec_state *state, uint32_t op, uint32_t
 	}
 }
 
-/* PGXP CPU-mode tracking hook for the lightrec recompiler.  Installed in
- * pgxp_ops.pgxp_cpu only while PGXP_MODE_CPU is active.  The recompiler calls
- * this after each tracked op with the post-execution register values; route
- * them to the unified PGXP_CPU dispatcher, which keeps CPU_reg[] precision
- * metadata up to date just as the interpreter's per-instruction hooks do. */
+/* PGXP CPU-mode tracking hook for Lightrec.  Installed only while
+ * PGXP_MODE_CPU is active.  Lightrec supplies the post-execution result and
+ * the source operands captured before execution; route them to the unified
+ * dispatcher so CPU_reg[] follows the same architectural operations as the
+ * Beetle interpreter. */
 static void pgxp_cpu_track(struct lightrec_state *state, uint32_t instr,
                            uint32_t rd, uint32_t rs, uint32_t rt,
                            uint32_t hi, uint32_t lo, uint32_t addr)

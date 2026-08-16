@@ -2,6 +2,7 @@
 
 #include "pgxp_mem.h"
 #include "pgxp_cpu.h"
+#include "pgxp_diag.h"
 #include "pgxp_gte.h"
 #include "pgxp_value.h"
 
@@ -70,6 +71,17 @@ static inline void MemBitSet(uint32_t paddr)
 {
 	MemEverWritten[paddr >> 5] |= (uint32_t)1 << (paddr & 31);
 }
+
+#if PGXP_DIAG
+int PGXP_DiagGetMemoryState(uint32_t addr)
+{
+	uint32_t paddr = PGXP_ConvertAddress(addr);
+
+	if (paddr >= InvalidAddress)
+		return 0;
+	return MemBitTest(paddr) ? 2 : 1;
+}
+#endif
 
 /* Resolve an already-converted (packed) address to its entry.
  * Caller guarantees paddr < InvalidAddress. */
@@ -181,6 +193,7 @@ PGXP_value* ReadMem(uint32_t addr)
 void ValidateAndCopyMem(PGXP_value* dest, uint32_t addr, uint32_t value)
 {
 	uint32_t paddr = PGXP_ConvertAddress(addr);
+	PGXP_DiagMemoryRead(addr, value, paddr < InvalidAddress);
 	if (paddr < InvalidAddress)
 	{
 		PGXP_value* pMem;
@@ -211,6 +224,7 @@ void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int s
 	PGXP_value zero_local;
 	PGXP_value* pMem = NULL;
 	uint32_t paddr = PGXP_ConvertAddress(addr);
+	PGXP_DiagMemoryRead(addr, value, paddr < InvalidAddress);
 
 	if (paddr < InvalidAddress)
 	{
@@ -272,6 +286,7 @@ void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int s
 void WriteMem(PGXP_value* value, uint32_t addr)
 {
 	uint32_t paddr = PGXP_ConvertAddress(addr);
+	PGXP_DiagMemoryWrite(addr, value->value, paddr < InvalidAddress);
 
 	if (paddr < InvalidAddress)
 	{
@@ -284,6 +299,7 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 {
 	PGXP_value* dest = NULL;
 	uint32_t paddr = PGXP_ConvertAddress(addr);
+	PGXP_DiagMemoryWrite(addr, src->value, paddr < InvalidAddress);
 
 	if (paddr < InvalidAddress)
 	{

@@ -15,6 +15,7 @@ HAVE_CHD                 := 1
 IS_X86                   := 0
 IS_64BIT                 := 0
 FLAGS                    :=
+PGXP_DIAG                := 1
 HAVE_LIGHTREC            := 1
 THREADED_RECOMPILER      := 1
 

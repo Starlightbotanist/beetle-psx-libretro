@@ -1,5 +1,6 @@
 #include "pgxp_main.h"
 #include "pgxp_cpu.h"
+#include "pgxp_diag.h"
 #include "pgxp_gpu.h"
 #include "pgxp_mem.h"
 #include "pgxp_gte.h"
@@ -17,6 +18,7 @@ void PGXP_Init(void)
 	PGXP_InitMem();
 	PGXP_InitCPU();
 	PGXP_InitGTE();
+	PGXP_DiagInit();
 }
 
 void PGXP_Shutdown(void)

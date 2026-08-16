@@ -31,6 +31,7 @@ retro_input_state_t dbg_input_state_cb = 0;
 
 #include "pgxp/pgxp_main.h"
 #include "pgxp/pgxp_gte.h"
+#include "pgxp/pgxp_diag.h"
 
 #include "deps/openbios/openbios.bin.h"
 
@@ -6480,6 +6481,12 @@ void retro_run(void)
       GPU_set_display_change_count(0);
       GPU_set_display_possibly_dirty(false);
    }
+
+#ifdef HAVE_LIGHTREC
+   PGXP_DiagFrame((int)psx_dynarec);
+#else
+   PGXP_DiagFrame(0);
+#endif
 
    /* LED interface */
    if (led_state_cb)

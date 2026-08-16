@@ -36,6 +36,7 @@
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
 #include "pgxp_cpu.h"
+#include "pgxp_diag.h"
 #include "pgxp_gpu.h"
 
 /* Same declaration pgxp_gpu.c uses; the frontend owns the callback. */
@@ -116,6 +117,7 @@ void PGXP_pushSXYZ2f(float _x, float _y, float _z, uint32_t _v)
 	SXY2.value	= _v;
 	SXY2.flags	= VALID_ALL;
 	SXY2.count	= uCount++;
+	PGXP_DiagGTEVertex(_x, _y, _z, _v);
 
 	/* cache value in GPU plugin */
 	temp.word = _v;

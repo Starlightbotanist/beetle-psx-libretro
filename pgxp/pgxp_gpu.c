@@ -26,6 +26,7 @@
 ***************************************************************************/
 #include "pgxp_gpu.h"
 #include "pgxp_gte.h"
+#include "pgxp_diag.h"
 #include "pgxp_main.h"
 #include "pgxp_mem.h"
 #include "pgxp_value.h"
@@ -590,6 +591,9 @@ void PGXP_GetColorStats(uint32_t stats[4])
 int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutput, int xOffs, int yOffs)
 {
 	PGXP_value* vert = PGXP_ReadCB(offset);          /* pointer to vertex */
+	enum PGXP_diag_vertex_source source = PGXP_DIAG_VERTEX_NATIVE;
+	int valid_xy;
+	int value_match;
 
 	/* The GP0 vertex word packs sy in the high 16 bits and sx in
 	 * the low 16 bits.  Unpack with shifts on the u32 rather than
@@ -598,9 +602,12 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	uint32_t psxWord = *addr;
 	int16_t psxX = (int16_t)(psxWord & 0xFFFF);
 	int16_t psxY = (int16_t)(psxWord >> 16);
+	valid_xy = vert && ((vert->flags & VALID_01) == VALID_01);
+	value_match = vert && (vert->value == psxWord);
 
-	if (vert && ((vert->flags & VALID_01) == VALID_01) && (vert->value == psxWord))
+	if (valid_xy && value_match)
 	{
+		source = PGXP_DIAG_VERTEX_TRACKED;
 		/* There is a value here with valid X and Y coordinates */
 		pOutput->x = (vert->x + xOffs);
 		pOutput->y = (vert->y + yOffs);
@@ -624,6 +631,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		PGXP_cache_entry* cache_vert = PGXP_GetCachedVertex(psxX, psxY);
 		if (cache_vert)
 		{
+			source = PGXP_DIAG_VERTEX_CACHE;
 			/* a value is found, it is from the current session and is unambiguous (there was only one value recorded at that position) */
 			pOutput->x = cache_vert->x + xOffs;
 			pOutput->y = cache_vert->y + yOffs;
@@ -649,6 +657,10 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			pOutput->valid_w = 0;
 		}
 	}
+
+	PGXP_DiagVertex(source, psxWord, pOutput->x, pOutput->y,
+		pOutput->valid_w ? pOutput->w : 0.0f, pOutput->valid_w,
+		valid_xy, value_match);
 
 	/* clear upper 5 bits in x and y - same 27-bit signed clamp as
 	 * above, but applied in the 16.16 fixed-point domain (i.e. 11

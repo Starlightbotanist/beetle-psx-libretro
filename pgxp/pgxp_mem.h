@@ -39,6 +39,10 @@ extern "C" {
 
    uint32_t		PGXP_ConvertAddress(uint32_t addr);
 
+#if PGXP_DIAG
+   int PGXP_DiagGetMemoryState(uint32_t addr);
+#endif
+
    PGXP_value* GetPtr(uint32_t addr);
    PGXP_value* ReadMem(uint32_t addr);
 
