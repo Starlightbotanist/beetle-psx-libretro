@@ -53,6 +53,17 @@ typedef struct
 
 typedef struct
 {
+	uint32_t word_addr;
+	uint32_t mfc2_value;
+	uint32_t sll_value;
+	uint32_t sra_value;
+	uint32_t gte_reg;
+	uint32_t stage;
+	uint32_t valid;
+} PGXP_diag_lineage;
+
+typedef struct
+{
 	uint32_t addr;
 	uint32_t value;
 	uint32_t shadow_value;
@@ -60,6 +71,7 @@ typedef struct
 	uint32_t shadow_count;
 	PGXP_diag_store8 store8;
 	uint32_t store8_match;
+	PGXP_diag_lineage lineage;
 } PGXP_diag_gpu_provenance;
 
 typedef struct
@@ -103,6 +115,8 @@ static uint32_t vertex_sample_addr[PGXP_DIAG_LOAD_SAMPLES];
 static uint32_t vertex_sample_value[PGXP_DIAG_LOAD_SAMPLES];
 static PGXP_diag_gpu_provenance fifo_provenance[32];
 static PGXP_diag_store8 store8_provenance[PGXP_DIAG_STORE8_SLOTS];
+static PGXP_diag_lineage lineage_reg[32];
+static PGXP_diag_lineage lineage_mem[PGXP_DIAG_STORE8_SLOTS];
 static PGXP_diag_gpu_provenance cb_provenance[16];
 
 static int vertex_sample_seen(uint32_t addr, uint32_t value)
@@ -247,6 +261,8 @@ void PGXP_DiagInit(void)
 	memset(load_samples, 0, sizeof(load_samples));
 	memset(fifo_provenance, 0, sizeof(fifo_provenance));
 	memset(store8_provenance, 0, sizeof(store8_provenance));
+	memset(lineage_reg, 0, sizeof(lineage_reg));
+	memset(lineage_mem, 0, sizeof(lineage_mem));
 	memset(cb_provenance, 0, sizeof(cb_provenance));
 	dispatch_samples = 0;
 	vertex_samples = 0;
@@ -354,6 +370,64 @@ static uint32_t gpu_source_word_addr(uint32_t addr)
 	}
 }
 
+void PGXP_DiagMFC2(uint32_t instr, uint32_t value)
+{
+	uint32_t dest = (instr >> 16) & 31;
+	PGXP_diag_lineage* lineage = &lineage_reg[dest];
+
+	memset(lineage, 0, sizeof(*lineage));
+	lineage->mfc2_value = value;
+	lineage->gte_reg = (instr >> 11) & 31;
+	lineage->stage = 1;
+	lineage->valid = 1;
+}
+
+void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
+		int arithmetic)
+{
+	uint32_t source = (instr >> 16) & 31;
+	uint32_t dest = (instr >> 11) & 31;
+	uint32_t shift = (instr >> 6) & 31;
+	PGXP_diag_lineage prior = lineage_reg[source];
+
+	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	if (!arithmetic && shift == 5 && prior.valid && prior.stage == 1 &&
+	    prior.mfc2_value == before)
+	{
+		lineage_reg[dest] = prior;
+		lineage_reg[dest].sll_value = after;
+		lineage_reg[dest].stage = 2;
+	}
+	else if (arithmetic && shift == 5 && dest == source &&
+	         prior.valid && prior.stage == 2 && prior.sll_value == before)
+	{
+		lineage_reg[dest] = prior;
+		lineage_reg[dest].sra_value = after;
+		lineage_reg[dest].stage = 3;
+	}
+}
+
+void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
+{
+	uint32_t source = (instr >> 16) & 31;
+	uint32_t word_addr = gpu_source_word_addr(addr);
+	PGXP_diag_lineage* dest;
+	const PGXP_diag_lineage* prior = &lineage_reg[source];
+
+	if (word_addr >= UINT32_C(0x00200000))
+		return;
+	dest = &lineage_mem[word_addr >> 2];
+	uint32_t expected = prior->stage == 3 ? prior->sra_value :
+		prior->sll_value;
+
+	memset(dest, 0, sizeof(*dest));
+	if (prior->valid && prior->stage >= 2 && expected == value)
+	{
+		*dest = *prior;
+		dest->word_addr = word_addr;
+	}
+}
+
 void PGXP_DiagStore8(uint32_t addr, uint8_t value,
 		uint32_t invalid_count, const PGXP_value* shadow)
 {
@@ -392,6 +466,18 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 			[(word_addr >> 2) & (PGXP_DIAG_STORE8_SLOTS - 1)];
 
 		memset(&provenance->store8, 0, sizeof(provenance->store8));
+		memset(&provenance->lineage, 0, sizeof(provenance->lineage));
+		if (word_addr < UINT32_C(0x00200000))
+		{
+			provenance->lineage = lineage_mem[word_addr >> 2];
+			if (!provenance->lineage.valid ||
+			    provenance->lineage.word_addr != word_addr ||
+			    (provenance->lineage.stage == 3 ?
+			     provenance->lineage.sra_value :
+			     provenance->lineage.sll_value) != value)
+				memset(&provenance->lineage, 0,
+					sizeof(provenance->lineage));
+		}
 		provenance->store8_match = 0;
 		if (store8->valid && store8->word_addr == word_addr)
 		{
@@ -463,6 +549,16 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 				cb_provenance[slot].shadow_value,
 				cb_provenance[slot].shadow_flags,
 				cb_provenance[slot].shadow_count);
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_vertex_lineage] n=%u mf=%u slot=%u seen=%u "
+				"stage=%u gte=%u mfc2=%08x sll=%08x sra=%08x\n",
+				vertex_samples + 1, mode_frame, slot,
+				cb_provenance[slot].lineage.valid,
+				cb_provenance[slot].lineage.stage,
+				cb_provenance[slot].lineage.gte_reg,
+				cb_provenance[slot].lineage.mfc2_value,
+				cb_provenance[slot].lineage.sll_value,
+				cb_provenance[slot].lineage.sra_value);
 			log_cb(RETRO_LOG_INFO,
 				"[pgxp_vertex_store8] n=%u mf=%u slot=%u seen=%u match=%u "
 				"store_mf=%u addr=%08x byte=%02x before=%08x flags=%08x "

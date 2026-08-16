@@ -2113,6 +2113,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLL(instr, result, GPR[rt]);
+#if PGXP_DIAG
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_DiagShift(instr, GPR[rt], result, 0);
+#endif
 
 	DO_LDS();
 
@@ -2253,6 +2257,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SRA(instr, result, GPR[rt]);
+#if PGXP_DIAG
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_DiagShift(instr, GPR[rt], result, 1);
+#endif
 
 	DO_LDS();
 

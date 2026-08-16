@@ -1393,8 +1393,17 @@ void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Mem[Rs + Im] = Rt */
 	Validate(&CPU_reg[rt(instr)], rtVal);
+	PGXP_DiagLineageStore(instr, rtVal, addr);
 	WriteMem(&CPU_reg[rt(instr)], addr);
 }
+
+#if PGXP_DIAG
+void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
+		uint32_t after, int arithmetic)
+{
+	PGXP_DiagShift(instr, before, after, arithmetic);
+}
+#endif
 
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {

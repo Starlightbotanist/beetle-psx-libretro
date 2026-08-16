@@ -1,15 +1,13 @@
-Beetle PSX HW - PGXP unique-fallback byte-store diagnostic v9
+Beetle PSX HW - PGXP MFC2/SLL5/SRA5 lineage diagnostic v10
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
-This records the most recent byte store behind each bounded native vertex
-fallback, including its address, value, frame, and the PGXP shadow state before
-the store invalidated it. A collision-free RAM-word table retains every CPU
-byte-store record. Duplicate source-address/command-word pairs are suppressed
-so repeating 2D geometry cannot exhaust the bounded sample budget. Each record
-distinguishes an address hit from an exact invalidation-tag match. FIFO and
-command-buffer provenance remains available.
+This traces value-verified MFC2 to SLL 5 to in-place SRA 5 lineage through a
+full-word store, RAM, the GPU FIFO, and each bounded native vertex fallback.
+It does not preserve or modify precise coordinates. Duplicate
+source-address/command-word pairs remain suppressed, and the byte-store trace
+remains available for comparison.
 Existing broad Memory Only counters remain available. This build is
 diagnostic only: it does not change PGXP validity, address conversion,
 or rendering decisions.
@@ -31,6 +29,7 @@ LOG TAGS
 
   [pgxp_vertex_native] bounded native-fallback command-buffer provenance
   [pgxp_vertex_source] FIFO source metadata for each bounded fallback
+  [pgxp_vertex_lineage] MFC2/SLL5/SRA5 ancestry of the source word
   [pgxp_vertex_store8] most recent byte store plus address/tag match state
   [pgxp_frame]         existing 60-frame broad summary
   [pgxp_cpu_boot]      first 360 CPU-mode frames, now including register masks

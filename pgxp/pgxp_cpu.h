@@ -60,6 +60,12 @@ void PGXP_CPU_LBU(uint32_t instr, uint8_t rtVal, uint32_t addr);
 void PGXP_CPU_SWL(uint32_t instr, uint32_t rtVal, uint32_t addr);
 void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr);
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr);
+#if PGXP_DIAG
+void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
+		uint32_t after, int arithmetic);
+#else
+#define PGXP_CPU_DiagShift(instr, before, after, arithmetic) ((void)0)
+#endif
 
 // Store 16-bit
 void PGXP_CPU_SH(uint32_t instr, uint16_t rtVal, uint32_t addr);
