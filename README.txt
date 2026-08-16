@@ -1,11 +1,11 @@
-Beetle PSX HW - PGXP FIFO provenance diagnostic v5
+Beetle PSX HW - PGXP byte-store provenance diagnostic v6
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
-This records bounded FIFO and command-buffer provenance when rendering falls
-back to a native vertex, including the original GPU write address, GP0 word,
-source shadow state, command-buffer shadow state, and validity metadata.
+This records the most recent byte store behind each bounded native vertex
+fallback, including its address, value, frame, and the PGXP shadow state before
+the store invalidated it. FIFO and command-buffer provenance remains available.
 Existing broad Memory Only counters remain available. This build is
 diagnostic only: it does not change PGXP validity, address conversion,
 or rendering decisions.
@@ -19,15 +19,15 @@ controlled baseline:
   PGXP Operation Mode: Memory Only
   PGXP Vertex Cache: Off
 
-Load directly into one controlled gameplay section where PGXP geometry defects
-are visible, preferably in Spyro 3 or Gran Turismo 2. The first 96 native
-fallbacks in the core session are logged, so avoid spending that sample budget
-in menus. One representative run is enough for the first pass.
+Run the same visible-defect section in Spyro 1, Spyro 3, and Gran Turismo 2.
+The first 96 native fallbacks in each core session are logged, so load directly
+into gameplay and avoid spending the sample budget in menus.
 
 LOG TAGS
 
   [pgxp_vertex_native] bounded native-fallback command-buffer provenance
   [pgxp_vertex_source] FIFO source metadata for each bounded fallback
+  [pgxp_vertex_store8] most recent byte store for each source word
   [pgxp_frame]         existing 60-frame broad summary
   [pgxp_cpu_boot]      first 360 CPU-mode frames, now including register masks
   [pgxp_load]          first 96 unsupported CPU loads in a core session

@@ -21,6 +21,7 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_LOAD_SAMPLES 96u
 #define PGXP_DIAG_ADDRESS_PAGES 16u
 #define PGXP_DIAG_MEMORY_STATES 3u
+#define PGXP_DIAG_STORE8_SLOTS 4096u
 
 enum PGXP_diag_address_region
 {
@@ -39,11 +40,25 @@ typedef struct
 
 typedef struct
 {
+	uint32_t word_addr;
+	uint32_t byte_addr;
+	uint32_t value;
+	uint32_t before_value;
+	uint32_t before_flags;
+	uint32_t before_count;
+	uint32_t invalid_count;
+	uint32_t mode_frame;
+	uint32_t valid;
+} PGXP_diag_store8;
+
+typedef struct
+{
 	uint32_t addr;
 	uint32_t value;
 	uint32_t shadow_value;
 	uint32_t shadow_flags;
 	uint32_t shadow_count;
+	PGXP_diag_store8 store8;
 } PGXP_diag_gpu_provenance;
 
 typedef struct
@@ -84,6 +99,7 @@ static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
 static PGXP_diag_gpu_provenance fifo_provenance[32];
+static PGXP_diag_store8 store8_provenance[PGXP_DIAG_STORE8_SLOTS];
 static PGXP_diag_gpu_provenance cb_provenance[16];
 
 static uint64_t hash_bytes(uint64_t hash, const void* data, size_t size)
@@ -217,6 +233,7 @@ void PGXP_DiagInit(void)
 	last_mode = ~0u;
 	memset(load_samples, 0, sizeof(load_samples));
 	memset(fifo_provenance, 0, sizeof(fifo_provenance));
+	memset(store8_provenance, 0, sizeof(store8_provenance));
 	memset(cb_provenance, 0, sizeof(cb_provenance));
 	dispatch_samples = 0;
 	vertex_samples = 0;
@@ -311,6 +328,37 @@ void PGXP_DiagMemoryWrite(uint32_t addr, uint32_t value, int valid_address)
 	hash_event(2, addr, value);
 }
 
+static uint32_t gpu_source_word_addr(uint32_t addr)
+{
+	switch (addr >> 24)
+	{
+		case 0x00:
+		case 0x80:
+		case 0xa0:
+			return addr & UINT32_C(0x001ffffc);
+		default:
+			return addr & ~UINT32_C(3);
+	}
+}
+
+void PGXP_DiagStore8(uint32_t addr, uint8_t value,
+		uint32_t invalid_count, const PGXP_value* shadow)
+{
+	uint32_t word_addr = gpu_source_word_addr(addr);
+	PGXP_diag_store8* provenance = &store8_provenance
+		[(word_addr >> 2) & (PGXP_DIAG_STORE8_SLOTS - 1)];
+
+	provenance->word_addr = word_addr;
+	provenance->byte_addr = addr;
+	provenance->value = value;
+	provenance->before_value = shadow ? shadow->value : 0;
+	provenance->before_flags = shadow ? shadow->flags : 0;
+	provenance->before_count = shadow ? shadow->count : 0;
+	provenance->invalid_count = invalid_count;
+	provenance->mode_frame = mode_frame;
+	provenance->valid = 1;
+}
+
 void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 		const PGXP_value* shadow)
 {
@@ -324,6 +372,18 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 	provenance->shadow_value = shadow ? shadow->value : 0;
 	provenance->shadow_flags = shadow ? shadow->flags : 0;
 	provenance->shadow_count = shadow ? shadow->count : 0;
+
+	{
+		uint32_t word_addr = gpu_source_word_addr(addr);
+		const PGXP_diag_store8* store8 = &store8_provenance
+			[(word_addr >> 2) & (PGXP_DIAG_STORE8_SLOTS - 1)];
+
+		if (store8->valid && store8->word_addr == word_addr && shadow &&
+		    shadow->count == store8->invalid_count)
+			provenance->store8 = *store8;
+		else
+			memset(&provenance->store8, 0, sizeof(provenance->store8));
+	}
 }
 
 void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos)
@@ -383,6 +443,18 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 				cb_provenance[slot].shadow_value,
 				cb_provenance[slot].shadow_flags,
 				cb_provenance[slot].shadow_count);
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_vertex_store8] n=%u mf=%u slot=%u seen=%u "
+				"store_mf=%u addr=%08x byte=%02x before=%08x flags=%08x "
+				"count=%u\n",
+				vertex_samples + 1, mode_frame, slot,
+				cb_provenance[slot].store8.valid,
+				cb_provenance[slot].store8.mode_frame,
+				cb_provenance[slot].store8.byte_addr,
+				cb_provenance[slot].store8.value,
+				cb_provenance[slot].store8.before_value,
+				cb_provenance[slot].store8.before_flags,
+				cb_provenance[slot].store8.before_count);
 			vertex_samples++;
 		}
 	}

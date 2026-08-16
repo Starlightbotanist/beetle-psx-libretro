@@ -1413,6 +1413,8 @@ void PGXP_CPU_SH(uint32_t instr, uint16_t rtVal, uint32_t addr)
 /* Store 8-bit */
 void PGXP_CPU_SB(uint32_t instr, uint8_t rtVal, uint32_t addr)
 {
+	PGXP_DiagStore8(addr, rtVal, (rt(instr) * 1000) + 208,
+		ReadMem(addr));
 	InvalidStore(addr, instr, 208);
 }
 
