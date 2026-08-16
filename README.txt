@@ -1,11 +1,13 @@
-Beetle PSX HW - PGXP byte-store provenance diagnostic v6
+Beetle PSX HW - PGXP associative byte-store diagnostic v7
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
 This records the most recent byte store behind each bounded native vertex
 fallback, including its address, value, frame, and the PGXP shadow state before
-the store invalidated it. FIFO and command-buffer provenance remains available.
+the store invalidated it. A four-way provenance table preserves records from
+alternating command buffers that collided in v6. FIFO and command-buffer
+provenance remains available.
 Existing broad Memory Only counters remain available. This build is
 diagnostic only: it does not change PGXP validity, address conversion,
 or rendering decisions.
