@@ -119,6 +119,8 @@ static unsigned last_mode = ~0u;
 static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
+static uint32_t lineage_fifo_samples;
+static uint32_t lineage_vertex_samples;
 static uint32_t vertex_sample_addr[PGXP_DIAG_LOAD_SAMPLES];
 static uint32_t vertex_sample_value[PGXP_DIAG_LOAD_SAMPLES];
 static PGXP_diag_gpu_provenance fifo_provenance[32];
@@ -274,6 +276,8 @@ void PGXP_DiagInit(void)
 	memset(cb_provenance, 0, sizeof(cb_provenance));
 	dispatch_samples = 0;
 	vertex_samples = 0;
+	lineage_fifo_samples = 0;
+	lineage_vertex_samples = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -497,7 +501,23 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 				memset(&provenance->lineage, 0,
 					sizeof(provenance->lineage));
 			if (provenance->lineage.valid)
+			{
 				window.lineage_fifo++;
+				if (lineage_fifo_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
+				{
+					log_cb(RETRO_LOG_INFO,
+						"[pgxp_lineage_fifo] n=%u mf=%u pos=%u "
+						"addr=%08x value=%08x stage=%u gte=%u "
+						"mfc2=%08x sll=%08x sra=%08x\n",
+						lineage_fifo_samples + 1, mode_frame, pos,
+						addr, value, provenance->lineage.stage,
+						provenance->lineage.gte_reg,
+						provenance->lineage.mfc2_value,
+						provenance->lineage.sll_value,
+						provenance->lineage.sra_value);
+					lineage_fifo_samples++;
+				}
+			}
 		}
 		provenance->store8_match = 0;
 		if (store8->valid && store8->word_addr == word_addr)
@@ -537,6 +557,22 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 	}
 	if (valid_w)
 		window.vertex_valid_w++;
+	if (cb_provenance[slot].lineage.valid &&
+	    lineage_vertex_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_lineage_vertex] n=%u mf=%u slot=%u source=%u "
+			"psx=%08x shadow=%08x flags=%08x valid=%d/%d "
+			"stage=%u gte=%u mfc2=%08x sll=%08x sra=%08x\n",
+			lineage_vertex_samples + 1, mode_frame, slot, source,
+			value, shadow->value, shadow->flags, valid_xy, value_match,
+			cb_provenance[slot].lineage.stage,
+			cb_provenance[slot].lineage.gte_reg,
+			cb_provenance[slot].lineage.mfc2_value,
+			cb_provenance[slot].lineage.sll_value,
+			cb_provenance[slot].lineage.sra_value);
+		lineage_vertex_samples++;
+	}
 	if (source == PGXP_DIAG_VERTEX_NATIVE)
 	{
 		if (!valid_xy)
