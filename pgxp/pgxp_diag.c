@@ -100,6 +100,14 @@ typedef struct
 	uint64_t vertex_valid_w;
 	uint64_t nclip_compares;
 	uint64_t nclip_sign_disagreements;
+	uint64_t lineage_mfc2;
+	uint64_t lineage_sll5_candidates;
+	uint64_t lineage_sll5_matches;
+	uint64_t lineage_sra5_candidates;
+	uint64_t lineage_sra5_matches;
+	uint64_t lineage_store2;
+	uint64_t lineage_store3;
+	uint64_t lineage_fifo;
 	uint64_t event_hash;
 } PGXP_diag_window;
 
@@ -376,6 +384,7 @@ void PGXP_DiagMFC2(uint32_t instr, uint32_t value)
 	PGXP_diag_lineage* lineage = &lineage_reg[dest];
 
 	memset(lineage, 0, sizeof(*lineage));
+	window.lineage_mfc2++;
 	lineage->mfc2_value = value;
 	lineage->gte_reg = (instr >> 11) & 31;
 	lineage->stage = 1;
@@ -391,12 +400,17 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 	PGXP_diag_lineage prior = lineage_reg[source];
 
 	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	if (!arithmetic && shift == 5)
+		window.lineage_sll5_candidates++;
+	else if (arithmetic && shift == 5 && dest == source)
+		window.lineage_sra5_candidates++;
 	if (!arithmetic && shift == 5 && prior.valid && prior.stage == 1 &&
 	    prior.mfc2_value == before)
 	{
 		lineage_reg[dest] = prior;
 		lineage_reg[dest].sll_value = after;
 		lineage_reg[dest].stage = 2;
+		window.lineage_sll5_matches++;
 	}
 	else if (arithmetic && shift == 5 && dest == source &&
 	         prior.valid && prior.stage == 2 && prior.sll_value == before)
@@ -404,6 +418,7 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 		lineage_reg[dest] = prior;
 		lineage_reg[dest].sra_value = after;
 		lineage_reg[dest].stage = 3;
+		window.lineage_sra5_matches++;
 	}
 }
 
@@ -425,6 +440,10 @@ void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 	{
 		*dest = *prior;
 		dest->word_addr = word_addr;
+		if (prior->stage == 3)
+			window.lineage_store3++;
+		else
+			window.lineage_store2++;
 	}
 }
 
@@ -477,6 +496,8 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 			     provenance->lineage.sll_value) != value)
 				memset(&provenance->lineage, 0,
 					sizeof(provenance->lineage));
+			if (provenance->lineage.valid)
+				window.lineage_fifo++;
 		}
 		provenance->store8_match = 0;
 		if (store8->valid && store8->word_addr == word_addr)
@@ -674,6 +695,18 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.vertex_native_value_mismatch,
 		(unsigned long long)window.vertex_native_both,
 		vc[3], vc[4], vc[5], vc[6]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
+		"sll5=%llu/%llu sra5=%llu/%llu store=%llu/%llu fifo=%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.lineage_mfc2,
+		(unsigned long long)window.lineage_sll5_matches,
+		(unsigned long long)window.lineage_sll5_candidates,
+		(unsigned long long)window.lineage_sra5_matches,
+		(unsigned long long)window.lineage_sra5_candidates,
+		(unsigned long long)window.lineage_store2,
+		(unsigned long long)window.lineage_store3,
+		(unsigned long long)window.lineage_fifo);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_load_summary] f=%llu loads=%llu untracked=%llu "
 		"invalid-result=%llu op=%llu/%llu/%llu/%llu/%llu/%llu/%llu "

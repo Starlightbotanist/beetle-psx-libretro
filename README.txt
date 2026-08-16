@@ -1,13 +1,14 @@
-Beetle PSX HW - PGXP MFC2/SLL5/SRA5 lineage diagnostic v10
+Beetle PSX HW - PGXP MFC2 shift-stage diagnostic v11
 Base: 12bdb844261f3d8f43d470f569eb3ace0dcad049
 
 PURPOSE
 
 This traces value-verified MFC2 to SLL 5 to in-place SRA 5 lineage through a
 full-word store, RAM, the GPU FIFO, and each bounded native vertex fallback.
-It does not preserve or modify precise coordinates. Duplicate
-source-address/command-word pairs remain suppressed, and the byte-store trace
-remains available for comparison.
+It does not preserve or modify precise coordinates. Sixty-frame summaries
+count every MFC2, SLL5 and in-place SRA5 candidate/match, stage-2/stage-3 store,
+and FIFO arrival to locate where incomplete chains stop. Duplicate fallback
+pairs remain suppressed, and the byte-store trace remains available.
 Existing broad Memory Only counters remain available. This build is
 diagnostic only: it does not change PGXP validity, address conversion,
 or rendering decisions.
@@ -30,6 +31,7 @@ LOG TAGS
   [pgxp_vertex_native] bounded native-fallback command-buffer provenance
   [pgxp_vertex_source] FIFO source metadata for each bounded fallback
   [pgxp_vertex_lineage] MFC2/SLL5/SRA5 ancestry of the source word
+  [pgxp_lineage_summary]  60-frame counts at each lineage boundary
   [pgxp_vertex_store8] most recent byte store plus address/tag match state
   [pgxp_frame]         existing 60-frame broad summary
   [pgxp_cpu_boot]      first 360 CPU-mode frames, now including register masks
