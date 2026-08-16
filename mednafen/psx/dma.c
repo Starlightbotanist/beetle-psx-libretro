@@ -662,7 +662,33 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
                 *
                 * Also, it's needed for RecalcHalt() to work with some semblance of workiness.
                 * */
-               RunChannel(timestamp, EventCycles/2, ch);
+               if(ch == CH_GPU &&
+                  (DMACH[ch].ChanControl & 0x701) == 0x201)
+               {
+                  /* A RAM-to-GPU block transfer can feed an image upload from
+                   * memory the CPU immediately reuses.  The coarse event
+                   * quantum otherwise lets a fast CPU backend overwrite the
+                   * tail before DMA observes it.  Give only this newly
+                   * started request an initial budget proportional to its
+                   * declared size; later service and all other DMA modes keep
+                   * their normal scheduling. */
+                  uint64_t words = DMACH[ch].BlockControl & 0xFFFF;
+                  uint64_t blocks = DMACH[ch].BlockControl >> 16;
+                  uint64_t clocks;
+
+                  if(blocks)
+                     words *= blocks;
+
+                  clocks = words * 8;
+                  if(clocks < (uint64_t)EventCycles / 2)
+                     clocks = EventCycles / 2;
+                  if(clocks > INT32_MAX)
+                     clocks = INT32_MAX;
+
+                  RunChannel(timestamp, (int32_t)clocks, ch);
+               }
+               else
+                  RunChannel(timestamp, EventCycles/2, ch);
             }
 
             RecalcHalt();
