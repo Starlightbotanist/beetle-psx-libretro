@@ -443,21 +443,6 @@ static void lightrec_rw_helper(struct lightrec_state *state,
 			state->regs.gpr[op.i.rt] = ret;
 		}
 
-		/* PGXP CPU-mode load tracking.  `ret` is the loaded value
-		 * regardless of whether it was committed to gpr[rt] or held
-		 * in temp_reg for the load delay, so it is the correct value
-		 * to track here.  OP_META_LWU is a lightrec-internal unaligned
-		 * helper with no PGXP tracker, so skip it. */
-		if (state->ops.pgxp_cpu && op.i.op != OP_META_LWU) {
-			u32 addr = state->regs.gpr[op.i.rs] + (u32)(s16)op.i.imm;
-
-			(*state->ops.pgxp_cpu)(state, op.opcode,
-					       ret, state->regs.gpr[op.i.rs],
-					       state->regs.gpr[op.i.rt],
-					       state->regs.gpr[REG_HI],
-					       state->regs.gpr[REG_LO],
-					       addr);
-		}
 		fallthrough;
 	default:
 		break;
@@ -826,71 +811,65 @@ static void lightrec_cp2_gte_cb(struct lightrec_state *state, u32 arg)
 	(*state->ops.cop2_op)(state, ((union code) arg).opcode);
 }
 
-/* Wrapper for PGXP CPU-mode tracking of non-memory ops.  arg encodes the
- * block LUT entry and opcode offset exactly like C_WRAPPER_RW_GENERIC; the
- * recompiler has stored the instruction's GPR fields back to
- * state->regs.gpr[] before the call, so the post-execution values are read
- * from there and handed to the host's pgxp_cpu hook.  HI/LO are read from
- * their GPR-array slots (lightrec keeps them at gpr[32]/gpr[33]). */
+/* Wrapper for PGXP CPU-mode tracking of register arithmetic.  The raw
+ * instruction is passed directly; looking it up later using curr_pc is not
+ * safe because execution may already have crossed a block boundary.  Source
+ * operands were saved before execution so destination/source aliases retain
+ * the values consumed by the instruction. */
 static void lightrec_pgxp_cpu_cb(struct lightrec_state *state, u32 arg)
 {
-	struct block *block;
-	struct opcode *op;
 	union code c;
-	u32 addr;
-	u16 offset = (u16)arg;
+	u32 rs, rt;
+	u32 result;
 
 	if (!state->ops.pgxp_cpu)
 		return;
 
-	block = lightrec_find_block_from_lut(state->block_cache,
-					     arg >> 16, state->curr_pc);
-	if (unlikely(!block))
-		return;
+	c.opcode = arg;
+	rs = c.r.rs ? state->pgxp_rs : 0;
+	rt = c.r.rt ? state->pgxp_rt : 0;
+	if (c.i.op == OP_SPECIAL) {
+		result = state->regs.gpr[c.r.rd];
+	} else {
+		u32 imm = c.i.imm;
 
-	op = &block->opcode_list[offset];
-	c = op->c;
-
-	/* Effective address for load/store ops: rs + sign-extended imm.
-	 * Harmless (unused) for non-memory ops, where it is passed as 0. */
-	switch (c.i.op) {
-	case OP_LB:  case OP_LH:  case OP_LWL: case OP_LW:
-	case OP_LBU: case OP_LHU: case OP_LWR: {
-		/* Load: the tracked value is the loaded result.  For a load
-		 * in a delay slot lightrec keeps it in temp_reg until the
-		 * delay resolves; otherwise it is already in gpr[rt].  Pass
-		 * the value in the rd slot, which is where PGXP_CPU_Dispatch
-		 * reads the load result from. */
-		u32 rtval = (OPT_HANDLE_LOAD_DELAYS &&
-			     state->in_delay_slot_n == 0xff)
-			    ? state->temp_reg : state->regs.gpr[c.i.rt];
-
-		addr = state->regs.gpr[c.i.rs] + (u32)(s16)c.i.imm;
-
-		(*state->ops.pgxp_cpu)(state, c.opcode,
-				       rtval, state->regs.gpr[c.i.rs],
-				       state->regs.gpr[c.i.rt],
-				       state->regs.gpr[REG_HI],
-				       state->regs.gpr[REG_LO],
-				       addr);
-		return;
-	}
-	case OP_SB:  case OP_SH:  case OP_SWL: case OP_SW:
-	case OP_SWR:
-		addr = state->regs.gpr[c.i.rs] + (u32)(s16)c.i.imm;
-		break;
-	default:
-		addr = 0;
-		break;
+		/* Constant propagation may fold adjacent immediate operations and
+		 * leave no materialized intermediate GPR value for this callback.
+		 * Reconstruct the architectural result from the captured source. */
+		switch (c.i.op) {
+		case OP_ADDI: case OP_ADDIU:
+			result = rs + (u32)(s32)(s16)imm;
+			break;
+		case OP_SLTI:
+			result = (s32)rs < (s32)(s16)imm;
+			break;
+		case OP_SLTIU:
+			result = rs < (u32)(s32)(s16)imm;
+			break;
+		case OP_ANDI:
+			result = rs & imm;
+			break;
+		case OP_ORI:
+			result = rs | imm;
+			break;
+		case OP_XORI:
+			result = rs ^ imm;
+			break;
+		case OP_LUI:
+			result = imm << 16;
+			break;
+		default:
+			return;
+		}
 	}
 
 	(*state->ops.pgxp_cpu)(state, c.opcode,
-			       state->regs.gpr[c.r.rd],
-			       state->regs.gpr[c.r.rs],
-			       state->regs.gpr[c.r.rt],
+			       result,
+			       rs,
+			       rt,
 			       state->regs.gpr[REG_HI],
 			       state->regs.gpr[REG_LO],
-			       addr);
+			       0);
 }
 
 static struct block * lightrec_get_block(struct lightrec_state *state, u32 pc)
