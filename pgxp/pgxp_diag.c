@@ -22,6 +22,40 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_ADDRESS_PAGES 16u
 #define PGXP_DIAG_MEMORY_STATES 3u
 #define PGXP_DIAG_STORE8_SLOTS (2048u * 1024u / 4u)
+#define PGXP_TRACE_RING_SIZE 262144u
+#define PGXP_TRACE_REASON_COUNT 8u
+
+enum PGXP_trace_event_type
+{
+	PGXP_TRACE_EVENT_GTE = 1,
+	PGXP_TRACE_EVENT_MFC2,
+	PGXP_TRACE_EVENT_SLL5,
+	PGXP_TRACE_EVENT_SRA5,
+	PGXP_TRACE_EVENT_STORE,
+	PGXP_TRACE_EVENT_LOAD,
+	PGXP_TRACE_EVENT_FIFO,
+	PGXP_TRACE_EVENT_CB,
+	PGXP_TRACE_EVENT_VERTEX,
+	PGXP_TRACE_EVENT_CPU
+};
+
+typedef struct
+{
+	uint64_t id;
+	uint64_t sequence;
+	uint32_t frame;
+	uint32_t instr_addr;
+	uint32_t before;
+	uint32_t after;
+	uint32_t shadow_value;
+	uint32_t shadow_flags;
+	float x;
+	float y;
+	uint8_t type;
+	uint8_t reason;
+	uint8_t stage;
+	uint16_t source_dest;
+} PGXP_trace_event;
 
 enum PGXP_diag_address_region
 {
@@ -122,6 +156,9 @@ typedef struct
 	uint64_t lineage_store2;
 	uint64_t lineage_store3;
 	uint64_t lineage_fifo;
+	uint64_t trace_events[11];
+	uint64_t trace_reasons[PGXP_TRACE_REASON_COUNT];
+	uint64_t trace_terminal[3][PGXP_TRACE_REASON_COUNT];
 	uint64_t event_hash;
 } PGXP_diag_window;
 
@@ -151,6 +188,81 @@ static PGXP_value lineage_pre_shadow[32];
 static PGXP_diag_lineage lineage_pre_lineage[32];
 static PGXP_diag_lineage lineage_mem[PGXP_DIAG_STORE8_SLOTS];
 static PGXP_diag_gpu_provenance cb_provenance[16];
+static PGXP_trace_event trace_ring[PGXP_TRACE_RING_SIZE];
+static uint64_t trace_next_id = 1;
+static uint64_t trace_sequence;
+static uint32_t trace_write;
+static uint32_t trace_chain_samples;
+
+static int trace_metadata_valid(const PGXP_value* value)
+{
+	return value && value->trace_id > 0 &&
+		value->trace_id < trace_next_id &&
+		value->trace_stage >= PGXP_TRACE_GTE &&
+		value->trace_stage <= PGXP_TRACE_VERTEX;
+}
+
+static void trace_record(uint8_t type, uint8_t reason, uint64_t id,
+		uint8_t stage, uint16_t source_dest, uint32_t instr_addr,
+		uint32_t before, uint32_t after, const PGXP_value* shadow)
+{
+	PGXP_trace_event* event;
+
+	if (!id || id >= trace_next_id || stage < PGXP_TRACE_GTE ||
+	    stage > PGXP_TRACE_VERTEX)
+		return;
+	event = &trace_ring[trace_write++ & (PGXP_TRACE_RING_SIZE - 1)];
+	event->id = id;
+	event->sequence = ++trace_sequence;
+	event->frame = mode_frame;
+	event->instr_addr = instr_addr;
+	event->before = before;
+	event->after = after;
+	event->shadow_value = shadow ? shadow->value : 0;
+	event->shadow_flags = shadow ? shadow->flags : 0;
+	event->x = shadow ? shadow->x : 0.f;
+	event->y = shadow ? shadow->y : 0.f;
+	event->type = type;
+	event->reason = reason;
+	event->stage = stage;
+	event->source_dest = source_dest;
+	if (type < 11)
+		window.trace_events[type]++;
+	if (reason < PGXP_TRACE_REASON_COUNT)
+		window.trace_reasons[reason]++;
+}
+
+static void trace_dump_chain(uint64_t id, uint8_t terminal_reason)
+{
+	uint64_t first;
+	uint64_t sequence;
+
+	if (!id || !log_cb || trace_chain_samples >= 48)
+		return;
+	first = trace_sequence > PGXP_TRACE_RING_SIZE ?
+		trace_sequence - PGXP_TRACE_RING_SIZE + 1 : 1;
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_trace_chain] sample=%u id=%llu terminal=%u begin=%llu end=%llu\n",
+		trace_chain_samples + 1, (unsigned long long)id, terminal_reason,
+		(unsigned long long)first, (unsigned long long)trace_sequence);
+	for (sequence = first; sequence <= trace_sequence; sequence++)
+	{
+		const PGXP_trace_event* event =
+			&trace_ring[(uint32_t)(sequence - 1) & (PGXP_TRACE_RING_SIZE - 1)];
+		if (event->sequence != sequence || event->id != id)
+			continue;
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_trace_event] id=%llu seq=%llu mf=%u type=%u reason=%u "
+			"stage=%u sd=%03x ia=%08x native=%08x/%08x "
+			"shadow=%08x flags=%08x xy=%.3f/%.3f\n",
+			(unsigned long long)id, (unsigned long long)event->sequence,
+			event->frame, event->type, event->reason, event->stage,
+			event->source_dest, event->instr_addr, event->before,
+			event->after, event->shadow_value, event->shadow_flags,
+			event->x, event->y);
+	}
+	trace_chain_samples++;
+}
 
 static int vertex_sample_seen(uint32_t addr, uint32_t value)
 {
@@ -311,6 +423,10 @@ void PGXP_DiagInit(void)
 	lineage_drop_samples = 0;
 	memset(lineage_transform_samples, 0,
 		sizeof(lineage_transform_samples));
+	trace_next_id = 1;
+	trace_sequence = 0;
+	trace_write = 0;
+	trace_chain_samples = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -399,6 +515,10 @@ void PGXP_DiagCPULoad(uint32_t instr, uint32_t addr, uint32_t value,
 		window.cpu_load_invalid_state[memory_state]++;
 		window.cpu_load_invalid_state_op[memory_state][op_index]++;
 	}
+	trace_record(PGXP_TRACE_EVENT_LOAD,
+		!result->trace_id ? 1 : (invalid_result ? 2 :
+		(result->value != value ? 3 : 0)), result->trace_id,
+		result->trace_stage, (uint8_t)reg, addr, value, result->value, result);
 
 	/* Keep separate bounded samples for unsupported, never-written, and
 	 * previously-written shadow memory. Otherwise early BIOS traffic would
@@ -498,6 +618,44 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 	}
 }
 
+void PGXP_DiagTraceGTE(PGXP_value* value)
+{
+	if (!value)
+		return;
+	value->trace_id = trace_next_id++;
+	value->trace_stage = PGXP_TRACE_GTE;
+	trace_record(PGXP_TRACE_EVENT_GTE, 0, value->trace_id,
+		value->trace_stage, 0, 0, value->value, value->value, value);
+}
+
+void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value)
+{
+	if (!trace_metadata_valid(value))
+		return;
+	value->trace_stage = PGXP_TRACE_MFC2;
+	trace_record(PGXP_TRACE_EVENT_MFC2, 0, value->trace_id,
+		value->trace_stage,
+		(uint16_t)((((instr >> 11) & 31) << 5) | ((instr >> 16) & 31)),
+		instr, value->value, value->value, value);
+}
+
+void PGXP_DiagTraceShift(uint32_t instr, uint32_t before, uint32_t after,
+		int arithmetic, unsigned reason, PGXP_value* value)
+{
+	uint64_t id = trace_metadata_valid(value) ? value->trace_id : 0;
+	uint8_t stage = value ? value->trace_stage : 0;
+
+	if (reason == 0 && value && id)
+	{
+		stage = arithmetic ? PGXP_TRACE_SRA5 : PGXP_TRACE_SLL5;
+		value->trace_stage = stage;
+	}
+	trace_record(arithmetic ? PGXP_TRACE_EVENT_SRA5 : PGXP_TRACE_EVENT_SLL5,
+		(uint8_t)reason, id, stage,
+		(uint16_t)((((instr >> 16) & 31) << 5) | ((instr >> 11) & 31)),
+		instr, before, after, value);
+}
+
 int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic)
 {
@@ -508,12 +666,25 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 	Validate(&CPU_reg[source], before);
 	result = CPU_reg[source];
 	PGXP_DiagShift(instr, before, after, arithmetic);
-	if ((result.flags & VALID_01) != VALID_01 || result.value != before ||
-	    !lineage_reg[dest].valid ||
-	    lineage_reg[dest].stage != (arithmetic ? 3u : 2u))
+	if ((result.flags & VALID_01) != VALID_01)
+	{
+		PGXP_DiagTraceShift(instr, before, after, arithmetic, 2, &result);
 		return 0;
+	}
+	if (result.value != before)
+	{
+		PGXP_DiagTraceShift(instr, before, after, arithmetic, 3, &result);
+		return 0;
+	}
+	if (!lineage_reg[dest].valid ||
+	    lineage_reg[dest].stage != (arithmetic ? 3u : 2u))
+	{
+		PGXP_DiagTraceShift(instr, before, after, arithmetic, 4, &result);
+		return 0;
+	}
 
 	result.value = after;
+	PGXP_DiagTraceShift(instr, before, after, arithmetic, 0, &result);
 	CPU_reg[dest] = result;
 	if (arithmetic)
 		window.lineage_preserve_sra5++;
@@ -545,6 +716,9 @@ void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
 		return;
 	result.value = after;
 	CPU_reg[dest] = result;
+	trace_record(PGXP_TRACE_EVENT_CPU, 0, result.trace_id,
+		result.trace_stage, (uint16_t)((source << 5) | dest), 0,
+		before, after, &result);
 	lineage_reg[dest] = prior;
 	window.lineage_identity_preserve++;
 	return;
@@ -669,6 +843,21 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 	window.lineage_transform_semantic[semantic]++;
 	if (result_state == 3)
 		window.lineage_transform_propagated++;
+	if (trace_metadata_valid(source_shadow))
+	{
+		int result_trace_valid = trace_metadata_valid(result_shadow);
+		uint8_t trace_reason = result_trace_valid &&
+			result_shadow->trace_id == source_shadow->trace_id ? 0 :
+			(!result_trace_valid ? 1 : 5);
+		if ((result_shadow->flags & VALID_01) != VALID_01)
+			trace_reason = 2;
+		else if (result_shadow->value != gpr[dest])
+			trace_reason = 3;
+		trace_record(PGXP_TRACE_EVENT_CPU, trace_reason,
+			source_shadow->trace_id, source_shadow->trace_stage,
+			(uint16_t)((source << 5) | dest), instr, expected,
+			gpr[dest], result_shadow);
+	}
 
 	transform_class = primary == 0 ? special : 0x40 + primary;
 	transition_samples = &lineage_transform_samples[transform_class]
@@ -712,6 +901,12 @@ void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 	uint32_t word_addr = gpu_source_word_addr(addr);
 	PGXP_diag_lineage* dest;
 	const PGXP_diag_lineage* prior = &lineage_reg[source];
+	const PGXP_value* shadow = &CPU_reg[source];
+
+	trace_record(PGXP_TRACE_EVENT_STORE,
+		!shadow->trace_id ? 1 : ((shadow->flags & VALID_01) != VALID_01 ? 2 :
+		(shadow->value != value ? 3 : 0)), shadow->trace_id,
+		shadow->trace_stage, (uint8_t)source, addr, value, shadow->value, shadow);
 
 	if (word_addr >= UINT32_C(0x00200000))
 		return;
@@ -761,6 +956,12 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 	provenance->shadow_value = shadow ? shadow->value : 0;
 	provenance->shadow_flags = shadow ? shadow->flags : 0;
 	provenance->shadow_count = shadow ? shadow->count : 0;
+	if (shadow)
+		trace_record(PGXP_TRACE_EVENT_FIFO,
+			!shadow->trace_id ? 1 : ((shadow->flags & VALID_01) != VALID_01 ? 2 :
+			(shadow->value != value ? 3 : 0)), shadow->trace_id,
+			shadow->trace_stage, (uint8_t)pos, addr, value,
+			shadow->value, shadow);
 
 	{
 		uint32_t word_addr = gpu_source_word_addr(addr);
@@ -809,7 +1010,14 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos)
 {
 	if (slot < 16 && fifo_pos < 32)
+	{
+		const PGXP_value* shadow;
 		cb_provenance[slot] = fifo_provenance[fifo_pos];
+		shadow = PGXP_ReadCB(slot);
+		trace_record(PGXP_TRACE_EVENT_CB, !shadow->trace_id ? 1 : 0,
+			shadow->trace_id, shadow->trace_stage, (uint8_t)slot, fifo_pos,
+			shadow->value, shadow->value, shadow);
+	}
 }
 
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
@@ -826,6 +1034,29 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		float x, float y, float w, int valid_w,
 		int valid_xy, int value_match)
 {
+	uint8_t terminal_reason;
+
+	if (source == PGXP_DIAG_VERTEX_TRACKED)
+		terminal_reason = 0;
+	else if (source == PGXP_DIAG_VERTEX_CACHE)
+		terminal_reason = 6;
+	else if (!trace_metadata_valid(shadow))
+		terminal_reason = 1;
+	else if (!valid_xy && !value_match)
+		terminal_reason = 4;
+	else if (!valid_xy)
+		terminal_reason = 2;
+	else
+		terminal_reason = 3;
+	window.trace_terminal[source][terminal_reason]++;
+	if (shadow)
+		trace_record(PGXP_TRACE_EVENT_VERTEX, terminal_reason,
+			shadow->trace_id, PGXP_TRACE_VERTEX, (uint8_t)slot,
+			cb_provenance[slot].addr, value, shadow->value, shadow);
+	if (source == PGXP_DIAG_VERTEX_NATIVE &&
+	    trace_metadata_valid(shadow))
+		trace_dump_chain(shadow->trace_id, terminal_reason);
+
 	switch (source)
 	{
 		case PGXP_DIAG_VERTEX_TRACKED: window.vertex_tracked++; break;
@@ -1070,6 +1301,46 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_transform_semantic[5],
 		(unsigned long long)window.lineage_transform_semantic[6],
 		(unsigned long long)window.lineage_transform_semantic[7]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_trace_ledger] f=%llu gte=%llu mfc2=%llu sll=%llu "
+		"sra=%llu cpu=%llu store=%llu load=%llu fifo=%llu cb=%llu vertex=%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_GTE],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_MFC2],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_SLL5],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_SRA5],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_CPU],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_STORE],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_LOAD],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_FIFO],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_CB],
+		(unsigned long long)window.trace_events[PGXP_TRACE_EVENT_VERTEX]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_trace_reason] f=%llu ok/no-id/invalid/mismatch/lineage/other/cache/reserved="
+		"%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.trace_reasons[0],
+		(unsigned long long)window.trace_reasons[1],
+		(unsigned long long)window.trace_reasons[2],
+		(unsigned long long)window.trace_reasons[3],
+		(unsigned long long)window.trace_reasons[4],
+		(unsigned long long)window.trace_reasons[5],
+		(unsigned long long)window.trace_reasons[6],
+		(unsigned long long)window.trace_reasons[7]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_trace_terminal] f=%llu tracked=%llu cache=%llu native="
+		"%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.trace_terminal[0][0],
+		(unsigned long long)window.trace_terminal[1][6],
+		(unsigned long long)window.trace_terminal[2][0],
+		(unsigned long long)window.trace_terminal[2][1],
+		(unsigned long long)window.trace_terminal[2][2],
+		(unsigned long long)window.trace_terminal[2][3],
+		(unsigned long long)window.trace_terminal[2][4],
+		(unsigned long long)window.trace_terminal[2][5],
+		(unsigned long long)window.trace_terminal[2][6],
+		(unsigned long long)window.trace_terminal[2][7]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_load_summary] f=%llu loads=%llu untracked=%llu "
 		"invalid-result=%llu op=%llu/%llu/%llu/%llu/%llu/%llu/%llu "

@@ -33,6 +33,11 @@ typedef struct PGXP_value_Tag
    uint16_t    gFlags;
    uint8_t     lFlags;
    uint8_t     hFlags;
+#if PGXP_DIAG
+   uint64_t    trace_id;
+   uint8_t     trace_stage;
+   uint8_t     trace_reserved[7];
+#endif
 } PGXP_value;
 
 #endif/*_PGXP_TYPES_H_*/

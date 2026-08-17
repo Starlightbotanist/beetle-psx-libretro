@@ -117,6 +117,7 @@ void PGXP_pushSXYZ2f(float _x, float _y, float _z, uint32_t _v)
 	SXY2.value	= _v;
 	SXY2.flags	= VALID_ALL;
 	SXY2.count	= uCount++;
+	PGXP_DiagTraceGTE(&SXY2);
 	PGXP_DiagGTEVertex(_x, _y, _z, _v);
 
 	/* cache value in GPU plugin */
@@ -338,6 +339,7 @@ void PGXP_GTE_MFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
 	Validate(&GTE_data_reg[rd(instr)], rdVal);
 	CPU_reg[rt(instr)] = GTE_data_reg[rd(instr)];
 	CPU_reg[rt(instr)].value = rtVal;
+	PGXP_DiagTraceMFC2(instr, &CPU_reg[rt(instr)]);
 	PGXP_CPU_MarkMFC2(rt(instr));
 	PGXP_DiagMFC2(instr, rtVal);
 }

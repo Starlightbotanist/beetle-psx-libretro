@@ -25,6 +25,7 @@
 #include "../../pgxp/pgxp_gpu.h"
 #include "../../pgxp/pgxp_gte.h"
 #include "../../pgxp/pgxp_cpu.h"
+#include "../../pgxp/pgxp_diag.h"
 #include "../../pgxp/pgxp_mem.h"
 #include "../../pgxp/pgxp_main.h"
 #include "../../pgxp/pgxp_types.h"
@@ -288,19 +289,30 @@ static void test_mfc2_sll5_sra5(void)
 
    PGXP_pushSXYZ2f(precise_x, precise_y, 1.f, packed);
    PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+   if (!CPU_reg[8].trace_id || CPU_reg[8].trace_stage != PGXP_TRACE_MFC2)
+      fail("MFC2 trace identity not attached", CPU_reg[8].trace_stage,
+           PGXP_TRACE_MFC2);
    instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
    if (!PGXP_CPU_TryMFC2SLL5(instr, sll, packed))
       fail("MFC2/SLL5 not recognized", 0, 1);
+   PGXP_DiagTraceShift(instr, packed, sll, 0, 0, &CPU_reg[9]);
    if (CPU_reg[9].x != precise_x || CPU_reg[9].y != precise_y ||
        CPU_reg[9].value != sll)
       fail("MFC2/SLL5 lost precise XY", CPU_reg[9].value, sll);
+   if (CPU_reg[9].trace_stage != PGXP_TRACE_SLL5)
+      fail("SLL5 trace stage not advanced", CPU_reg[9].trace_stage,
+           PGXP_TRACE_SLL5);
 
    instr = INSTR_RT(9) | INSTR_RD(9) | INSTR_SA(5) | 0x03u;
    if (!PGXP_CPU_TryMFC2SLL5SRA5(instr, sra, sll))
       fail("MFC2/SLL5/SRA5 not recognized", 0, 1);
+   PGXP_DiagTraceShift(instr, sll, sra, 1, 0, &CPU_reg[9]);
    if (CPU_reg[9].x != precise_x || CPU_reg[9].y != precise_y ||
        CPU_reg[9].value != sra)
       fail("MFC2/SLL5/SRA5 lost precise XY", CPU_reg[9].value, sra);
+   if (CPU_reg[9].trace_stage != PGXP_TRACE_SRA5)
+      fail("SRA5 trace stage not advanced", CPU_reg[9].trace_stage,
+           PGXP_TRACE_SRA5);
 }
 
 static void test_cpu_math_invariants(void)

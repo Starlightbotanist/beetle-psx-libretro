@@ -10,6 +10,19 @@ enum PGXP_diag_vertex_source
 	PGXP_DIAG_VERTEX_NATIVE
 };
 
+enum PGXP_diag_trace_stage
+{
+	PGXP_TRACE_NONE = 0,
+	PGXP_TRACE_GTE,
+	PGXP_TRACE_MFC2,
+	PGXP_TRACE_SLL5,
+	PGXP_TRACE_SRA5,
+	PGXP_TRACE_MEMORY,
+	PGXP_TRACE_FIFO,
+	PGXP_TRACE_CB,
+	PGXP_TRACE_VERTEX
+};
+
 #if PGXP_DIAG
 
 void PGXP_DiagInit(void);
@@ -23,6 +36,10 @@ void PGXP_DiagCPUDispatch(uint32_t instr, uint32_t addr, unsigned dest,
 		uint32_t before_mask, uint32_t before_flags,
 		uint16_t before_gflags);
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value);
+void PGXP_DiagTraceGTE(PGXP_value* value);
+void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value);
+void PGXP_DiagTraceShift(uint32_t instr, uint32_t before, uint32_t after,
+		int arithmetic, unsigned reason, PGXP_value* value);
 void PGXP_DiagMFC2(uint32_t instr, uint32_t value);
 void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 		int arithmetic);
@@ -54,6 +71,9 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value);
 #define PGXP_DiagCPUInvalidMask() UINT32_C(0)
 #define PGXP_DiagCPUDispatch(instr, addr, dest, before_mask, before_flags, before_gflags) ((void)0)
 #define PGXP_DiagGTEVertex(x, y, z, value) ((void)0)
+#define PGXP_DiagTraceGTE(value) ((void)0)
+#define PGXP_DiagTraceMFC2(instr, value) ((void)0)
+#define PGXP_DiagTraceShift(instr, before, after, arithmetic, reason, value) ((void)0)
 #define PGXP_DiagMFC2(instr, value) ((void)0)
 #define PGXP_DiagShift(instr, before, after, arithmetic) ((void)0)
 #define PGXP_DiagPreserveShift(instr, before, after, arithmetic) 0

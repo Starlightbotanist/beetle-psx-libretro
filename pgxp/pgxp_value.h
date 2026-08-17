@@ -82,8 +82,14 @@ extern "C" {
 #define INV_VALID_ALL  (ALL ^ VALID_ALL)
 //} PGXP_value_flags;
 
-        static const PGXP_value PGXP_value_invalid_address = { 0.f, 0.f, 0.f, {0}, 0, 0, INVALID_ADDRESS, 0, 0 };
-        static const PGXP_value PGXP_value_zero = { 0.f, 0.f, 0.f, {0}, 0, VALID_ALL, 0, 0, 0 };
+#if PGXP_DIAG
+#define PGXP_DIAG_VALUE_TRACE_INIT , 0, 0, {0}
+#else
+#define PGXP_DIAG_VALUE_TRACE_INIT
+#endif
+        static const PGXP_value PGXP_value_invalid_address = { 0.f, 0.f, 0.f, {0}, 0, 0, INVALID_ADDRESS, 0, 0 PGXP_DIAG_VALUE_TRACE_INIT };
+        static const PGXP_value PGXP_value_zero = { 0.f, 0.f, 0.f, {0}, 0, VALID_ALL, 0, 0, 0 PGXP_DIAG_VALUE_TRACE_INIT };
+#undef PGXP_DIAG_VALUE_TRACE_INIT
 
 	void	SetValue(PGXP_value *pV, uint32_t psxV);
 	void	MakeValid(PGXP_value *pV, uint32_t psxV);
