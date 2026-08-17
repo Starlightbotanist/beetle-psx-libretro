@@ -622,6 +622,8 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 {
 	if (!value)
 		return;
+	/* A GTE result starts a fresh provenance chain. */
+	memset(value->trace_reserved, 0, sizeof(value->trace_reserved));
 	value->trace_id = trace_next_id++;
 	value->trace_stage = PGXP_TRACE_GTE;
 	trace_record(PGXP_TRACE_EVENT_GTE, 0, value->trace_id,
@@ -678,10 +680,18 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 	}
 	/* In diagnostic mode, a traced SLL5 can prove the SRA5 handoff even
 	 * when the legacy lineage table was not updated for this register. */
+	if (arithmetic && (instr >> 6 & 31) == 5 &&
+	    result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
+	    result.trace_reserved[0] != 0)
+	{
+		PGXP_DiagTraceShift(instr, before, after, arithmetic, 5, &result);
+		return 0;
+	}
 	if ((!lineage_reg[dest].valid ||
 	     lineage_reg[dest].stage != (arithmetic ? 3u : 2u)) &&
-	    !(arithmetic && result.trace_id != 0 &&
-	      result.trace_stage == PGXP_TRACE_SLL5))
+	    !(arithmetic && (instr >> 6 & 31) == 5 &&
+	      result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
+	      result.trace_reserved[0] == 0))
 	{
 		PGXP_DiagTraceShift(instr, before, after, arithmetic, 4, &result);
 		return 0;
@@ -803,6 +813,12 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 	     (special == 0x03 && lineage_reg[dest].valid &&
 	      lineage_reg[dest].stage == 3)))
 		return;
+
+	/* In Memory Only mode, a non-identity CPU write leaves CPU_reg[dest]
+	 * unchanged. Mark any traced shadow there as stale while retaining its
+	 * trace metadata for the diagnostic ledger. */
+	if (trace_metadata_valid(&CPU_reg[dest]))
+		CPU_reg[dest].trace_reserved[0] = 1;
 
 	if (lineage_pre_instr != instr)
 		return;
