@@ -942,6 +942,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
    #define DO_LDS() { s_cpu.GPR_full[LDWhich] = LDValue; ReadAbsorb[LDWhich] = LDAbsorb; ReadFudge = LDWhich; ReadAbsorbWhich |= LDWhich & 0x1F; LDWhich = 0x22; }
    #define BEGIN_OPF(name) { op_##name:
+   #define PGXP_OBSERVE_CPU() do { \
+	if ((PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_MODE_CPU)) == PGXP_MODE_MEMORY) \
+	 PGXP_CPU_ObserveInstruction(instr, GPR); \
+   } while (0)
 
 #if HAVE_COMPUTED_GOTO && PSX_DISPATCH_REPLICATE
    /* Replicated dispatch: instead of every handler funnelling through
@@ -996,12 +1000,12 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 __asm__ __volatile__ ("" : "+r" (dispatch_target_) : "i" (__COUNTER__)); \
 	 goto *dispatch_target_; \
 	}
-   #define END_OPF { PC = new_PC; new_PC = new_PC + 4; BDBT = 0; REDISPATCH } }
+   #define END_OPF { PGXP_OBSERVE_CPU(); PC = new_PC; new_PC = new_PC + 4; BDBT = 0; REDISPATCH } }
    /* Branch handlers already set PC/new_PC/BDBT; they skip the
     * OpDone tail, matching the old `goto SkipNPCStuff`. */
    #define BRANCH_DISPATCH REDISPATCH
 #else
-   #define END_OPF goto OpDone; }
+   #define END_OPF PGXP_OBSERVE_CPU(); goto OpDone; }
    #define BRANCH_DISPATCH goto SkipNPCStuff;
 #endif
 

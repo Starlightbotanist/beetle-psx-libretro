@@ -60,6 +60,7 @@ typedef struct
 	uint32_t gte_reg;
 	uint32_t stage;
 	uint32_t valid;
+	uint32_t transform_observed;
 } PGXP_diag_lineage;
 
 typedef struct
@@ -111,6 +112,7 @@ typedef struct
 	uint64_t lineage_identity_matches;
 	uint64_t lineage_identity_preserve;
 	uint64_t lineage_drops;
+	uint64_t lineage_transforms;
 	uint64_t lineage_store2;
 	uint64_t lineage_store3;
 	uint64_t lineage_fifo;
@@ -128,6 +130,7 @@ static uint32_t vertex_samples;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
 static uint32_t lineage_drop_samples;
+static uint32_t lineage_transform_samples;
 static uint32_t vertex_sample_addr[PGXP_DIAG_LOAD_SAMPLES];
 static uint32_t vertex_sample_value[PGXP_DIAG_LOAD_SAMPLES];
 static PGXP_diag_gpu_provenance fifo_provenance[32];
@@ -288,6 +291,7 @@ void PGXP_DiagInit(void)
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
 	lineage_drop_samples = 0;
+	lineage_transform_samples = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -524,6 +528,94 @@ void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
 	lineage_reg[dest] = prior;
 	window.lineage_identity_preserve++;
 	return;
+}
+
+void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
+{
+	uint32_t primary = instr >> 26;
+	uint32_t special = instr & 63;
+	uint32_t dest = 0;
+	uint32_t source = 0;
+	uint32_t other = 0;
+	PGXP_diag_lineage* lineage;
+	uint32_t expected;
+	int identity = 0;
+
+	if (primary == 0)
+	{
+		switch (special)
+		{
+			case 0x00: case 0x02: case 0x03:
+				dest = (instr >> 11) & 31;
+				source = (instr >> 16) & 31;
+				break;
+			case 0x04: case 0x06: case 0x07:
+				dest = (instr >> 11) & 31;
+				source = (instr >> 16) & 31;
+				other = (instr >> 21) & 31;
+				break;
+			case 0x20: case 0x21: case 0x22: case 0x23:
+			case 0x24: case 0x25: case 0x26: case 0x27:
+			case 0x2a: case 0x2b:
+				dest = (instr >> 11) & 31;
+				source = (instr >> 21) & 31;
+				other = (instr >> 16) & 31;
+				identity = (special == 0x20 || special == 0x21 ||
+					special == 0x25 || special == 0x26) &&
+					(source == 0 || other == 0);
+				break;
+			default:
+				return;
+		}
+	}
+	else
+	{
+		switch (primary)
+		{
+			case 0x08: case 0x09: case 0x0a: case 0x0b:
+			case 0x0c: case 0x0d: case 0x0e:
+				dest = (instr >> 16) & 31;
+				source = (instr >> 21) & 31;
+				identity = (primary == 0x08 || primary == 0x09 ||
+					primary == 0x0d || primary == 0x0e) &&
+					(instr & 0xffff) == 0;
+				break;
+			default:
+				return;
+		}
+	}
+	if (dest == 0 || identity)
+		return;
+	if (!lineage_reg[source].valid && lineage_reg[other].valid)
+		source = other;
+	lineage = &lineage_reg[source];
+	if (!lineage->valid || lineage->transform_observed)
+		return;
+	expected = lineage->stage == 3 ? lineage->sra_value :
+		lineage->stage == 2 ? lineage->sll_value : lineage->mfc2_value;
+	if (lineage_reg[dest].valid)
+	{
+		uint32_t dest_expected = lineage_reg[dest].stage == 3 ?
+			lineage_reg[dest].sra_value : lineage_reg[dest].stage == 2 ?
+			lineage_reg[dest].sll_value : lineage_reg[dest].mfc2_value;
+		if (dest_expected == gpr[dest])
+			return;
+	}
+	lineage->transform_observed = 1;
+	window.lineage_transforms++;
+	if (lineage_transform_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_lineage_transform] n=%u mf=%u instr=%08x "
+			"op=%02x func=%02x rs=%u rt=%u rd=%u src=%u dest=%u "
+			"stage=%u gte=%u value=%08x other=%08x result=%08x\n",
+			lineage_transform_samples + 1, mode_frame, instr,
+			primary, special, (instr >> 21) & 31,
+			(instr >> 16) & 31, (instr >> 11) & 31,
+			source, dest, lineage->stage, lineage->gte_reg,
+			expected, gpr[other], gpr[dest]);
+		lineage_transform_samples++;
+	}
 }
 
 void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
@@ -834,7 +926,8 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
 		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
-		"identity=%llu/%llu/%llu drops=%llu store=%llu/%llu fifo=%llu\n",
+		"identity=%llu/%llu/%llu drops=%llu transforms=%llu "
+		"store=%llu/%llu fifo=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)window.lineage_mfc2,
 		(unsigned long long)window.lineage_sll5_matches,
@@ -847,6 +940,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_identity_candidates,
 		(unsigned long long)window.lineage_identity_preserve,
 		(unsigned long long)window.lineage_drops,
+		(unsigned long long)window.lineage_transforms,
 		(unsigned long long)window.lineage_store2,
 		(unsigned long long)window.lineage_store3,
 		(unsigned long long)window.lineage_fifo);
