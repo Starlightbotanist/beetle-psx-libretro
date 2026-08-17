@@ -53,6 +53,7 @@ static uint32_t gte_pack(int32_t m1, int32_t m2, int32_t m3, uint8_t cd)
 #define INSTR_RT(rt)          (((uint32_t)(rt) & 0x1F) << 16)
 #define INSTR_RD(rd)          (((uint32_t)(rd) & 0x1F) << 11)
 #define INSTR_RS(rs)          (((uint32_t)(rs) & 0x1F) << 21)
+#define INSTR_SA(sa)          (((uint32_t)(sa) & 0x1F) << 6)
 
 /* Scratch addresses in tracked RAM. */
 #define LIST_ADDR   0x80100000u
@@ -276,6 +277,32 @@ static void set_cpu_value(unsigned reg, uint32_t value)
    SetValue(&CPU_reg[reg], value);
 }
 
+static void test_mfc2_sll5_sra5(void)
+{
+   const float precise_x = 123.25f;
+   const float precise_y = -45.5f;
+   const uint32_t packed = 0xFFD3007Bu;
+   const uint32_t sll = packed << 5;
+   const uint32_t sra = (uint32_t)((int32_t)sll >> 5);
+   uint32_t instr;
+
+   PGXP_pushSXYZ2f(precise_x, precise_y, 1.f, packed);
+   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   if (!PGXP_CPU_TryMFC2SLL5(instr, sll, packed))
+      fail("MFC2/SLL5 not recognized", 0, 1);
+   if (CPU_reg[9].x != precise_x || CPU_reg[9].y != precise_y ||
+       CPU_reg[9].value != sll)
+      fail("MFC2/SLL5 lost precise XY", CPU_reg[9].value, sll);
+
+   instr = INSTR_RT(9) | INSTR_RD(9) | INSTR_SA(5) | 0x03u;
+   if (!PGXP_CPU_TryMFC2SLL5SRA5(instr, sra, sll))
+      fail("MFC2/SLL5/SRA5 not recognized", 0, 1);
+   if (CPU_reg[9].x != precise_x || CPU_reg[9].y != precise_y ||
+       CPU_reg[9].value != sra)
+      fail("MFC2/SLL5/SRA5 lost precise XY", CPU_reg[9].value, sra);
+}
+
 static void test_cpu_math_invariants(void)
 {
    uint32_t instr;
@@ -324,7 +351,10 @@ int main(void)
    printf("[T5] negative control: CPU-composed colour must be refused\n");
    test_untracked_colour();
 
-   printf("[T6] CPU bitwise/comparison invariants\n");
+   printf("[T6] MFC2 -> SLL5 -> SRA5 precision preservation\n");
+   test_mfc2_sll5_sra5();
+
+   printf("[T7] CPU bitwise/comparison invariants\n");
    test_cpu_math_invariants();
 
    if (failures)

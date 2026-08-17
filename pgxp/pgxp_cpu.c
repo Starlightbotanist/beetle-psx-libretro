@@ -16,6 +16,8 @@ PGXP_value CP0_reg_mem[32];
 
 PGXP_value* CPU_reg = CPU_reg_mem;
 PGXP_value* CP0_reg = CP0_reg_mem;
+static uint8_t CPU_reg_mfc2[34];
+static uint8_t CPU_reg_mfc2_sll5[34];
 
 /* Instruction register decoding */
 #define op(_instr)		(_instr >> 26)			/* The op part of the instruction register */
@@ -30,6 +32,62 @@ void PGXP_InitCPU()
 {
 	memset(CPU_reg_mem, 0, sizeof(CPU_reg_mem));
 	memset(CP0_reg_mem, 0, sizeof(CP0_reg_mem));
+	memset(CPU_reg_mfc2, 0, sizeof(CPU_reg_mfc2));
+	memset(CPU_reg_mfc2_sll5, 0, sizeof(CPU_reg_mfc2_sll5));
+}
+
+void PGXP_CPU_MarkMFC2(uint32_t reg)
+{
+	if (reg < 34)
+	{
+		CPU_reg_mfc2[reg] = 1;
+		CPU_reg_mfc2_sll5[reg] = 0;
+	}
+}
+
+int PGXP_CPU_TryMFC2SLL5(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
+{
+	PGXP_value result;
+	uint32_t sourceReg = rt(instr);
+	uint32_t destReg = rd(instr);
+
+	CPU_reg_mfc2_sll5[destReg] = 0;
+	if (sa(instr) != 5 || !CPU_reg_mfc2[sourceReg])
+		return 0;
+
+	Validate(&CPU_reg[sourceReg], rtVal);
+	if ((CPU_reg[sourceReg].flags & VALID_01) != VALID_01 ||
+		CPU_reg[sourceReg].value != rtVal)
+		return 0;
+
+	result = CPU_reg[sourceReg];
+	result.value = rdVal;
+	CPU_reg[destReg] = result;
+	CPU_reg_mfc2[destReg] = 0;
+	CPU_reg_mfc2_sll5[destReg] = 1;
+	return 1;
+}
+
+int PGXP_CPU_TryMFC2SLL5SRA5(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
+{
+	PGXP_value result;
+	uint32_t sourceReg = rt(instr);
+	uint32_t destReg = rd(instr);
+
+	if (sa(instr) != 5 || destReg != sourceReg ||
+		!CPU_reg_mfc2_sll5[sourceReg])
+		return 0;
+
+	CPU_reg_mfc2_sll5[sourceReg] = 0;
+	Validate(&CPU_reg[sourceReg], rtVal);
+	if ((CPU_reg[sourceReg].flags & VALID_01) != VALID_01 ||
+		CPU_reg[sourceReg].value != rtVal)
+		return 0;
+
+	result = CPU_reg[sourceReg];
+	result.value = rdVal;
+	CPU_reg[destReg] = result;
+	return 1;
 }
 
 /* invalidate register (invalid 8 bit read) */
@@ -1455,12 +1513,73 @@ void PGXP_CPU_BeginObserveInstruction(uint32_t instr, const uint32_t* gpr)
 {
 	PGXP_DiagBeginInstruction(instr, gpr);
 }
+#endif
 
 void PGXP_CPU_ObserveInstruction(uint32_t instr, const uint32_t* gpr)
 {
+#if PGXP_DIAG
 	PGXP_DiagObserveInstruction(instr, gpr);
-}
 #endif
+	uint32_t primary = op(instr);
+	uint32_t dest = 0;
+	int writes = 0;
+
+	(void)gpr;
+	if (primary == 0)
+	{
+		switch (func(instr))
+		{
+		case 0x00: case 0x02: case 0x03:
+		case 0x04: case 0x06: case 0x07:
+		case 0x09: case 0x10: case 0x12:
+		case 0x20: case 0x21: case 0x22: case 0x23:
+		case 0x24: case 0x25: case 0x26: case 0x27:
+		case 0x2A: case 0x2B:
+			dest = rd(instr);
+			writes = 1;
+			break;
+		}
+	}
+	else if (primary == 0x01)
+	{
+		uint32_t subop = rt(instr);
+		if (subop >= 0x10 && subop <= 0x13)
+		{
+			dest = 31;
+			writes = 1;
+		}
+	}
+	else if (primary == 0x03)
+	{
+		dest = 31;
+		writes = 1;
+	}
+	else if ((primary >= 0x08 && primary <= 0x0F) ||
+		(primary >= 0x20 && primary <= 0x26) || primary == 0x30)
+	{
+		dest = rt(instr);
+		writes = 1;
+	}
+	else if (primary == 0x10 || primary == 0x12)
+	{
+		uint32_t cop_op = rs(instr);
+		if (cop_op == 0 || cop_op == 2)
+		{
+			dest = rt(instr);
+			writes = 1;
+		}
+	}
+
+	if (!writes || dest == 0)
+		return;
+	if (primary == 0x12 && rs(instr) == 0)
+		return;
+	if (primary == 0 && func(instr) == 0x00)
+		return;
+
+	CPU_reg_mfc2[dest] = 0;
+	CPU_reg_mfc2_sll5[dest] = 0;
+}
 
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
