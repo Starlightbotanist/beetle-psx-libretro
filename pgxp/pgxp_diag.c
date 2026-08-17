@@ -130,7 +130,7 @@ static uint32_t vertex_samples;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
 static uint32_t lineage_drop_samples;
-static uint32_t lineage_transform_samples;
+static uint32_t lineage_transform_samples[128];
 static uint32_t vertex_sample_addr[PGXP_DIAG_LOAD_SAMPLES];
 static uint32_t vertex_sample_value[PGXP_DIAG_LOAD_SAMPLES];
 static PGXP_diag_gpu_provenance fifo_provenance[32];
@@ -291,7 +291,8 @@ void PGXP_DiagInit(void)
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
 	lineage_drop_samples = 0;
-	lineage_transform_samples = 0;
+	memset(lineage_transform_samples, 0,
+		sizeof(lineage_transform_samples));
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -539,6 +540,8 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 	uint32_t other = 0;
 	PGXP_diag_lineage* lineage;
 	uint32_t expected;
+	uint32_t transform_class;
+	uint32_t* class_samples;
 	int identity = 0;
 
 	if (primary == 0)
@@ -603,18 +606,28 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 	}
 	lineage->transform_observed = 1;
 	window.lineage_transforms++;
-	if (lineage_transform_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
+	transform_class = primary == 0 ? special : 0x40 + primary;
+	class_samples = &lineage_transform_samples[transform_class];
+	if (*class_samples < 8 && log_cb)
 	{
+		const PGXP_value* source_shadow = &CPU_reg[source];
+		const PGXP_value* other_shadow = &CPU_reg[other];
 		log_cb(RETRO_LOG_INFO,
-			"[pgxp_lineage_transform] n=%u mf=%u instr=%08x "
+			"[pgxp_lineage_transform] class=%u n=%u mf=%u instr=%08x "
 			"op=%02x func=%02x rs=%u rt=%u rd=%u src=%u dest=%u "
-			"stage=%u gte=%u value=%08x other=%08x result=%08x\n",
-			lineage_transform_samples + 1, mode_frame, instr,
+			"stage=%u gte=%u value=%08x other=%08x result=%08x "
+			"src_shadow=%08x/%08x/%.3f/%.3f "
+			"other_shadow=%08x/%08x/%.3f/%.3f\n",
+			transform_class, *class_samples + 1, mode_frame, instr,
 			primary, special, (instr >> 21) & 31,
 			(instr >> 16) & 31, (instr >> 11) & 31,
 			source, dest, lineage->stage, lineage->gte_reg,
-			expected, gpr[other], gpr[dest]);
-		lineage_transform_samples++;
+			expected, gpr[other], gpr[dest],
+			source_shadow->value, source_shadow->flags,
+			source_shadow->x, source_shadow->y,
+			other_shadow->value, other_shadow->flags,
+			other_shadow->x, other_shadow->y);
+		(*class_samples)++;
 	}
 }
 
