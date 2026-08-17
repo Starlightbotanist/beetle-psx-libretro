@@ -61,6 +61,9 @@ typedef struct
 	uint32_t stage;
 	uint32_t valid;
 	uint32_t transform_observed;
+	uint32_t current_value;
+	uint32_t depth;
+	uint32_t chain_hash;
 } PGXP_diag_lineage;
 
 typedef struct
@@ -113,6 +116,9 @@ typedef struct
 	uint64_t lineage_identity_preserve;
 	uint64_t lineage_drops;
 	uint64_t lineage_transforms;
+	uint64_t lineage_transform_state[4][4];
+	uint64_t lineage_transform_semantic[8];
+	uint64_t lineage_transform_propagated;
 	uint64_t lineage_store2;
 	uint64_t lineage_store3;
 	uint64_t lineage_fifo;
@@ -315,11 +321,7 @@ void PGXP_DiagCPUDispatch(uint32_t instr, uint32_t addr, unsigned dest,
 		{
 			if (lineage_reg[dest].valid)
 			{
-				uint32_t expected = lineage_reg[dest].stage == 3 ?
-					lineage_reg[dest].sra_value :
-					lineage_reg[dest].stage == 2 ?
-					lineage_reg[dest].sll_value :
-					lineage_reg[dest].mfc2_value;
+				uint32_t expected = lineage_reg[dest].current_value;
 				window.lineage_drops++;
 				if (lineage_drop_samples < PGXP_DIAG_LOAD_SAMPLES &&
 				    log_cb)
@@ -443,6 +445,8 @@ void PGXP_DiagMFC2(uint32_t instr, uint32_t value)
 	lineage->gte_reg = (instr >> 11) & 31;
 	lineage->stage = 1;
 	lineage->valid = 1;
+	lineage->current_value = value;
+	lineage->chain_hash = UINT32_C(2166136261) ^ instr ^ value;
 	lineage_reg_touched |= UINT32_C(1) << dest;
 }
 
@@ -466,6 +470,8 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 		lineage_reg[dest] = prior;
 		lineage_reg[dest].sll_value = after;
 		lineage_reg[dest].stage = 2;
+		lineage_reg[dest].current_value = after;
+		lineage_reg[dest].depth++;
 		window.lineage_sll5_matches++;
 	}
 	else if (arithmetic && shift == 5 && dest == source &&
@@ -474,6 +480,8 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 		lineage_reg[dest] = prior;
 		lineage_reg[dest].sra_value = after;
 		lineage_reg[dest].stage = 3;
+		lineage_reg[dest].current_value = after;
+		lineage_reg[dest].depth++;
 		window.lineage_sra5_matches++;
 	}
 }
@@ -514,8 +522,7 @@ void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
 	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
 	if (source == 0 || before != after || !prior.valid)
 		return;
-	expected = prior.stage == 3 ? prior.sra_value :
-		prior.stage == 2 ? prior.sll_value : prior.mfc2_value;
+	expected = prior.current_value;
 	if (expected != before)
 		return;
 	window.lineage_identity_matches++;
@@ -535,13 +542,12 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 {
 	uint32_t primary = instr >> 26;
 	uint32_t special = instr & 63;
-	uint32_t dest = 0;
-	uint32_t source = 0;
-	uint32_t other = 0;
-	PGXP_diag_lineage* lineage;
-	uint32_t expected;
-	uint32_t transform_class;
+	uint32_t dest = 0, source = 0, other = 0;
+	uint32_t expected, transform_class, semantic = 0;
+	uint32_t source_state, result_state;
 	uint32_t* class_samples;
+	PGXP_diag_lineage prior;
+	const PGXP_value *source_shadow, *other_shadow, *result_shadow;
 	int identity = 0;
 
 	if (primary == 0)
@@ -549,26 +555,20 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 		switch (special)
 		{
 			case 0x00: case 0x02: case 0x03:
-				dest = (instr >> 11) & 31;
-				source = (instr >> 16) & 31;
-				break;
+				dest = (instr >> 11) & 31; source = (instr >> 16) & 31; break;
 			case 0x04: case 0x06: case 0x07:
-				dest = (instr >> 11) & 31;
-				source = (instr >> 16) & 31;
-				other = (instr >> 21) & 31;
-				break;
+				dest = (instr >> 11) & 31; source = (instr >> 16) & 31;
+				other = (instr >> 21) & 31; break;
 			case 0x20: case 0x21: case 0x22: case 0x23:
 			case 0x24: case 0x25: case 0x26: case 0x27:
 			case 0x2a: case 0x2b:
-				dest = (instr >> 11) & 31;
-				source = (instr >> 21) & 31;
+				dest = (instr >> 11) & 31; source = (instr >> 21) & 31;
 				other = (instr >> 16) & 31;
 				identity = (special == 0x20 || special == 0x21 ||
 					special == 0x25 || special == 0x26) &&
 					(source == 0 || other == 0);
 				break;
-			default:
-				return;
+			default: return;
 		}
 	}
 	else
@@ -577,58 +577,89 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 		{
 			case 0x08: case 0x09: case 0x0a: case 0x0b:
 			case 0x0c: case 0x0d: case 0x0e:
-				dest = (instr >> 16) & 31;
-				source = (instr >> 21) & 31;
+				dest = (instr >> 16) & 31; source = (instr >> 21) & 31;
 				identity = (primary == 0x08 || primary == 0x09 ||
 					primary == 0x0d || primary == 0x0e) &&
 					(instr & 0xffff) == 0;
 				break;
-			default:
-				return;
+			default: return;
 		}
 	}
 	if (dest == 0 || identity)
 		return;
 	if (!lineage_reg[source].valid && lineage_reg[other].valid)
 		source = other;
-	lineage = &lineage_reg[source];
-	if (!lineage->valid || lineage->transform_observed)
+	if (!lineage_reg[source].valid)
 		return;
-	expected = lineage->stage == 3 ? lineage->sra_value :
-		lineage->stage == 2 ? lineage->sll_value : lineage->mfc2_value;
-	if (lineage_reg[dest].valid)
-	{
-		uint32_t dest_expected = lineage_reg[dest].stage == 3 ?
-			lineage_reg[dest].sra_value : lineage_reg[dest].stage == 2 ?
-			lineage_reg[dest].sll_value : lineage_reg[dest].mfc2_value;
-		if (dest_expected == gpr[dest])
-			return;
-	}
-	lineage->transform_observed = 1;
+
+	prior = lineage_reg[source];
+	expected = prior.current_value;
+	source_shadow = &CPU_reg[source];
+	other_shadow = &CPU_reg[other];
+	result_shadow = &CPU_reg[dest];
+	source_state = (((source_shadow->flags & VALID_01) == VALID_01) ? 2u : 0u) |
+		(source_shadow->value == expected);
+	result_state = (((result_shadow->flags & VALID_01) == VALID_01) ? 2u : 0u) |
+		(result_shadow->value == gpr[dest]);
+
+	if (gpr[dest] == expected)
+		semantic = 1;
+	else if (other && gpr[dest] == gpr[other])
+		semantic = 2;
+	else if (other && (gpr[dest] ==
+		((expected & 0xffff) | (gpr[other] & 0xffff0000)) ||
+		gpr[dest] == ((gpr[other] & 0xffff) | (expected & 0xffff0000))))
+		semantic = 3;
+	else if ((gpr[dest] & 0xffff) == (expected & 0xffff) ||
+		(gpr[dest] & 0xffff0000) == (expected & 0xffff0000))
+		semantic = 4;
+	else if (primary == 0 && special <= 7)
+		semantic = 5;
+	else if ((primary == 0 && (special == 0x2a || special == 0x2b)) ||
+		primary == 0x0a || primary == 0x0b)
+		semantic = 6;
+	else
+		semantic = 7;
+
 	window.lineage_transforms++;
+	window.lineage_transform_state[source_state][result_state]++;
+	window.lineage_transform_semantic[semantic]++;
+	if (result_state == 3)
+		window.lineage_transform_propagated++;
+
 	transform_class = primary == 0 ? special : 0x40 + primary;
 	class_samples = &lineage_transform_samples[transform_class];
 	if (*class_samples < 8 && log_cb)
 	{
-		const PGXP_value* source_shadow = &CPU_reg[source];
-		const PGXP_value* other_shadow = &CPU_reg[other];
 		log_cb(RETRO_LOG_INFO,
 			"[pgxp_lineage_transform] class=%u n=%u mf=%u instr=%08x "
 			"op=%02x func=%02x rs=%u rt=%u rd=%u src=%u dest=%u "
-			"stage=%u gte=%u value=%08x other=%08x result=%08x "
+			"stage=%u depth=%u chain=%08x gte=%u value=%08x other=%08x "
+			"result=%08x state=%u/%u semantic=%u "
 			"src_shadow=%08x/%08x/%.3f/%.3f "
-			"other_shadow=%08x/%08x/%.3f/%.3f\n",
+			"other_shadow=%08x/%08x/%.3f/%.3f "
+			"result_shadow=%08x/%08x/%.3f/%.3f\n",
 			transform_class, *class_samples + 1, mode_frame, instr,
-			primary, special, (instr >> 21) & 31,
-			(instr >> 16) & 31, (instr >> 11) & 31,
-			source, dest, lineage->stage, lineage->gte_reg,
-			expected, gpr[other], gpr[dest],
+			primary, special, (instr >> 21) & 31, (instr >> 16) & 31,
+			(instr >> 11) & 31, source, dest, prior.stage, prior.depth,
+			prior.chain_hash, prior.gte_reg, expected, gpr[other], gpr[dest],
+			source_state, result_state, semantic,
 			source_shadow->value, source_shadow->flags,
 			source_shadow->x, source_shadow->y,
 			other_shadow->value, other_shadow->flags,
-			other_shadow->x, other_shadow->y);
+			other_shadow->x, other_shadow->y,
+			result_shadow->value, result_shadow->flags,
+			result_shadow->x, result_shadow->y);
 		(*class_samples)++;
 	}
+
+	lineage_reg[dest] = prior;
+	lineage_reg[dest].current_value = gpr[dest];
+	lineage_reg[dest].depth++;
+	lineage_reg[dest].transform_observed = 1;
+	lineage_reg[dest].chain_hash =
+		(prior.chain_hash ^ instr ^ gpr[dest]) * UINT32_C(16777619);
+	lineage_reg_touched |= UINT32_C(1) << dest;
 }
 
 void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
@@ -641,11 +672,10 @@ void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 	if (word_addr >= UINT32_C(0x00200000))
 		return;
 	dest = &lineage_mem[word_addr >> 2];
-	uint32_t expected = prior->stage == 3 ? prior->sra_value :
-		prior->sll_value;
+	uint32_t expected = prior->current_value;
 
 	memset(dest, 0, sizeof(*dest));
-	if (prior->valid && prior->stage >= 2 && expected == value)
+	if (prior->valid && expected == value)
 	{
 		*dest = *prior;
 		dest->word_addr = word_addr;
@@ -700,9 +730,7 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 			provenance->lineage = lineage_mem[word_addr >> 2];
 			if (!provenance->lineage.valid ||
 			    provenance->lineage.word_addr != word_addr ||
-			    (provenance->lineage.stage == 3 ?
-			     provenance->lineage.sra_value :
-			     provenance->lineage.sll_value) != value)
+			    provenance->lineage.current_value != value)
 				memset(&provenance->lineage, 0,
 					sizeof(provenance->lineage));
 			if (provenance->lineage.valid)
@@ -957,6 +985,29 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_store2,
 		(unsigned long long)window.lineage_store3,
 		(unsigned long long)window.lineage_fifo);
+	{
+		uint32_t state;
+		for (state = 0; state < 4; state++)
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_lineage_state] f=%llu src=%u result=%llu/%llu/%llu/%llu\n",
+				(unsigned long long)frame_number, state,
+				(unsigned long long)window.lineage_transform_state[state][0],
+				(unsigned long long)window.lineage_transform_state[state][1],
+				(unsigned long long)window.lineage_transform_state[state][2],
+				(unsigned long long)window.lineage_transform_state[state][3]);
+	}
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_lineage_semantic] f=%llu propagated=%llu kind=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.lineage_transform_propagated,
+		(unsigned long long)window.lineage_transform_semantic[0],
+		(unsigned long long)window.lineage_transform_semantic[1],
+		(unsigned long long)window.lineage_transform_semantic[2],
+		(unsigned long long)window.lineage_transform_semantic[3],
+		(unsigned long long)window.lineage_transform_semantic[4],
+		(unsigned long long)window.lineage_transform_semantic[5],
+		(unsigned long long)window.lineage_transform_semantic[6],
+		(unsigned long long)window.lineage_transform_semantic[7]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_load_summary] f=%llu loads=%llu untracked=%llu "
 		"invalid-result=%llu op=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
