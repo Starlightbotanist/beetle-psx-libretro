@@ -264,6 +264,7 @@ static void trace_dump_chain(uint64_t id, uint8_t terminal_reason)
 	trace_chain_samples++;
 }
 
+
 static int vertex_sample_seen(uint32_t addr, uint32_t value)
 {
 	uint32_t i;
@@ -1049,7 +1050,7 @@ void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos)
 	{
 		const PGXP_value* shadow;
 		cb_provenance[slot] = fifo_provenance[fifo_pos];
-		shadow = PGXP_ReadCB(slot);
+		shadow = PGXP_ReadFIFO(fifo_pos);
 		trace_record(PGXP_TRACE_EVENT_CB, !shadow->trace_id ? 1 : 0,
 			shadow->trace_id, shadow->trace_stage, (uint8_t)slot, fifo_pos,
 			shadow->value, shadow->value, shadow);
