@@ -37,7 +37,7 @@ void InvalidLoad(uint32_t addr, uint32_t code, uint32_t value)
 {
 	uint32_t reg = ((code >> 16) & 0x1F); /* The rt part of the instruction register */
 	PGXP_value* pD = NULL;
-	PGXP_value p;
+	PGXP_value p = PGXP_value_zero;
 
 	p.x = p.y = -1337; /* default values */
 
@@ -66,7 +66,7 @@ void InvalidStore(uint32_t addr, uint32_t code, uint32_t value)
 {
 	uint32_t reg = ((code >> 16) & 0x1F); /* The rt part of the instruction register */
 	PGXP_value* pD = NULL;
-	PGXP_value p;
+	PGXP_value p = PGXP_value_zero;
 
 	pD = ReadMem(addr);
 
@@ -363,7 +363,7 @@ void PGXP_CPU_AND(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 {
 	/* Rd = Rs & Rt */
 	psx_value vald, vals, valt;
-	PGXP_value ret;
+	PGXP_value ret = PGXP_value_zero;
 
 	Validate(&CPU_reg[rs(instr)], rsVal);
 	Validate(&CPU_reg[rt(instr)], rtVal);
@@ -495,7 +495,10 @@ void PGXP_CPU_SLT(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 	ret.y = 0.f;
 	ret.compFlags[1] = VALID;
 
-	ret.x = (CPU_reg[rs(instr)].y < CPU_reg[rt(instr)].y) ? 1.f : (f16Unsign(CPU_reg[rs(instr)].x) < f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	ret.x = (CPU_reg[rs(instr)].y < CPU_reg[rt(instr)].y) ? 1.f :
+		(CPU_reg[rs(instr)].y > CPU_reg[rt(instr)].y) ? 0.f :
+		(f16Unsign(CPU_reg[rs(instr)].x) <
+		 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
@@ -519,7 +522,12 @@ void PGXP_CPU_SLTU(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVa
 	ret.y = 0.f;
 	ret.compFlags[1] = VALID;
 
-	ret.x = (f16Unsign(CPU_reg[rs(instr)].y) < f16Unsign(CPU_reg[rt(instr)].y)) ? 1.f : (f16Unsign(CPU_reg[rs(instr)].x) < f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	ret.x = (f16Unsign(CPU_reg[rs(instr)].y) <
+		 f16Unsign(CPU_reg[rt(instr)].y)) ? 1.f :
+		(f16Unsign(CPU_reg[rs(instr)].y) >
+		 f16Unsign(CPU_reg[rt(instr)].y)) ? 0.f :
+		(f16Unsign(CPU_reg[rs(instr)].x) <
+		 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
