@@ -1421,6 +1421,27 @@ void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
 {
 	PGXP_DiagPreserveShift(instr, before, after, arithmetic);
 }
+
+void PGXP_CPU_DiagIdentityMove(uint32_t instr, uint32_t before,
+		uint32_t after)
+{
+	unsigned source;
+	unsigned dest;
+
+	if ((instr >> 26) == 0)
+	{
+		unsigned rs_index = (instr >> 21) & 31;
+		unsigned rt_index = (instr >> 16) & 31;
+		source = rs_index == 0 ? rt_index : rs_index;
+		dest = (instr >> 11) & 31;
+	}
+	else
+	{
+		source = (instr >> 21) & 31;
+		dest = (instr >> 16) & 31;
+	}
+	PGXP_DiagIdentityMove(dest, source, before, after);
+}
 #endif
 
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)

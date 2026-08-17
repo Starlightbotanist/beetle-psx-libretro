@@ -1117,6 +1117,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADD(instr, result, GPR[rs], GPR[rt]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (rs == 0 || rt == 0))
+		PGXP_CPU_DiagIdentityMove(instr, rs == 0 ? GPR[rt] : GPR[rs], result);
+#endif
 
 	DO_LDS();
 
@@ -1145,6 +1149,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADDI(instr, result, GPR[rs]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (immediate == 0))
+		PGXP_CPU_DiagIdentityMove(instr, GPR[rs], result);
+#endif
 
 	DO_LDS();
 
@@ -1172,6 +1180,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADDIU(instr, result, GPR[rs]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (immediate == 0))
+		PGXP_CPU_DiagIdentityMove(instr, GPR[rs], result);
+#endif
 
 	DO_LDS();
 
@@ -1195,6 +1207,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADDU(instr, result, GPR[rs], GPR[rt]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (rs == 0 || rt == 0))
+		PGXP_CPU_DiagIdentityMove(instr, rs == 0 ? GPR[rt] : GPR[rs], result);
+#endif
 
 	DO_LDS();
 
@@ -2067,6 +2083,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_OR(instr, result, GPR[rs], GPR[rt]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (rs == 0 || rt == 0))
+		PGXP_CPU_DiagIdentityMove(instr, rs == 0 ? GPR[rt] : GPR[rs], result);
+#endif
 
 	DO_LDS();
 
@@ -2090,6 +2110,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ORI(instr, result, GPR[rs]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (immediate == 0))
+		PGXP_CPU_DiagIdentityMove(instr, GPR[rs], result);
+#endif
 
 	DO_LDS();
 
@@ -2419,6 +2443,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_XOR(instr, result, GPR[rs], GPR[rt]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (rs == 0 || rt == 0))
+		PGXP_CPU_DiagIdentityMove(instr, rs == 0 ? GPR[rt] : GPR[rs], result);
+#endif
 
 	DO_LDS();
 
@@ -2441,6 +2469,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_XORI(instr, result, GPR[rs]);
+#if PGXP_DIAG
+	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && (immediate == 0))
+		PGXP_CPU_DiagIdentityMove(instr, GPR[rs], result);
+#endif
 
 	DO_LDS();
 

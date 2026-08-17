@@ -63,8 +63,11 @@ void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr);
 #if PGXP_DIAG
 void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic);
+void PGXP_CPU_DiagIdentityMove(uint32_t instr, uint32_t before,
+		uint32_t after);
 #else
 #define PGXP_CPU_DiagShift(instr, before, after, arithmetic) ((void)0)
+#define PGXP_CPU_DiagIdentityMove(instr, before, after) ((void)0)
 #endif
 
 // Store 16-bit
