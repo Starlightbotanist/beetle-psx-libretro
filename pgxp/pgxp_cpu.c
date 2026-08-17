@@ -1443,6 +1443,11 @@ void PGXP_CPU_DiagIdentityMove(uint32_t instr, uint32_t before,
 	PGXP_DiagIdentityMove(dest, source, before, after);
 }
 
+void PGXP_CPU_BeginObserveInstruction(uint32_t instr, const uint32_t* gpr)
+{
+	PGXP_DiagBeginInstruction(instr, gpr);
+}
+
 void PGXP_CPU_ObserveInstruction(uint32_t instr, const uint32_t* gpr)
 {
 	PGXP_DiagObserveInstruction(instr, gpr);

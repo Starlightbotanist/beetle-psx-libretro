@@ -65,10 +65,12 @@ void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic);
 void PGXP_CPU_DiagIdentityMove(uint32_t instr, uint32_t before,
 		uint32_t after);
+void PGXP_CPU_BeginObserveInstruction(uint32_t instr, const uint32_t* gpr);
 void PGXP_CPU_ObserveInstruction(uint32_t instr, const uint32_t* gpr);
 #else
 #define PGXP_CPU_DiagShift(instr, before, after, arithmetic) ((void)0)
 #define PGXP_CPU_DiagIdentityMove(instr, before, after) ((void)0)
+#define PGXP_CPU_BeginObserveInstruction(instr, gpr) ((void)0)
 #define PGXP_CPU_ObserveInstruction(instr, gpr) ((void)0)
 #endif
 

@@ -941,7 +941,11 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
     timestamp++;
 
    #define DO_LDS() { s_cpu.GPR_full[LDWhich] = LDValue; ReadAbsorb[LDWhich] = LDAbsorb; ReadFudge = LDWhich; ReadAbsorbWhich |= LDWhich & 0x1F; LDWhich = 0x22; }
-   #define BEGIN_OPF(name) { op_##name:
+   #define PGXP_BEGIN_OBSERVE_CPU() do { \
+	if ((PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_MODE_CPU)) == PGXP_MODE_MEMORY) \
+	 PGXP_CPU_BeginObserveInstruction(instr, GPR); \
+   } while (0)
+   #define BEGIN_OPF(name) { op_##name: PGXP_BEGIN_OBSERVE_CPU();
    #define PGXP_OBSERVE_CPU() do { \
 	if ((PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_MODE_CPU)) == PGXP_MODE_MEMORY) \
 	 PGXP_CPU_ObserveInstruction(instr, GPR); \
