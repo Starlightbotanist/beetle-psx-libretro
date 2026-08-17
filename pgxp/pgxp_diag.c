@@ -133,6 +133,7 @@ static unsigned last_mode = ~0u;
 static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
+static uint32_t cache_vertex_samples;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
 static uint32_t lineage_drop_samples;
@@ -304,6 +305,7 @@ void PGXP_DiagInit(void)
 	memset(cb_provenance, 0, sizeof(cb_provenance));
 	dispatch_samples = 0;
 	vertex_samples = 0;
+	cache_vertex_samples = 0;
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
 	lineage_drop_samples = 0;
@@ -894,6 +896,24 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 				cb_provenance[slot].store8.before_count);
 			vertex_samples++;
 		}
+	}
+	else if (source == PGXP_DIAG_VERTEX_CACHE &&
+	         cache_vertex_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_vertex_cache] n=%u mf=%u slot=%u psx=%08x "
+			"ram_shadow=%08x flags=%08x valid=%d/%d "
+			"cache_xyz=%.3f/%.3f/%.3f src_addr=%08x src_psx=%08x "
+			"lineage=%u/%u/%u/%08x\n",
+			cache_vertex_samples + 1, mode_frame, slot, value,
+			shadow->value, shadow->flags, valid_xy, value_match,
+			x, y, w, cb_provenance[slot].addr,
+			cb_provenance[slot].value,
+			cb_provenance[slot].lineage.valid,
+			cb_provenance[slot].lineage.stage,
+			cb_provenance[slot].lineage.depth,
+			cb_provenance[slot].lineage.chain_hash);
+		cache_vertex_samples++;
 	}
 	hash_event((uint8_t)(4 + source), value, (uint32_t)valid_w);
 	window.event_hash = hash_bytes(window.event_hash, &x, sizeof(x));
