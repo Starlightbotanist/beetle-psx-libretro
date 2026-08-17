@@ -614,6 +614,18 @@ void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
 	}
 	if (dest == 0 || identity)
 		return;
+
+	/* PGXP_DiagPreserveShift runs before the architectural GPR write and
+	 * has already advanced a recognized pair to stage 2 or 3.  Replacing
+	 * it below with the BEGIN_OPF snapshot would roll the lineage back to
+	 * stage 1, making every following SRA5 miss. */
+	if (primary == 0 &&
+	    ((special == 0x00 && lineage_reg[dest].valid &&
+	      lineage_reg[dest].stage == 2) ||
+	     (special == 0x03 && lineage_reg[dest].valid &&
+	      lineage_reg[dest].stage == 3)))
+		return;
+
 	if (lineage_pre_instr != instr)
 		return;
 	if (!lineage_pre_lineage[source].valid &&
