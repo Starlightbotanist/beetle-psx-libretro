@@ -634,6 +634,9 @@ void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value)
 {
 	if (!trace_metadata_valid(value))
 		return;
+	/* Preserve the root MFC2 native word for the SLL5/SRA5 round-trip. */
+	memcpy(value->trace_reserved + 1, &value->value, sizeof(value->value));
+	value->trace_reserved[5] = 1;
 	value->trace_stage = PGXP_TRACE_MFC2;
 	trace_record(PGXP_TRACE_EVENT_MFC2, 0, value->trace_id,
 		value->trace_stage,
@@ -687,11 +690,24 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 		PGXP_DiagTraceShift(instr, before, after, arithmetic, 5, &result);
 		return 0;
 	}
+    if (arithmetic && (instr >> 6 & 31) == 5 &&
+        result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
+        result.trace_reserved[0] == 0 && result.trace_reserved[5] != 0)
+    {
+        uint32_t original_mfc2;
+        memcpy(&original_mfc2, result.trace_reserved + 1,
+            sizeof(original_mfc2));
+        if (after != original_mfc2)
+        {
+            PGXP_DiagTraceShift(instr, before, after, arithmetic, 7, &result);
+            return 0;
+        }
+    }
 	if ((!lineage_reg[dest].valid ||
 	     lineage_reg[dest].stage != (arithmetic ? 3u : 2u)) &&
 	    !(arithmetic && (instr >> 6 & 31) == 5 &&
 	      result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
-	      result.trace_reserved[0] == 0))
+	      result.trace_reserved[0] == 0 && result.trace_reserved[5] != 0))
 	{
 		PGXP_DiagTraceShift(instr, before, after, arithmetic, 4, &result);
 		return 0;
