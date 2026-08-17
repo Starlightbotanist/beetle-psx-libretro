@@ -676,8 +676,12 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 		PGXP_DiagTraceShift(instr, before, after, arithmetic, 3, &result);
 		return 0;
 	}
-	if (!lineage_reg[dest].valid ||
-	    lineage_reg[dest].stage != (arithmetic ? 3u : 2u))
+	/* In diagnostic mode, a traced SLL5 can prove the SRA5 handoff even
+	 * when the legacy lineage table was not updated for this register. */
+	if ((!lineage_reg[dest].valid ||
+	     lineage_reg[dest].stage != (arithmetic ? 3u : 2u)) &&
+	    !(arithmetic && result.trace_id != 0 &&
+	      result.trace_stage == PGXP_TRACE_SLL5))
 	{
 		PGXP_DiagTraceShift(instr, before, after, arithmetic, 4, &result);
 		return 0;
