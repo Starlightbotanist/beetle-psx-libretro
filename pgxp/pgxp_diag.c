@@ -24,6 +24,9 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_STORE8_SLOTS (2048u * 1024u / 4u)
 #define PGXP_TRACE_RING_SIZE 262144u
 #define PGXP_TRACE_REASON_COUNT 8u
+#define PGXP_DIAG_PRIMITIVE_BUCKETS 32u
+#define PGXP_DIAG_PRIMITIVE_COMPOSITIONS 4u
+#define PGXP_DIAG_TRACE_STAGES 9u
 
 enum PGXP_trace_event_type
 {
@@ -212,12 +215,16 @@ typedef struct PGXP_diag_packet_vertex_Tag
 } PGXP_diag_packet_vertex;
 static PGXP_diag_packet_vertex packet_vertices[3];
 static uint8_t packet_vertex_count;
-static uint32_t primitive_bucket_samples[32];
+static uint32_t primitive_bucket_samples[PGXP_DIAG_PRIMITIVE_BUCKETS];
 static uint64_t primitive_total;
 static uint64_t primitive_class[2][2][2];
 static uint64_t primitive_y_band[4];
 static uint64_t primitive_sra_vertices;
 static uint64_t primitive_tolerance_reverts;
+static uint64_t primitive_composition[PGXP_DIAG_PRIMITIVE_BUCKETS]
+	[PGXP_DIAG_PRIMITIVE_COMPOSITIONS];
+static uint64_t primitive_source_stage[PGXP_DIAG_PRIMITIVE_BUCKETS][3]
+	[PGXP_DIAG_TRACE_STAGES];
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -470,6 +477,8 @@ void PGXP_DiagInit(void)
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));
 	primitive_sra_vertices = 0;
 	primitive_tolerance_reverts = 0;
+	memset(primitive_composition, 0, sizeof(primitive_composition));
+	memset(primitive_source_stage, 0, sizeof(primitive_source_stage));
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -1124,6 +1133,8 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		average_y < 192 ? 2 : 3;
 	unsigned bucket = (textured << 4) | (gouraud << 3) |
 		((invalid_w != 0) << 2) | y_band;
+	unsigned source_mask = 0;
+	unsigned composition;
 	unsigned i;
 
 	primitive_total++;
@@ -1138,6 +1149,26 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		    vertices[i].precise_before_y != vertices[i].precise_after_y)
 			reverted = 1;
 	}
+	for (i = 0; i < packet_vertex_count; i++)
+	{
+		unsigned source = packet_vertices[i].source;
+		unsigned stage = packet_vertices[i].stage;
+		if (source < 3)
+		{
+			source_mask |= 1u << source;
+			if (stage < PGXP_DIAG_TRACE_STAGES)
+				primitive_source_stage[bucket][source][stage]++;
+		}
+	}
+	if (source_mask == (1u << PGXP_DIAG_VERTEX_TRACKED))
+		composition = 0;
+	else if (source_mask == (1u << PGXP_DIAG_VERTEX_NATIVE))
+		composition = 2;
+	else if (source_mask & (1u << PGXP_DIAG_VERTEX_CACHE) || !source_mask)
+		composition = 3;
+	else
+		composition = 1;
+	primitive_composition[bucket][composition]++;
 	if (reverted)
 		primitive_tolerance_reverts++;
 
@@ -1561,6 +1592,57 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_y_band[3],
 		(unsigned long long)primitive_sra_vertices,
 		(unsigned long long)primitive_tolerance_reverts);
+	{
+		unsigned bucket;
+		for (bucket = 0; bucket < PGXP_DIAG_PRIMITIVE_BUCKETS; bucket++)
+		{
+			uint64_t bucket_total = primitive_composition[bucket][0] +
+				primitive_composition[bucket][1] +
+				primitive_composition[bucket][2] +
+				primitive_composition[bucket][3];
+			if (!bucket_total)
+				continue;
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_primitive_provenance] f=%llu bucket=%u total=%llu "
+				"composition=%llu/%llu/%llu/%llu "
+				"tracked_stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"cache_stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"native_stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
+				(unsigned long long)frame_number, bucket,
+				(unsigned long long)bucket_total,
+				(unsigned long long)primitive_composition[bucket][0],
+				(unsigned long long)primitive_composition[bucket][1],
+				(unsigned long long)primitive_composition[bucket][2],
+				(unsigned long long)primitive_composition[bucket][3],
+				(unsigned long long)primitive_source_stage[bucket][0][0],
+				(unsigned long long)primitive_source_stage[bucket][0][1],
+				(unsigned long long)primitive_source_stage[bucket][0][2],
+				(unsigned long long)primitive_source_stage[bucket][0][3],
+				(unsigned long long)primitive_source_stage[bucket][0][4],
+				(unsigned long long)primitive_source_stage[bucket][0][5],
+				(unsigned long long)primitive_source_stage[bucket][0][6],
+				(unsigned long long)primitive_source_stage[bucket][0][7],
+				(unsigned long long)primitive_source_stage[bucket][0][8],
+				(unsigned long long)primitive_source_stage[bucket][1][0],
+				(unsigned long long)primitive_source_stage[bucket][1][1],
+				(unsigned long long)primitive_source_stage[bucket][1][2],
+				(unsigned long long)primitive_source_stage[bucket][1][3],
+				(unsigned long long)primitive_source_stage[bucket][1][4],
+				(unsigned long long)primitive_source_stage[bucket][1][5],
+				(unsigned long long)primitive_source_stage[bucket][1][6],
+				(unsigned long long)primitive_source_stage[bucket][1][7],
+				(unsigned long long)primitive_source_stage[bucket][1][8],
+				(unsigned long long)primitive_source_stage[bucket][2][0],
+				(unsigned long long)primitive_source_stage[bucket][2][1],
+				(unsigned long long)primitive_source_stage[bucket][2][2],
+				(unsigned long long)primitive_source_stage[bucket][2][3],
+				(unsigned long long)primitive_source_stage[bucket][2][4],
+				(unsigned long long)primitive_source_stage[bucket][2][5],
+				(unsigned long long)primitive_source_stage[bucket][2][6],
+				(unsigned long long)primitive_source_stage[bucket][2][7],
+				(unsigned long long)primitive_source_stage[bucket][2][8]);
+		}
+	}
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_load_summary] f=%llu loads=%llu untracked=%llu "
 		"invalid-result=%llu op=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
@@ -1625,6 +1707,8 @@ void PGXP_DiagFrame(int backend)
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));
 	primitive_sra_vertices = 0;
 	primitive_tolerance_reverts = 0;
+	memset(primitive_composition, 0, sizeof(primitive_composition));
+	memset(primitive_source_stage, 0, sizeof(primitive_source_stage));
 	dispatch_samples = 0;
 }
 
