@@ -623,13 +623,26 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	}
 	else
 	{
+		float recovered_x;
+		float recovered_y;
+		float recovered_z;
 		/* Look in cache for valid vertex.  The cache holds a smaller
 		 * struct (just x/y/z/tag) than the FIFO/CB, so we use a
 		 * separate local rather than aliasing `vert`.  A non-NULL
 		 * return is already fully validated - current generation,
 		 * unambiguous - so there is no flag test to repeat here. */
-		PGXP_cache_entry* cache_vert = PGXP_GetCachedVertex(psxX, psxY);
-		if (cache_vert)
+		PGXP_cache_entry* cache_vert;
+		if (PGXP_DiagRecoverVertex(psxWord, vert, &recovered_x,
+		    &recovered_y, &recovered_z))
+		{
+			source = PGXP_DIAG_VERTEX_CACHE;
+			pOutput->x = recovered_x + xOffs;
+			pOutput->y = recovered_y + yOffs;
+			pOutput->z = 0.95f;
+			pOutput->w = recovered_z;
+			pOutput->valid_w = 1;
+		}
+		else if ((cache_vert = PGXP_GetCachedVertex(psxX, psxY)) != NULL)
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
 			/* a value is found, it is from the current session and is unambiguous (there was only one value recorded at that position) */

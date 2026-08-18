@@ -27,6 +27,7 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_PRIMITIVE_BUCKETS 32u
 #define PGXP_DIAG_PRIMITIVE_COMPOSITIONS 4u
 #define PGXP_DIAG_TRACE_STAGES 9u
+#define PGXP_DIAG_RECOVERY_SIZE 65536u
 
 enum PGXP_trace_event_type
 {
@@ -59,6 +60,16 @@ typedef struct
 	uint8_t stage;
 	uint16_t source_dest;
 } PGXP_trace_event;
+
+typedef struct
+{
+	uint32_t value;
+	uint32_t frame;
+	float x;
+	float y;
+	float z;
+	uint8_t ambiguous;
+} PGXP_diag_recovery_vertex;
 
 enum PGXP_diag_address_region
 {
@@ -198,6 +209,11 @@ static uint32_t trace_write;
 static uint32_t trace_chain_samples;
 static uint32_t trace_tracked_samples;
 static uint64_t trace_tracked_ids[64];
+static PGXP_diag_recovery_vertex recovery_vertices[PGXP_DIAG_RECOVERY_SIZE];
+static uint64_t recovery_attempts;
+static uint64_t recovery_hits;
+static uint64_t recovery_ambiguous;
+static uint64_t recovery_misses;
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
 static uint8_t current_opcode;
@@ -466,6 +482,8 @@ void PGXP_DiagInit(void)
 	trace_write = 0;
 	trace_chain_samples = 0;
 	trace_tracked_samples = 0;
+	memset(recovery_vertices, 0, sizeof(recovery_vertices));
+	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
 	current_packet = 0;
@@ -680,6 +698,8 @@ void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 
 void PGXP_DiagTraceGTE(PGXP_value* value)
 {
+	PGXP_diag_recovery_vertex* recovery;
+	uint32_t index;
 	if (!value)
 		return;
 	/* A GTE result starts a fresh provenance chain. */
@@ -688,6 +708,51 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 	value->trace_stage = PGXP_TRACE_GTE;
 	trace_record(PGXP_TRACE_EVENT_GTE, 0, value->trace_id,
 		value->trace_stage, 0, 0, value->value, value->value, value);
+	index = (value->value * UINT32_C(2654435761)) >> 16;
+	recovery = &recovery_vertices[index];
+	if (recovery->frame == mode_frame && recovery->value == value->value)
+	{
+		if (recovery->x != value->x || recovery->y != value->y ||
+		    recovery->z != value->z)
+			recovery->ambiguous = 1;
+	}
+	else
+	{
+		recovery->value = value->value;
+		recovery->frame = mode_frame;
+		recovery->x = value->x;
+		recovery->y = value->y;
+		recovery->z = value->z;
+		recovery->ambiguous = 0;
+	}
+}
+
+int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
+		float* x, float* y, float* z)
+{
+	PGXP_diag_recovery_vertex* recovery;
+	uint32_t index;
+
+	if (!trace_metadata_valid(stale) || stale->trace_stage != PGXP_TRACE_SRA5)
+		return 0;
+	recovery_attempts++;
+	index = (value * UINT32_C(2654435761)) >> 16;
+	recovery = &recovery_vertices[index];
+	if (recovery->frame != mode_frame || recovery->value != value)
+	{
+		recovery_misses++;
+		return 0;
+	}
+	if (recovery->ambiguous)
+	{
+		recovery_ambiguous++;
+		return 0;
+	}
+	*x = recovery->x;
+	*y = recovery->y;
+	*z = recovery->z;
+	recovery_hits++;
+	return 1;
 }
 
 void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value)
@@ -1609,6 +1674,14 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_y_band[3],
 		(unsigned long long)primitive_sra_vertices,
 		(unsigned long long)primitive_tolerance_reverts);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
+		"ambiguous=%llu misses=%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)recovery_attempts,
+		(unsigned long long)recovery_hits,
+		(unsigned long long)recovery_ambiguous,
+		(unsigned long long)recovery_misses);
 	{
 		unsigned bucket;
 		for (bucket = 0; bucket < PGXP_DIAG_PRIMITIVE_BUCKETS; bucket++)
@@ -1747,6 +1820,7 @@ void PGXP_DiagFrame(int backend)
 	memset(primitive_native_reason, 0, sizeof(primitive_native_reason));
 	memset(primitive_native_sra5_reason, 0,
 		sizeof(primitive_native_sra5_reason));
+	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	dispatch_samples = 0;
 }
 
