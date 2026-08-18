@@ -29,6 +29,7 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_TRACE_STAGES 9u
 #define PGXP_DIAG_RECOVERY_BUCKETS 65536u
 #define PGXP_DIAG_RECOVERY_WAYS 4u
+#define PGXP_DIAG_ADDRESS_VERTICES (2048u * 1024u / 4u)
 
 enum PGXP_trace_event_type
 {
@@ -72,6 +73,15 @@ typedef struct
 	uint8_t ambiguous;
 	uint8_t valid;
 } PGXP_diag_recovery_vertex;
+
+typedef struct
+{
+	uint32_t value;
+	float x;
+	float y;
+	float z;
+	uint8_t valid;
+} PGXP_diag_address_vertex;
 
 enum PGXP_diag_address_region
 {
@@ -225,6 +235,14 @@ static uint64_t recovery_stage_attempts[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_way_hits[PGXP_DIAG_RECOVERY_WAYS];
 static uint64_t recovery_evictions;
+static PGXP_diag_address_vertex address_vertices[PGXP_DIAG_ADDRESS_VERTICES];
+static uint64_t address_captures;
+static uint64_t address_retains;
+static uint64_t address_invalidations;
+static uint64_t address_attempts;
+static uint64_t address_hits;
+static uint64_t address_misses;
+static uint64_t address_stage_hits[PGXP_DIAG_TRACE_STAGES];
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
 static uint8_t current_opcode;
@@ -494,6 +512,7 @@ void PGXP_DiagInit(void)
 	trace_chain_samples = 0;
 	trace_tracked_samples = 0;
 	memset(recovery_vertices, 0, sizeof(recovery_vertices));
+	memset(address_vertices, 0, sizeof(address_vertices));
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
@@ -503,6 +522,9 @@ void PGXP_DiagInit(void)
 	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
 	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
 	recovery_evictions = 0;
+	address_captures = address_retains = address_invalidations = 0;
+	address_attempts = address_hits = address_misses = 0;
+	memset(address_stage_hits, 0, sizeof(address_stage_hits));
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
 	current_packet = 0;
@@ -642,12 +664,36 @@ void PGXP_DiagMemoryRead(uint32_t addr, uint32_t value, int valid_address)
 	hash_event(1, addr, value);
 }
 
-void PGXP_DiagMemoryWrite(uint32_t addr, uint32_t value, int valid_address)
+void PGXP_DiagMemoryWrite(uint32_t addr, const PGXP_value* value,
+		int valid_address, int full_word)
 {
+	PGXP_diag_address_vertex* history = NULL;
+	uint32_t segment = addr >> 24;
+
 	window.mem_writes++;
 	if (!valid_address)
 		window.mem_invalid_writes++;
-	hash_event(2, addr, value);
+	hash_event(2, addr, value ? value->value : 0);
+	if (!full_word || !value ||
+	    (segment != 0x00 && segment != 0x80 && segment != 0xa0))
+		return;
+	history = &address_vertices[(addr & UINT32_C(0x001ffffc)) >> 2];
+	if ((value->flags & VALID_01) == VALID_01)
+	{
+		history->value = value->value;
+		history->x = value->x;
+		history->y = value->y;
+		history->z = value->z;
+		history->valid = 1;
+		address_captures++;
+	}
+	else if (history->valid && history->value == value->value)
+		address_retains++;
+	else
+	{
+		address_invalidations += history->valid != 0;
+		history->valid = 0;
+	}
 }
 
 static uint32_t gpu_source_word_addr(uint32_t addr)
@@ -777,7 +823,7 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 }
 
 int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
-		float* x, float* y, float* z)
+		unsigned slot, float* x, float* y, float* z)
 {
 	PGXP_diag_recovery_vertex* recovery;
 	uint32_t index;
@@ -804,14 +850,14 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	if (!recovery || recovery->frame > mode_frame)
 	{
 		recovery_misses++;
-		return 0;
+		goto address_fallback;
 	}
 	age = mode_frame - recovery->frame;
 	if (age > 4)
 	{
 		recovery_too_old++;
 		recovery_old_age[age < 8 ? age - 5 : 3]++;
-		return 0;
+		goto address_fallback;
 	}
 	if (recovery->ambiguous)
 	{
@@ -830,6 +876,30 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	recovery_stage_hits[stage]++;
 	recovery_way_hits[way]++;
 	return 1;
+
+address_fallback:
+	if (slot < 16)
+	{
+		uint32_t addr = cb_provenance[slot].addr;
+		uint32_t segment = addr >> 24;
+		if (segment == 0x00 || segment == 0x80 || segment == 0xa0)
+		{
+			PGXP_diag_address_vertex* history = &address_vertices
+				[(addr & UINT32_C(0x001ffffc)) >> 2];
+			address_attempts++;
+			if (history->valid && history->value == value)
+			{
+				*x = history->x;
+				*y = history->y;
+				*z = history->z;
+				address_hits++;
+				address_stage_hits[stage]++;
+				return 1;
+			}
+			address_misses++;
+		}
+	}
+	return 0;
 }
 
 void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value)
@@ -1808,6 +1878,26 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_way_hits[2],
 		(unsigned long long)recovery_way_hits[3],
 		(unsigned long long)recovery_evictions);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_address_recovery] f=%llu captures=%llu retains=%llu "
+		"invalidations=%llu attempts=%llu hits=%llu misses=%llu "
+		"stage_hits=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)address_captures,
+		(unsigned long long)address_retains,
+		(unsigned long long)address_invalidations,
+		(unsigned long long)address_attempts,
+		(unsigned long long)address_hits,
+		(unsigned long long)address_misses,
+		(unsigned long long)address_stage_hits[0],
+		(unsigned long long)address_stage_hits[1],
+		(unsigned long long)address_stage_hits[2],
+		(unsigned long long)address_stage_hits[3],
+		(unsigned long long)address_stage_hits[4],
+		(unsigned long long)address_stage_hits[5],
+		(unsigned long long)address_stage_hits[6],
+		(unsigned long long)address_stage_hits[7],
+		(unsigned long long)address_stage_hits[8]);
 	{
 		unsigned bucket;
 		for (bucket = 0; bucket < PGXP_DIAG_PRIMITIVE_BUCKETS; bucket++)
@@ -1955,6 +2045,9 @@ void PGXP_DiagFrame(int backend)
 	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
 	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
 	recovery_evictions = 0;
+	address_captures = address_retains = address_invalidations = 0;
+	address_attempts = address_hits = address_misses = 0;
+	memset(address_stage_hits, 0, sizeof(address_stage_hits));
 	dispatch_samples = 0;
 }
 

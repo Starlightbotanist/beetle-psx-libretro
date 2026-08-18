@@ -42,7 +42,8 @@ typedef struct PGXP_diag_primitive_vertex_Tag
 void PGXP_DiagInit(void);
 void PGXP_DiagFrame(int backend);
 void PGXP_DiagMemoryRead(uint32_t addr, uint32_t value, int valid_address);
-void PGXP_DiagMemoryWrite(uint32_t addr, uint32_t value, int valid_address);
+void PGXP_DiagMemoryWrite(uint32_t addr, const PGXP_value* value,
+		int valid_address, int full_word);
 void PGXP_DiagCPULoad(uint32_t instr, uint32_t addr, uint32_t value,
 		const PGXP_value* result, int memory_state);
 uint32_t PGXP_DiagCPUInvalidMask(void);
@@ -52,6 +53,7 @@ void PGXP_DiagCPUDispatch(uint32_t instr, uint32_t addr, unsigned dest,
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value);
 void PGXP_DiagTraceGTE(PGXP_value* value);
 int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
+		unsigned slot,
 		float* x, float* y, float* z);
 void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value);
 void PGXP_DiagTraceShift(uint32_t instr, uint32_t before, uint32_t after,
@@ -102,13 +104,13 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value);
 #define PGXP_DiagInit() ((void)0)
 #define PGXP_DiagFrame(backend) ((void)0)
 #define PGXP_DiagMemoryRead(addr, value, valid_address) ((void)0)
-#define PGXP_DiagMemoryWrite(addr, value, valid_address) ((void)0)
+#define PGXP_DiagMemoryWrite(addr, value, valid_address, full_word) ((void)0)
 #define PGXP_DiagCPULoad(instr, addr, value, result, memory_state) ((void)0)
 #define PGXP_DiagCPUInvalidMask() UINT32_C(0)
 #define PGXP_DiagCPUDispatch(instr, addr, dest, before_mask, before_flags, before_gflags) ((void)0)
 #define PGXP_DiagGTEVertex(x, y, z, value) ((void)0)
 #define PGXP_DiagTraceGTE(value) ((void)0)
-#define PGXP_DiagRecoverVertex(value, stale, x, y, z) 0
+#define PGXP_DiagRecoverVertex(value, stale, slot, x, y, z) 0
 #define PGXP_DiagTraceMFC2(instr, value) ((void)0)
 #define PGXP_DiagTraceShift(instr, before, after, arithmetic, reason, value) ((void)0)
 #define PGXP_DiagMFC2(instr, value) ((void)0)

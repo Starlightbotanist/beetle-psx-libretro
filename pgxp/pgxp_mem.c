@@ -286,7 +286,7 @@ void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int s
 void WriteMem(PGXP_value* value, uint32_t addr)
 {
 	uint32_t paddr = PGXP_ConvertAddress(addr);
-	PGXP_DiagMemoryWrite(addr, value->value, paddr < InvalidAddress);
+	PGXP_DiagMemoryWrite(addr, value, paddr < InvalidAddress, 1);
 
 	if (paddr < InvalidAddress)
 	{
@@ -299,7 +299,7 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 {
 	PGXP_value* dest = NULL;
 	uint32_t paddr = PGXP_ConvertAddress(addr);
-	PGXP_DiagMemoryWrite(addr, src->value, paddr < InvalidAddress);
+	PGXP_DiagMemoryWrite(addr, src, paddr < InvalidAddress, 0);
 
 	if (paddr < InvalidAddress)
 	{

@@ -632,7 +632,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		 * return is already fully validated - current generation,
 		 * unambiguous - so there is no flag test to repeat here. */
 		PGXP_cache_entry* cache_vert;
-		if (PGXP_DiagRecoverVertex(psxWord, vert, &recovered_x,
+		if (PGXP_DiagRecoverVertex(psxWord, vert, offset, &recovered_x,
 		    &recovered_y, &recovered_z))
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
