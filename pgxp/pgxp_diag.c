@@ -218,7 +218,7 @@ static uint64_t recovery_hits;
 static uint64_t recovery_ambiguous;
 static uint64_t recovery_ambiguous_used;
 static uint64_t recovery_misses;
-static uint64_t recovery_age_hits[3];
+static uint64_t recovery_age_hits[4];
 static uint64_t recovery_too_old;
 static uint64_t recovery_stage_attempts[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
@@ -718,7 +718,7 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 	PGXP_diag_recovery_vertex* recovery;
 	uint32_t index;
 	unsigned way;
-	unsigned replace = 0;
+	unsigned replace = PGXP_DIAG_RECOVERY_WAYS;
 	if (!value)
 		return;
 	/* A GTE result starts a fresh provenance chain. */
@@ -737,7 +737,14 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 			recovery = candidate;
 			break;
 		}
-		if (!candidate->valid ||
+		if (!candidate->valid)
+		{
+			if (replace == PGXP_DIAG_RECOVERY_WAYS ||
+			    recovery_vertices[index][replace].valid)
+				replace = way;
+			continue;
+		}
+		if (replace == PGXP_DIAG_RECOVERY_WAYS ||
 		    (recovery_vertices[index][replace].valid &&
 		     candidate->frame < recovery_vertices[index][replace].frame))
 			replace = way;
@@ -798,7 +805,7 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 		return 0;
 	}
 	age = mode_frame - recovery->frame;
-	if (age > 2)
+	if (age > 3)
 	{
 		recovery_too_old++;
 		return 0;
@@ -1743,7 +1750,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_tolerance_reverts);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
-		"age=%llu/%llu/%llu ambiguous=%llu used=%llu misses=%llu "
+		"age=%llu/%llu/%llu/%llu ambiguous=%llu used=%llu misses=%llu "
 		"too_old=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)recovery_attempts,
@@ -1751,6 +1758,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_age_hits[0],
 		(unsigned long long)recovery_age_hits[1],
 		(unsigned long long)recovery_age_hits[2],
+		(unsigned long long)recovery_age_hits[3],
 		(unsigned long long)recovery_ambiguous,
 		(unsigned long long)recovery_ambiguous_used,
 		(unsigned long long)recovery_misses,
