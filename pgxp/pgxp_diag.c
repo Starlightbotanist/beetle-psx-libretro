@@ -214,6 +214,8 @@ static uint64_t recovery_attempts;
 static uint64_t recovery_hits;
 static uint64_t recovery_ambiguous;
 static uint64_t recovery_misses;
+static uint64_t recovery_age_hits[3];
+static uint64_t recovery_too_old;
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
 static uint8_t current_opcode;
@@ -484,6 +486,8 @@ void PGXP_DiagInit(void)
 	trace_tracked_samples = 0;
 	memset(recovery_vertices, 0, sizeof(recovery_vertices));
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
+	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
+	recovery_too_old = 0;
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
 	current_packet = 0;
@@ -732,15 +736,22 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 {
 	PGXP_diag_recovery_vertex* recovery;
 	uint32_t index;
+	uint32_t age;
 
 	if (!trace_metadata_valid(stale) || stale->trace_stage != PGXP_TRACE_SRA5)
 		return 0;
 	recovery_attempts++;
 	index = (value * UINT32_C(2654435761)) >> 16;
 	recovery = &recovery_vertices[index];
-	if (recovery->frame != mode_frame || recovery->value != value)
+	if (recovery->value != value || recovery->frame > mode_frame)
 	{
 		recovery_misses++;
+		return 0;
+	}
+	age = mode_frame - recovery->frame;
+	if (age > 2)
+	{
+		recovery_too_old++;
 		return 0;
 	}
 	if (recovery->ambiguous)
@@ -752,6 +763,7 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	*y = recovery->y;
 	*z = recovery->z;
 	recovery_hits++;
+	recovery_age_hits[age]++;
 	return 1;
 }
 
@@ -1676,12 +1688,16 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_tolerance_reverts);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
-		"ambiguous=%llu misses=%llu\n",
+		"age=%llu/%llu/%llu ambiguous=%llu misses=%llu too_old=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)recovery_attempts,
 		(unsigned long long)recovery_hits,
+		(unsigned long long)recovery_age_hits[0],
+		(unsigned long long)recovery_age_hits[1],
+		(unsigned long long)recovery_age_hits[2],
 		(unsigned long long)recovery_ambiguous,
-		(unsigned long long)recovery_misses);
+		(unsigned long long)recovery_misses,
+		(unsigned long long)recovery_too_old);
 	{
 		unsigned bucket;
 		for (bucket = 0; bucket < PGXP_DIAG_PRIMITIVE_BUCKETS; bucket++)
@@ -1821,6 +1837,8 @@ void PGXP_DiagFrame(int backend)
 	memset(primitive_native_sra5_reason, 0,
 		sizeof(primitive_native_sra5_reason));
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
+	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
+	recovery_too_old = 0;
 	dispatch_samples = 0;
 }
 
