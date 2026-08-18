@@ -1630,18 +1630,11 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    } \
    /* iCB: If any vertices lack w components then set all to 1 */ \
    if (invalidW) \
-   { \
-      int provenance_fallback = PGXP_DiagPrimitiveFallback(invalidW); \
       for (v = 0; v < 3; v++) \
       { \
          /* lacking w component tends to mean degenerate coordinates */ \
          /* set to non-pgxp value if difference is too great */ \
-         if (provenance_fallback) \
-         { \
-            vertices[v].precise[0] = vertices[v].x; \
-            vertices[v].precise[1] = vertices[v].y; \
-         } \
-         else if (PGXP_LIT && psx_pgxp_2d_tol >= 0) \
+         if (PGXP_LIT && psx_pgxp_2d_tol >= 0) \
          { \
             float tol = (float)((unsigned)psx_pgxp_2d_tol << gpu->upscale_shift); \
             if ( \
@@ -1655,7 +1648,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          } \
          vertices[v].precise[2] = 1.f; \
       } \
-   } \
    for (v = 0; v < 3; v++) \
       PGXP_DIAG_PRIMITIVE_AFTER(pgxp_diag_vertices, v, vertices[v]); \
    if (PGXP_LIT) \

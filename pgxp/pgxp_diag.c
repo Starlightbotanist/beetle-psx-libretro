@@ -212,6 +212,7 @@ typedef struct PGXP_diag_packet_vertex_Tag
 	uint32_t value;
 	uint8_t source;
 	uint8_t stage;
+	uint8_t reason;
 } PGXP_diag_packet_vertex;
 static PGXP_diag_packet_vertex packet_vertices[3];
 static uint8_t packet_vertex_count;
@@ -221,11 +222,14 @@ static uint64_t primitive_class[2][2][2];
 static uint64_t primitive_y_band[4];
 static uint64_t primitive_sra_vertices;
 static uint64_t primitive_tolerance_reverts;
-static uint64_t primitive_provenance_fallbacks;
 static uint64_t primitive_composition[PGXP_DIAG_PRIMITIVE_BUCKETS]
 	[PGXP_DIAG_PRIMITIVE_COMPOSITIONS];
 static uint64_t primitive_source_stage[PGXP_DIAG_PRIMITIVE_BUCKETS][3]
 	[PGXP_DIAG_TRACE_STAGES];
+static uint64_t primitive_native_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
+	[PGXP_TRACE_REASON_COUNT];
+static uint64_t primitive_native_sra5_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
+	[PGXP_TRACE_REASON_COUNT];
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -478,9 +482,11 @@ void PGXP_DiagInit(void)
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));
 	primitive_sra_vertices = 0;
 	primitive_tolerance_reverts = 0;
-	primitive_provenance_fallbacks = 0;
 	memset(primitive_composition, 0, sizeof(primitive_composition));
 	memset(primitive_source_stage, 0, sizeof(primitive_source_stage));
+	memset(primitive_native_reason, 0, sizeof(primitive_native_reason));
+	memset(primitive_native_sra5_reason, 0,
+		sizeof(primitive_native_sra5_reason));
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -1123,29 +1129,6 @@ void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 	packet_vertex_count = 0;
 }
 
-int PGXP_DiagPrimitiveFallback(int invalid_w)
-{
-	int tracked_sra5 = 0;
-	int native_unlineaged = 0;
-	unsigned i;
-
-	/* Diagnostic A/B: isolate Spyro 3's broken-sky signature without
-	 * disturbing Spyro 1's SRA5-to-SLL5 mixed primitives. */
-	if (!invalid_w || (current_opcode & 0x14) != 0x10)
-		return 0;
-	for (i = 0; i < packet_vertex_count; i++)
-	{
-		tracked_sra5 |= packet_vertices[i].source == PGXP_DIAG_VERTEX_TRACKED &&
-			packet_vertices[i].stage == PGXP_TRACE_SRA5;
-		native_unlineaged |= packet_vertices[i].source == PGXP_DIAG_VERTEX_NATIVE &&
-			packet_vertices[i].stage == PGXP_TRACE_NONE;
-	}
-	if (!tracked_sra5 || !native_unlineaged)
-		return 0;
-	primitive_provenance_fallbacks++;
-	return 1;
-}
-
 void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		int invalid_w, int tolerance)
 {
@@ -1183,6 +1166,14 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 			source_mask |= 1u << source;
 			if (stage < PGXP_DIAG_TRACE_STAGES)
 				primitive_source_stage[bucket][source][stage]++;
+			if (source == PGXP_DIAG_VERTEX_NATIVE &&
+			    packet_vertices[i].reason < PGXP_TRACE_REASON_COUNT)
+			{
+				primitive_native_reason[bucket][packet_vertices[i].reason]++;
+				if (stage == PGXP_TRACE_SRA5)
+					primitive_native_sra5_reason[bucket]
+						[packet_vertices[i].reason]++;
+			}
 		}
 	}
 	if (source_mask == (1u << PGXP_DIAG_VERTEX_TRACKED))
@@ -1225,9 +1216,10 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		const PGXP_diag_packet_vertex* tracked = &packet_vertices[i];
 		log_cb(RETRO_LOG_INFO,
 			"[pgxp_primitive_trace] bucket=%u sample=%u observed=%u "
-			"source=%u id=%llu stage=%u addr=%08x value=%08x\n",
+			"source=%u id=%llu stage=%u reason=%u addr=%08x value=%08x\n",
 			bucket, primitive_bucket_samples[bucket], i, tracked->source,
 			(unsigned long long)tracked->trace_id, tracked->stage,
+			tracked->reason,
 			tracked->addr, tracked->value);
 	}
 }
@@ -1278,17 +1270,6 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		int valid_xy, int value_match)
 {
 	uint8_t terminal_reason;
-	if (packet_vertex_count < 3)
-	{
-		PGXP_diag_packet_vertex* packet_vertex =
-			&packet_vertices[packet_vertex_count++];
-		packet_vertex->trace_id = shadow ? shadow->trace_id : 0;
-		packet_vertex->addr = cb_provenance[slot].addr;
-		packet_vertex->value = value;
-		packet_vertex->source = (uint8_t)source;
-		packet_vertex->stage = shadow ? shadow->trace_stage : 0;
-	}
-
 	if (source == PGXP_DIAG_VERTEX_TRACKED)
 		terminal_reason = 0;
 	else if (source == PGXP_DIAG_VERTEX_CACHE)
@@ -1301,6 +1282,17 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		terminal_reason = 2;
 	else
 		terminal_reason = 3;
+	if (packet_vertex_count < 3)
+	{
+		PGXP_diag_packet_vertex* packet_vertex =
+			&packet_vertices[packet_vertex_count++];
+		packet_vertex->trace_id = shadow ? shadow->trace_id : 0;
+		packet_vertex->addr = cb_provenance[slot].addr;
+		packet_vertex->value = value;
+		packet_vertex->source = (uint8_t)source;
+		packet_vertex->stage = shadow ? shadow->trace_stage : 0;
+		packet_vertex->reason = terminal_reason;
+	}
 	window.trace_terminal[source][terminal_reason]++;
 	if (shadow)
 		trace_record(PGXP_TRACE_EVENT_VERTEX, terminal_reason,
@@ -1600,8 +1592,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_primitive_summary] f=%llu total=%llu "
 		"class_u=%llu/%llu/%llu/%llu class_t=%llu/%llu/%llu/%llu "
-		"y=%llu/%llu/%llu/%llu sra_vertices=%llu tol_reverts=%llu "
-		"provenance_fallbacks=%llu\n",
+		"y=%llu/%llu/%llu/%llu sra_vertices=%llu tol_reverts=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)primitive_total,
 		(unsigned long long)primitive_class[0][0][0],
@@ -1617,8 +1608,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_y_band[2],
 		(unsigned long long)primitive_y_band[3],
 		(unsigned long long)primitive_sra_vertices,
-		(unsigned long long)primitive_tolerance_reverts,
-		(unsigned long long)primitive_provenance_fallbacks);
+		(unsigned long long)primitive_tolerance_reverts);
 	{
 		unsigned bucket;
 		for (bucket = 0; bucket < PGXP_DIAG_PRIMITIVE_BUCKETS; bucket++)
@@ -1634,7 +1624,9 @@ void PGXP_DiagFrame(int backend)
 				"composition=%llu/%llu/%llu/%llu "
 				"tracked_stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
 				"cache_stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
-				"native_stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
+				"native_stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"native_reason=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"native_sra5_reason=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
 				(unsigned long long)frame_number, bucket,
 				(unsigned long long)bucket_total,
 				(unsigned long long)primitive_composition[bucket][0],
@@ -1667,7 +1659,23 @@ void PGXP_DiagFrame(int backend)
 				(unsigned long long)primitive_source_stage[bucket][2][5],
 				(unsigned long long)primitive_source_stage[bucket][2][6],
 				(unsigned long long)primitive_source_stage[bucket][2][7],
-				(unsigned long long)primitive_source_stage[bucket][2][8]);
+				(unsigned long long)primitive_source_stage[bucket][2][8],
+				(unsigned long long)primitive_native_reason[bucket][0],
+				(unsigned long long)primitive_native_reason[bucket][1],
+				(unsigned long long)primitive_native_reason[bucket][2],
+				(unsigned long long)primitive_native_reason[bucket][3],
+				(unsigned long long)primitive_native_reason[bucket][4],
+				(unsigned long long)primitive_native_reason[bucket][5],
+				(unsigned long long)primitive_native_reason[bucket][6],
+				(unsigned long long)primitive_native_reason[bucket][7],
+				(unsigned long long)primitive_native_sra5_reason[bucket][0],
+				(unsigned long long)primitive_native_sra5_reason[bucket][1],
+				(unsigned long long)primitive_native_sra5_reason[bucket][2],
+				(unsigned long long)primitive_native_sra5_reason[bucket][3],
+				(unsigned long long)primitive_native_sra5_reason[bucket][4],
+				(unsigned long long)primitive_native_sra5_reason[bucket][5],
+				(unsigned long long)primitive_native_sra5_reason[bucket][6],
+				(unsigned long long)primitive_native_sra5_reason[bucket][7]);
 		}
 	}
 	log_cb(RETRO_LOG_INFO,
@@ -1734,9 +1742,11 @@ void PGXP_DiagFrame(int backend)
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));
 	primitive_sra_vertices = 0;
 	primitive_tolerance_reverts = 0;
-	primitive_provenance_fallbacks = 0;
 	memset(primitive_composition, 0, sizeof(primitive_composition));
 	memset(primitive_source_stage, 0, sizeof(primitive_source_stage));
+	memset(primitive_native_reason, 0, sizeof(primitive_native_reason));
+	memset(primitive_native_sra5_reason, 0,
+		sizeof(primitive_native_sra5_reason));
 	dispatch_samples = 0;
 }
 
