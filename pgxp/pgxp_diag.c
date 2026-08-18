@@ -213,6 +213,7 @@ static PGXP_diag_recovery_vertex recovery_vertices[PGXP_DIAG_RECOVERY_SIZE];
 static uint64_t recovery_attempts;
 static uint64_t recovery_hits;
 static uint64_t recovery_ambiguous;
+static uint64_t recovery_ambiguous_used;
 static uint64_t recovery_misses;
 static uint64_t recovery_age_hits[3];
 static uint64_t recovery_too_old;
@@ -488,6 +489,7 @@ void PGXP_DiagInit(void)
 	trace_tracked_samples = 0;
 	memset(recovery_vertices, 0, sizeof(recovery_vertices));
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
+	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
 	recovery_too_old = 0;
 	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
@@ -764,7 +766,11 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	if (recovery->ambiguous)
 	{
 		recovery_ambiguous++;
-		return 0;
+		/* Keep the first exact-word result as a bounded experiment.  Multiple
+		 * precise GTE results may quantize to the same native pixel; the first
+		 * remains spatially compatible even though its subpixel/depth identity
+		 * is not proven. */
+		recovery_ambiguous_used++;
 	}
 	*x = recovery->x;
 	*y = recovery->y;
@@ -1696,7 +1702,8 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_tolerance_reverts);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
-		"age=%llu/%llu/%llu ambiguous=%llu misses=%llu too_old=%llu\n",
+		"age=%llu/%llu/%llu ambiguous=%llu used=%llu misses=%llu "
+		"too_old=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)recovery_attempts,
 		(unsigned long long)recovery_hits,
@@ -1704,6 +1711,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_age_hits[1],
 		(unsigned long long)recovery_age_hits[2],
 		(unsigned long long)recovery_ambiguous,
+		(unsigned long long)recovery_ambiguous_used,
 		(unsigned long long)recovery_misses,
 		(unsigned long long)recovery_too_old);
 	log_cb(RETRO_LOG_INFO,
@@ -1868,6 +1876,7 @@ void PGXP_DiagFrame(int backend)
 	memset(primitive_native_sra5_reason, 0,
 		sizeof(primitive_native_sra5_reason));
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
+	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
 	recovery_too_old = 0;
 	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
