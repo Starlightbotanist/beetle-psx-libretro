@@ -55,6 +55,8 @@ void PGXP_DiagStore8(uint32_t addr, uint8_t value,
 void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 		const PGXP_value* shadow);
 void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos);
+void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
+		unsigned tex_mode, int mask_eval);
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		unsigned slot, uint32_t value, const PGXP_value* shadow,
 		float x, float y, float w, int valid_w,
@@ -84,6 +86,7 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value);
 #define PGXP_DiagStore8(addr, value, invalid_count, shadow) ((void)0)
 #define PGXP_DiagFIFOWrite(pos, addr, value, shadow) ((void)0)
 #define PGXP_DiagCBWrite(slot, fifo_pos) ((void)0)
+#define PGXP_DiagPacket(opcode, words, abr, tex_mode, mask_eval) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, valid_w, valid_xy, value_match) ((void)0)
 #define PGXP_DiagNCLIP(native_value, precise_value) ((void)0)
 

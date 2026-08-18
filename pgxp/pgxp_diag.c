@@ -193,6 +193,15 @@ static uint64_t trace_next_id = 1;
 static uint64_t trace_sequence;
 static uint32_t trace_write;
 static uint32_t trace_chain_samples;
+static uint32_t trace_tracked_samples;
+static uint64_t trace_tracked_ids[64];
+static uint64_t packet_ordinal;
+static uint64_t current_packet;
+static uint8_t current_opcode;
+static uint8_t current_packet_words;
+static uint8_t current_abr;
+static uint8_t current_tex_mode;
+static uint8_t current_mask_eval;
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -428,6 +437,15 @@ void PGXP_DiagInit(void)
 	trace_sequence = 0;
 	trace_write = 0;
 	trace_chain_samples = 0;
+	trace_tracked_samples = 0;
+	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
+	packet_ordinal = 0;
+	current_packet = 0;
+	current_opcode = 0;
+	current_packet_words = 0;
+	current_abr = 0;
+	current_tex_mode = 0;
+	current_mask_eval = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -1057,6 +1075,48 @@ void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos)
 	}
 }
 
+void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
+		unsigned tex_mode, int mask_eval)
+{
+	current_packet = ++packet_ordinal;
+	current_opcode = opcode;
+	current_packet_words = (uint8_t)words;
+	current_abr = (uint8_t)abr;
+	current_tex_mode = (uint8_t)tex_mode;
+	current_mask_eval = mask_eval != 0;
+}
+
+static void trace_sample_tracked(unsigned slot, uint32_t value,
+		const PGXP_value* shadow, float x, float y, float w, int valid_w)
+{
+	uint32_t i;
+	int16_t native_x;
+	int16_t native_y;
+
+	if (!shadow || !shadow->trace_id || !log_cb ||
+	    trace_tracked_samples >= 64 || shadow->trace_stage != PGXP_TRACE_SRA5)
+		return;
+	for (i = 0; i < trace_tracked_samples; i++)
+		if (trace_tracked_ids[i] == shadow->trace_id)
+			return;
+
+	trace_tracked_ids[trace_tracked_samples++] = shadow->trace_id;
+	native_x = (int16_t)(value & 0xffff);
+	native_y = (int16_t)(value >> 16);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_trace_tracked] sample=%u id=%llu mf=%u packet=%llu "
+		"op=%02x words=%u slot=%u textured=%u gouraud=%u quad=%u "
+		"abr=%u texmode=%u mask=%u addr=%08x native=%d/%d "
+		"precise=%.3f/%.3f delta=%.3f/%.3f w=%.6f valid_w=%d\n",
+		trace_tracked_samples, (unsigned long long)shadow->trace_id,
+		mode_frame, (unsigned long long)current_packet, current_opcode,
+		current_packet_words, slot, !!(current_opcode & 0x04),
+		!!(current_opcode & 0x10), !!(current_opcode & 0x08),
+		current_abr, current_tex_mode, current_mask_eval,
+		cb_provenance[slot].addr, native_x, native_y, x, y,
+		x - native_x, y - native_y, w, valid_w);
+}
+
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
 {
 	window.gte_vertices++;
@@ -1093,6 +1153,9 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 	if (source == PGXP_DIAG_VERTEX_NATIVE &&
 	    trace_metadata_valid(shadow))
 		trace_dump_chain(shadow->trace_id, terminal_reason);
+	else if (source == PGXP_DIAG_VERTEX_TRACKED &&
+	         trace_metadata_valid(shadow))
+		trace_sample_tracked(slot, value, shadow, x, y, w, valid_w);
 
 	switch (source)
 	{

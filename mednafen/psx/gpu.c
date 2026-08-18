@@ -1561,6 +1561,10 @@ static void ProcessFIFO(uint32_t in_count)
          SetTPage(&GPU, CB[4 + ((cc >> 4) & 0x1)] >> 16);
    }
 
+   if(PGXP_enabled())
+      PGXP_DiagPacket(cc, command_len, GPU.abr, GPU.TexMode,
+         GPU.MaskEvalAND != 0);
+
    if ((cc >= 0x80) && (cc <= 0x9F))
       Command_FBCopy(&GPU, CB);
    else if ((cc >= 0xA0) && (cc <= 0xBF))
