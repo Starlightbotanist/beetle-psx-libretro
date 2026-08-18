@@ -202,6 +202,22 @@ static uint8_t current_packet_words;
 static uint8_t current_abr;
 static uint8_t current_tex_mode;
 static uint8_t current_mask_eval;
+typedef struct PGXP_diag_packet_vertex_Tag
+{
+	uint64_t trace_id;
+	uint32_t addr;
+	uint32_t value;
+	uint8_t source;
+	uint8_t stage;
+} PGXP_diag_packet_vertex;
+static PGXP_diag_packet_vertex packet_vertices[3];
+static uint8_t packet_vertex_count;
+static uint32_t primitive_bucket_samples[32];
+static uint64_t primitive_total;
+static uint64_t primitive_class[2][2][2];
+static uint64_t primitive_y_band[4];
+static uint64_t primitive_sra_vertices;
+static uint64_t primitive_tolerance_reverts;
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -446,6 +462,14 @@ void PGXP_DiagInit(void)
 	current_abr = 0;
 	current_tex_mode = 0;
 	current_mask_eval = 0;
+	memset(packet_vertices, 0, sizeof(packet_vertices));
+	packet_vertex_count = 0;
+	memset(primitive_bucket_samples, 0, sizeof(primitive_bucket_samples));
+	primitive_total = 0;
+	memset(primitive_class, 0, sizeof(primitive_class));
+	memset(primitive_y_band, 0, sizeof(primitive_y_band));
+	primitive_sra_vertices = 0;
+	primitive_tolerance_reverts = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -1084,6 +1108,72 @@ void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 	current_abr = (uint8_t)abr;
 	current_tex_mode = (uint8_t)tex_mode;
 	current_mask_eval = mask_eval != 0;
+	memset(packet_vertices, 0, sizeof(packet_vertices));
+	packet_vertex_count = 0;
+}
+
+void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
+		int invalid_w, int tolerance)
+{
+	int textured = !!(current_opcode & 0x04);
+	int gouraud = !!(current_opcode & 0x10);
+	int reverted = 0;
+	int32_t average_y = (vertices[0].native_y + vertices[1].native_y +
+		vertices[2].native_y) / 3;
+	unsigned y_band = average_y < 64 ? 0 : average_y < 128 ? 1 :
+		average_y < 192 ? 2 : 3;
+	unsigned bucket = (textured << 4) | (gouraud << 3) |
+		((invalid_w != 0) << 2) | y_band;
+	unsigned i;
+
+	primitive_total++;
+	primitive_class[textured][gouraud][invalid_w != 0]++;
+	primitive_y_band[y_band]++;
+	for (i = 0; i < 3; i++)
+	{
+		if (i < packet_vertex_count &&
+		    packet_vertices[i].stage == PGXP_TRACE_SRA5)
+			primitive_sra_vertices++;
+		if (vertices[i].precise_before_x != vertices[i].precise_after_x ||
+		    vertices[i].precise_before_y != vertices[i].precise_after_y)
+			reverted = 1;
+	}
+	if (reverted)
+		primitive_tolerance_reverts++;
+
+	if (!log_cb || primitive_bucket_samples[bucket] >= 8)
+		return;
+	primitive_bucket_samples[bucket]++;
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_primitive] bucket=%u sample=%u mf=%u packet=%llu op=%02x "
+		"words=%u textured=%d gouraud=%d quad=%u abr=%u texmode=%u "
+		"mask=%u invalid_w=%d tol=%d reverted=%d yband=%u vertices=%u\n",
+		bucket, primitive_bucket_samples[bucket], mode_frame,
+		(unsigned long long)current_packet, current_opcode,
+		current_packet_words, textured, gouraud, !!(current_opcode & 0x08),
+		current_abr, current_tex_mode, current_mask_eval, invalid_w,
+		tolerance, reverted, y_band, packet_vertex_count);
+	for (i = 0; i < 3; i++)
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_primitive_vertex] bucket=%u sample=%u v=%u native=%d/%d "
+			"before=%.3f/%.3f/%.6f after=%.3f/%.3f/%.6f uv=%u/%u\n",
+			bucket, primitive_bucket_samples[bucket], i, vertices[i].native_x,
+			vertices[i].native_y, vertices[i].precise_before_x,
+			vertices[i].precise_before_y, vertices[i].precise_before_w,
+			vertices[i].precise_after_x, vertices[i].precise_after_y,
+			vertices[i].precise_after_w, vertices[i].u, vertices[i].v);
+	}
+	for (i = 0; i < packet_vertex_count; i++)
+	{
+		const PGXP_diag_packet_vertex* tracked = &packet_vertices[i];
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_primitive_trace] bucket=%u sample=%u observed=%u "
+			"source=%u id=%llu stage=%u addr=%08x value=%08x\n",
+			bucket, primitive_bucket_samples[bucket], i, tracked->source,
+			(unsigned long long)tracked->trace_id, tracked->stage,
+			tracked->addr, tracked->value);
+	}
 }
 
 static void trace_sample_tracked(unsigned slot, uint32_t value,
@@ -1132,6 +1222,16 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		int valid_xy, int value_match)
 {
 	uint8_t terminal_reason;
+	if (packet_vertex_count < 3)
+	{
+		PGXP_diag_packet_vertex* packet_vertex =
+			&packet_vertices[packet_vertex_count++];
+		packet_vertex->trace_id = shadow ? shadow->trace_id : 0;
+		packet_vertex->addr = cb_provenance[slot].addr;
+		packet_vertex->value = value;
+		packet_vertex->source = (uint8_t)source;
+		packet_vertex->stage = shadow ? shadow->trace_stage : 0;
+	}
 
 	if (source == PGXP_DIAG_VERTEX_TRACKED)
 		terminal_reason = 0;
@@ -1442,6 +1542,26 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.trace_terminal[2][6],
 		(unsigned long long)window.trace_terminal[2][7]);
 	log_cb(RETRO_LOG_INFO,
+		"[pgxp_primitive_summary] f=%llu total=%llu "
+		"class_u=%llu/%llu/%llu/%llu class_t=%llu/%llu/%llu/%llu "
+		"y=%llu/%llu/%llu/%llu sra_vertices=%llu tol_reverts=%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)primitive_total,
+		(unsigned long long)primitive_class[0][0][0],
+		(unsigned long long)primitive_class[0][0][1],
+		(unsigned long long)primitive_class[0][1][0],
+		(unsigned long long)primitive_class[0][1][1],
+		(unsigned long long)primitive_class[1][0][0],
+		(unsigned long long)primitive_class[1][0][1],
+		(unsigned long long)primitive_class[1][1][0],
+		(unsigned long long)primitive_class[1][1][1],
+		(unsigned long long)primitive_y_band[0],
+		(unsigned long long)primitive_y_band[1],
+		(unsigned long long)primitive_y_band[2],
+		(unsigned long long)primitive_y_band[3],
+		(unsigned long long)primitive_sra_vertices,
+		(unsigned long long)primitive_tolerance_reverts);
+	log_cb(RETRO_LOG_INFO,
 		"[pgxp_load_summary] f=%llu loads=%llu untracked=%llu "
 		"invalid-result=%llu op=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
 		"region=%llu/%llu/%llu/%llu invalid-mask=%08x poison=%08x\n",
@@ -1500,6 +1620,11 @@ void PGXP_DiagFrame(int backend)
 
 	memset(&window, 0, sizeof(window));
 	window.event_hash = UINT64_C(1469598103934665603);
+	primitive_total = 0;
+	memset(primitive_class, 0, sizeof(primitive_class));
+	memset(primitive_y_band, 0, sizeof(primitive_y_band));
+	primitive_sra_vertices = 0;
+	primitive_tolerance_reverts = 0;
 	dispatch_samples = 0;
 }
 

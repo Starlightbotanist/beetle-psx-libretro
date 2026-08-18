@@ -23,6 +23,20 @@ enum PGXP_diag_trace_stage
 	PGXP_TRACE_VERTEX
 };
 
+typedef struct PGXP_diag_primitive_vertex_Tag
+{
+	int32_t native_x;
+	int32_t native_y;
+	float precise_before_x;
+	float precise_before_y;
+	float precise_before_w;
+	float precise_after_x;
+	float precise_after_y;
+	float precise_after_w;
+	uint16_t u;
+	uint16_t v;
+} PGXP_diag_primitive_vertex;
+
 #if PGXP_DIAG
 
 void PGXP_DiagInit(void);
@@ -57,11 +71,29 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos);
 void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 		unsigned tex_mode, int mask_eval);
+void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
+		int invalid_w, int tolerance);
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		unsigned slot, uint32_t value, const PGXP_value* shadow,
 		float x, float y, float w, int valid_w,
 		int valid_xy, int value_match);
 void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value);
+
+#define PGXP_DIAG_PRIMITIVE_DECLARE(name) PGXP_diag_primitive_vertex name[3]
+#define PGXP_DIAG_PRIMITIVE_BEFORE(name, i, vertex) do { \
+	(name)[i].native_x = (vertex).x; \
+	(name)[i].native_y = (vertex).y; \
+	(name)[i].precise_before_x = (vertex).precise[0]; \
+	(name)[i].precise_before_y = (vertex).precise[1]; \
+	(name)[i].precise_before_w = (vertex).precise[2]; \
+	(name)[i].u = (vertex).u; \
+	(name)[i].v = (vertex).v; \
+} while (0)
+#define PGXP_DIAG_PRIMITIVE_AFTER(name, i, vertex) do { \
+	(name)[i].precise_after_x = (vertex).precise[0]; \
+	(name)[i].precise_after_y = (vertex).precise[1]; \
+	(name)[i].precise_after_w = (vertex).precise[2]; \
+} while (0)
 
 #else
 
@@ -87,8 +119,12 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value);
 #define PGXP_DiagFIFOWrite(pos, addr, value, shadow) ((void)0)
 #define PGXP_DiagCBWrite(slot, fifo_pos) ((void)0)
 #define PGXP_DiagPacket(opcode, words, abr, tex_mode, mask_eval) ((void)0)
+#define PGXP_DiagPrimitive(vertices, invalid_w, tolerance) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, valid_w, valid_xy, value_match) ((void)0)
 #define PGXP_DiagNCLIP(native_value, precise_value) ((void)0)
+#define PGXP_DIAG_PRIMITIVE_DECLARE(name)
+#define PGXP_DIAG_PRIMITIVE_BEFORE(name, i, vertex) ((void)0)
+#define PGXP_DIAG_PRIMITIVE_AFTER(name, i, vertex) ((void)0)
 
 #endif
 

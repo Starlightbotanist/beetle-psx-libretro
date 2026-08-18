@@ -1449,6 +1449,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    uint32_t       clut    = 0; \
    unsigned       sv      = 0; \
    bool           invalidW = false; \
+   PGXP_DIAG_PRIMITIVE_DECLARE(pgxp_diag_vertices); \
    unsigned       v; \
    uint16_t       clut_x, clut_y; \
    tri_vertex     lineVertices[3]; \
@@ -1508,6 +1509,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          sv       = 2; \
       } \
    } \
+   for (v = 0; v < sv; v++) \
+      PGXP_DIAG_PRIMITIVE_BEFORE(pgxp_diag_vertices, v, vertices[v]); \
    /* else memset(vertices, 0, sizeof(vertices)); */ \
    for (v = sv; v < 3; v++) \
    { \
@@ -1623,6 +1626,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          } \
          cb++; \
       } \
+      PGXP_DIAG_PRIMITIVE_BEFORE(pgxp_diag_vertices, v, vertices[v]); \
    } \
    /* iCB: If any vertices lack w components then set all to 1 */ \
    if (invalidW) \
@@ -1644,6 +1648,10 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          } \
          vertices[v].precise[2] = 1.f; \
       } \
+   for (v = 0; v < 3; v++) \
+      PGXP_DIAG_PRIMITIVE_AFTER(pgxp_diag_vertices, v, vertices[v]); \
+   if (PGXP_LIT) \
+      PGXP_DiagPrimitive(pgxp_diag_vertices, invalidW, psx_pgxp_2d_tol); \
    /* Copy before Calc_UVOffsets which modifies vertices */ \
    /* Calc_UVOffsets likes to see unadjusted vertices */ \
    if (NV_LIT == 4 && gpu->InCmd != INCMD_QUAD) \
@@ -1911,4 +1919,3 @@ CMD_DRAWPOLY_BMGROUP_ALL(4, 1, 1)
 #undef COORD_POST_PADDING
 #undef COORD_FBS
 #undef COORD_MF_INT
-
