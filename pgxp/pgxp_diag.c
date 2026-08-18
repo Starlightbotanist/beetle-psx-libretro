@@ -216,6 +216,8 @@ static uint64_t recovery_ambiguous;
 static uint64_t recovery_misses;
 static uint64_t recovery_age_hits[3];
 static uint64_t recovery_too_old;
+static uint64_t recovery_stage_attempts[PGXP_DIAG_TRACE_STAGES];
+static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
 static uint8_t current_opcode;
@@ -488,6 +490,8 @@ void PGXP_DiagInit(void)
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
 	recovery_too_old = 0;
+	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
+	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
 	current_packet = 0;
@@ -737,10 +741,13 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	PGXP_diag_recovery_vertex* recovery;
 	uint32_t index;
 	uint32_t age;
+	unsigned stage = trace_metadata_valid(stale) ? stale->trace_stage :
+		PGXP_TRACE_NONE;
 
-	if (!trace_metadata_valid(stale) || stale->trace_stage != PGXP_TRACE_SRA5)
-		return 0;
 	recovery_attempts++;
+	if (stage >= PGXP_DIAG_TRACE_STAGES)
+		stage = PGXP_TRACE_NONE;
+	recovery_stage_attempts[stage]++;
 	index = (value * UINT32_C(2654435761)) >> 16;
 	recovery = &recovery_vertices[index];
 	if (recovery->value != value || recovery->frame > mode_frame)
@@ -764,6 +771,7 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	*z = recovery->z;
 	recovery_hits++;
 	recovery_age_hits[age]++;
+	recovery_stage_hits[stage]++;
 	return 1;
 }
 
@@ -1698,6 +1706,29 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_ambiguous,
 		(unsigned long long)recovery_misses,
 		(unsigned long long)recovery_too_old);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_recovery_stage] f=%llu attempts=%llu/%llu/%llu/%llu/"
+		"%llu/%llu/%llu/%llu/%llu hits=%llu/%llu/%llu/%llu/%llu/"
+		"%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)recovery_stage_attempts[0],
+		(unsigned long long)recovery_stage_attempts[1],
+		(unsigned long long)recovery_stage_attempts[2],
+		(unsigned long long)recovery_stage_attempts[3],
+		(unsigned long long)recovery_stage_attempts[4],
+		(unsigned long long)recovery_stage_attempts[5],
+		(unsigned long long)recovery_stage_attempts[6],
+		(unsigned long long)recovery_stage_attempts[7],
+		(unsigned long long)recovery_stage_attempts[8],
+		(unsigned long long)recovery_stage_hits[0],
+		(unsigned long long)recovery_stage_hits[1],
+		(unsigned long long)recovery_stage_hits[2],
+		(unsigned long long)recovery_stage_hits[3],
+		(unsigned long long)recovery_stage_hits[4],
+		(unsigned long long)recovery_stage_hits[5],
+		(unsigned long long)recovery_stage_hits[6],
+		(unsigned long long)recovery_stage_hits[7],
+		(unsigned long long)recovery_stage_hits[8]);
 	{
 		unsigned bucket;
 		for (bucket = 0; bucket < PGXP_DIAG_PRIMITIVE_BUCKETS; bucket++)
@@ -1839,6 +1870,8 @@ void PGXP_DiagFrame(int backend)
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
 	recovery_too_old = 0;
+	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
+	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
 	dispatch_samples = 0;
 }
 
