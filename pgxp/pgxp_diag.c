@@ -27,7 +27,8 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_PRIMITIVE_BUCKETS 32u
 #define PGXP_DIAG_PRIMITIVE_COMPOSITIONS 4u
 #define PGXP_DIAG_TRACE_STAGES 9u
-#define PGXP_DIAG_RECOVERY_SIZE 65536u
+#define PGXP_DIAG_RECOVERY_BUCKETS 65536u
+#define PGXP_DIAG_RECOVERY_WAYS 4u
 
 enum PGXP_trace_event_type
 {
@@ -69,6 +70,7 @@ typedef struct
 	float y;
 	float z;
 	uint8_t ambiguous;
+	uint8_t valid;
 } PGXP_diag_recovery_vertex;
 
 enum PGXP_diag_address_region
@@ -209,7 +211,8 @@ static uint32_t trace_write;
 static uint32_t trace_chain_samples;
 static uint32_t trace_tracked_samples;
 static uint64_t trace_tracked_ids[64];
-static PGXP_diag_recovery_vertex recovery_vertices[PGXP_DIAG_RECOVERY_SIZE];
+static PGXP_diag_recovery_vertex recovery_vertices
+	[PGXP_DIAG_RECOVERY_BUCKETS][PGXP_DIAG_RECOVERY_WAYS];
 static uint64_t recovery_attempts;
 static uint64_t recovery_hits;
 static uint64_t recovery_ambiguous;
@@ -219,6 +222,8 @@ static uint64_t recovery_age_hits[3];
 static uint64_t recovery_too_old;
 static uint64_t recovery_stage_attempts[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
+static uint64_t recovery_way_hits[PGXP_DIAG_RECOVERY_WAYS];
+static uint64_t recovery_evictions;
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
 static uint8_t current_opcode;
@@ -494,6 +499,8 @@ void PGXP_DiagInit(void)
 	recovery_too_old = 0;
 	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
 	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
+	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
+	recovery_evictions = 0;
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
 	current_packet = 0;
@@ -710,6 +717,8 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 {
 	PGXP_diag_recovery_vertex* recovery;
 	uint32_t index;
+	unsigned way;
+	unsigned replace = 0;
 	if (!value)
 		return;
 	/* A GTE result starts a fresh provenance chain. */
@@ -719,8 +728,28 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 	trace_record(PGXP_TRACE_EVENT_GTE, 0, value->trace_id,
 		value->trace_stage, 0, 0, value->value, value->value, value);
 	index = (value->value * UINT32_C(2654435761)) >> 16;
-	recovery = &recovery_vertices[index];
-	if (recovery->frame == mode_frame && recovery->value == value->value)
+	recovery = NULL;
+	for (way = 0; way < PGXP_DIAG_RECOVERY_WAYS; way++)
+	{
+		PGXP_diag_recovery_vertex* candidate = &recovery_vertices[index][way];
+		if (candidate->valid && candidate->value == value->value)
+		{
+			recovery = candidate;
+			break;
+		}
+		if (!candidate->valid ||
+		    (recovery_vertices[index][replace].valid &&
+		     candidate->frame < recovery_vertices[index][replace].frame))
+			replace = way;
+	}
+	if (!recovery)
+	{
+		recovery = &recovery_vertices[index][replace];
+		if (recovery->valid)
+			recovery_evictions++;
+	}
+	if (recovery->valid && recovery->frame == mode_frame &&
+	    recovery->value == value->value)
 	{
 		if (recovery->x != value->x || recovery->y != value->y ||
 		    recovery->z != value->z)
@@ -734,6 +763,7 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 		recovery->y = value->y;
 		recovery->z = value->z;
 		recovery->ambiguous = 0;
+		recovery->valid = 1;
 	}
 }
 
@@ -743,6 +773,7 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	PGXP_diag_recovery_vertex* recovery;
 	uint32_t index;
 	uint32_t age;
+	unsigned way;
 	unsigned stage = trace_metadata_valid(stale) ? stale->trace_stage :
 		PGXP_TRACE_NONE;
 
@@ -751,8 +782,17 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 		stage = PGXP_TRACE_NONE;
 	recovery_stage_attempts[stage]++;
 	index = (value * UINT32_C(2654435761)) >> 16;
-	recovery = &recovery_vertices[index];
-	if (recovery->value != value || recovery->frame > mode_frame)
+	recovery = NULL;
+	for (way = 0; way < PGXP_DIAG_RECOVERY_WAYS; way++)
+	{
+		PGXP_diag_recovery_vertex* candidate = &recovery_vertices[index][way];
+		if (candidate->valid && candidate->value == value)
+		{
+			recovery = candidate;
+			break;
+		}
+	}
+	if (!recovery || recovery->frame > mode_frame)
 	{
 		recovery_misses++;
 		return 0;
@@ -778,6 +818,7 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	recovery_hits++;
 	recovery_age_hits[age]++;
 	recovery_stage_hits[stage]++;
+	recovery_way_hits[way]++;
 	return 1;
 }
 
@@ -1737,6 +1778,15 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_stage_hits[6],
 		(unsigned long long)recovery_stage_hits[7],
 		(unsigned long long)recovery_stage_hits[8]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_recovery_hash] f=%llu way=%llu/%llu/%llu/%llu "
+		"evictions=%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)recovery_way_hits[0],
+		(unsigned long long)recovery_way_hits[1],
+		(unsigned long long)recovery_way_hits[2],
+		(unsigned long long)recovery_way_hits[3],
+		(unsigned long long)recovery_evictions);
 	{
 		unsigned bucket;
 		for (bucket = 0; bucket < PGXP_DIAG_PRIMITIVE_BUCKETS; bucket++)
@@ -1881,6 +1931,8 @@ void PGXP_DiagFrame(int backend)
 	recovery_too_old = 0;
 	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
 	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
+	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
+	recovery_evictions = 0;
 	dispatch_samples = 0;
 }
 
