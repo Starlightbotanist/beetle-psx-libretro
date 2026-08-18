@@ -218,7 +218,8 @@ static uint64_t recovery_hits;
 static uint64_t recovery_ambiguous;
 static uint64_t recovery_ambiguous_used;
 static uint64_t recovery_misses;
-static uint64_t recovery_age_hits[4];
+static uint64_t recovery_age_hits[5];
+static uint64_t recovery_old_age[4];
 static uint64_t recovery_too_old;
 static uint64_t recovery_stage_attempts[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
@@ -496,6 +497,7 @@ void PGXP_DiagInit(void)
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
+	memset(recovery_old_age, 0, sizeof(recovery_old_age));
 	recovery_too_old = 0;
 	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
 	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
@@ -805,9 +807,10 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 		return 0;
 	}
 	age = mode_frame - recovery->frame;
-	if (age > 3)
+	if (age > 4)
 	{
 		recovery_too_old++;
+		recovery_old_age[age < 8 ? age - 5 : 3]++;
 		return 0;
 	}
 	if (recovery->ambiguous)
@@ -1750,7 +1753,8 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_tolerance_reverts);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
-		"age=%llu/%llu/%llu/%llu ambiguous=%llu used=%llu misses=%llu "
+		"age=%llu/%llu/%llu/%llu/%llu ambiguous=%llu used=%llu "
+		"misses=%llu "
 		"too_old=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)recovery_attempts,
@@ -1759,10 +1763,19 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_age_hits[1],
 		(unsigned long long)recovery_age_hits[2],
 		(unsigned long long)recovery_age_hits[3],
+		(unsigned long long)recovery_age_hits[4],
 		(unsigned long long)recovery_ambiguous,
 		(unsigned long long)recovery_ambiguous_used,
 		(unsigned long long)recovery_misses,
 		(unsigned long long)recovery_too_old);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_recovery_old_age] f=%llu age5=%llu age6=%llu age7=%llu "
+		"age8plus=%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)recovery_old_age[0],
+		(unsigned long long)recovery_old_age[1],
+		(unsigned long long)recovery_old_age[2],
+		(unsigned long long)recovery_old_age[3]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_stage] f=%llu attempts=%llu/%llu/%llu/%llu/"
 		"%llu/%llu/%llu/%llu/%llu hits=%llu/%llu/%llu/%llu/%llu/"
@@ -1936,6 +1949,7 @@ void PGXP_DiagFrame(int backend)
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
+	memset(recovery_old_age, 0, sizeof(recovery_old_age));
 	recovery_too_old = 0;
 	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
 	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
