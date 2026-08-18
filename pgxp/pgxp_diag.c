@@ -242,6 +242,8 @@ static uint64_t address_invalidations;
 static uint64_t address_attempts;
 static uint64_t address_hits;
 static uint64_t address_misses;
+static uint64_t address_unavailable;
+static uint64_t address_value_mismatch;
 static uint64_t address_stage_hits[PGXP_DIAG_TRACE_STAGES];
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
@@ -524,6 +526,7 @@ void PGXP_DiagInit(void)
 	recovery_evictions = 0;
 	address_captures = address_retains = address_invalidations = 0;
 	address_attempts = address_hits = address_misses = 0;
+	address_unavailable = address_value_mismatch = 0;
 	memset(address_stage_hits, 0, sizeof(address_stage_hits));
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
@@ -897,6 +900,10 @@ address_fallback:
 				return 1;
 			}
 			address_misses++;
+			if (!history->valid)
+				address_unavailable++;
+			else
+				address_value_mismatch++;
 		}
 	}
 	return 0;
@@ -1881,6 +1888,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_address_recovery] f=%llu captures=%llu retains=%llu "
 		"invalidations=%llu attempts=%llu hits=%llu misses=%llu "
+		"unavailable=%llu mismatch=%llu "
 		"stage_hits=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)address_captures,
@@ -1889,6 +1897,8 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)address_attempts,
 		(unsigned long long)address_hits,
 		(unsigned long long)address_misses,
+		(unsigned long long)address_unavailable,
+		(unsigned long long)address_value_mismatch,
 		(unsigned long long)address_stage_hits[0],
 		(unsigned long long)address_stage_hits[1],
 		(unsigned long long)address_stage_hits[2],
@@ -2047,6 +2057,7 @@ void PGXP_DiagFrame(int backend)
 	recovery_evictions = 0;
 	address_captures = address_retains = address_invalidations = 0;
 	address_attempts = address_hits = address_misses = 0;
+	address_unavailable = address_value_mismatch = 0;
 	memset(address_stage_hits, 0, sizeof(address_stage_hits));
 	dispatch_samples = 0;
 }
