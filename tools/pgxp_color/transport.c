@@ -341,6 +341,33 @@ static void test_cpu_math_invariants(void)
       fail("SLTU compared low halves with high unequal", 1, 0);
 }
 
+static void test_vertex_w_provenance_gate(void)
+{
+   const uint32_t packed = 0xFFE4007Bu;
+   PGXP_value shadow = PGXP_value_zero;
+   OGLVertex out;
+
+   shadow.x = 123.25f;
+   shadow.y = -27.5f;
+   shadow.z = 4096.0f;
+   shadow.value = packed;
+   shadow.flags = VALID_012;
+   PGXP_WriteCB(&shadow, 0);
+   memset(&out, 0, sizeof(out));
+   PGXP_GetVertex(0, &packed, &out, 0, 0);
+   if (out.x != shadow.x || out.y != shadow.y)
+      fail("W gate discarded precise XY", 0, 1);
+   if (out.valid_w)
+      fail("unproven stage-0 W accepted", 1, 0);
+
+   PGXP_DiagTraceGTE(&shadow);
+   PGXP_WriteCB(&shadow, 0);
+   memset(&out, 0, sizeof(out));
+   PGXP_GetVertex(0, &packed, &out, 0, 0);
+   if (!out.valid_w || out.w != shadow.z)
+      fail("GTE-proven W rejected", out.valid_w, 1);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -368,6 +395,9 @@ int main(void)
 
    printf("[T7] CPU bitwise/comparison invariants\n");
    test_cpu_math_invariants();
+
+   printf("[T8] vertex W provenance gate preserves precise XY\n");
+   test_vertex_w_provenance_gate();
 
    if (failures)
    {

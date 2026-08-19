@@ -633,6 +633,14 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			/* This value does not have a valid W coordinate */
 			pOutput->valid_w = 0;
 		}
+		else if (!PGXP_DiagVertexWEligible(offset, vert))
+		{
+			/* SwanStation only enables perspective W for vertices whose
+			 * precision is still demonstrably attached to a transform.  Keep
+			 * Beetle's precise X/Y, but do not let an unproven stage-0 shadow
+			 * enable perspective correction for the whole primitive. */
+			pOutput->valid_w = 0;
+		}
 	}
 	else
 	{

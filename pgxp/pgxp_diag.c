@@ -181,6 +181,10 @@ typedef struct
 	uint64_t vertex_native_value_mismatch;
 	uint64_t vertex_native_both;
 	uint64_t vertex_valid_w;
+	uint64_t vertex_w_gate_kept;
+	uint64_t vertex_w_gate_rejected;
+	uint64_t vertex_w_gate_rejected_stage[PGXP_DIAG_TRACE_STAGES];
+	uint64_t vertex_w_gate_rejected_width[PGXP_DIAG_WRITER_WIDTHS];
 	uint64_t nclip_compares;
 	uint64_t nclip_sign_disagreements;
 	uint64_t lineage_mfc2;
@@ -1799,6 +1803,26 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 	window.event_hash = hash_bytes(window.event_hash, &w, sizeof(w));
 }
 
+int PGXP_DiagVertexWEligible(unsigned slot, const PGXP_value* shadow)
+{
+	unsigned stage = trace_metadata_valid(shadow) ? shadow->trace_stage :
+		PGXP_TRACE_NONE;
+	unsigned width = slot < 16 && cb_provenance[slot].writer.valid ?
+		cb_provenance[slot].writer.width : 0;
+	int eligible = stage != PGXP_TRACE_NONE;
+	if (width >= PGXP_DIAG_WRITER_WIDTHS)
+		width = 0;
+	if (eligible)
+		window.vertex_w_gate_kept++;
+	else
+	{
+		window.vertex_w_gate_rejected++;
+		window.vertex_w_gate_rejected_stage[stage]++;
+		window.vertex_w_gate_rejected_width[width]++;
+	}
+	return eligible;
+}
+
 void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value)
 {
 	window.nclip_compares++;
@@ -1911,6 +1935,26 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.rendered_z_far[0],
 		(unsigned long long)window.rendered_z_far[1],
 		(unsigned long long)window.rendered_z_far[2]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_w_gate] f=%llu kept=%llu rejected=%llu "
+		"stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"width=%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.vertex_w_gate_kept,
+		(unsigned long long)window.vertex_w_gate_rejected,
+		(unsigned long long)window.vertex_w_gate_rejected_stage[0],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[1],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[2],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[3],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[4],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[5],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[6],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[7],
+		(unsigned long long)window.vertex_w_gate_rejected_stage[8],
+		(unsigned long long)window.vertex_w_gate_rejected_width[0],
+		(unsigned long long)window.vertex_w_gate_rejected_width[1],
+		(unsigned long long)window.vertex_w_gate_rejected_width[2],
+		(unsigned long long)window.vertex_w_gate_rejected_width[3]);
 	{
 		unsigned source;
 		for (source = 0; source < 3; source++)
