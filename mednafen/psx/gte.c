@@ -1438,16 +1438,16 @@ static INLINE float pgxp_precise_z(int64_t acc)
    }
 #endif
 
-   /* Keep the fractional component recovered from the raw accumulator, but
-    * do not extend projection depth beyond architectural SZ3.  Both
-    * SwanStation and DuckStation's default PGXP path use saturated SZ3;
-    * exceeding it is their separately-selectable preserve-projection-
-    * precision mode.  Treating the extension as unconditional made far
-    * geometry internally precise but potentially incompatible with games
-    * which construct visibility/display lists around the saturated GTE
-    * result (Ridge Racer Type 4's tunnels are the controlled A/B case).
-    * The near H/2 floor remains unchanged. */
-   return float_max(H/2.f, float_min((float)z, 65535.0f));
+   /* f1ac005c restored the architectural 0xFFFF ceiling as a controlled
+    * field test. R4, GT2 and both Spyro games showed neither improvement
+    * nor regression, so retain the pre-test uncapped behaviour and measure
+    * both generated and rendered far-depth geometry in the regular PGXP
+    * diagnostic window. */
+   {
+      float precise_z = float_max(H/2.f, (float)z);
+      PGXP_DiagProjectionZ(z, precise_z, H);
+      return precise_z;
+   }
 }
 
 /* Companion to pgxp_precise_z: the shadow's h/z, with the H == 0 corner

@@ -106,19 +106,18 @@ void	PGXP_GTE_SWC2(uint32_t instr, uint32_t rtVal, uint32_t addr);	// copy GTE r
  * tree without this patch; that identity is verified rather than
  * asserted, by disassembly comparison.
  *
- * What it measures, when enabled: pgxp_precise_z() clamps the exact
- * view-space Z to the same 0xFFFF ceiling the architectural SZ3
- * saturates at. Keeping that ceiling was a deliberate, documented
- * choice, but whether it is worth lifting is an empirical question about
- * real content that no offline harness can answer - it depends on how
- * much geometry sits past saturation and how far past it goes.
+ * What it measures, when enabled: how often exact view-space Z exceeds
+ * the 0xFFFF point where architectural SZ3 saturates, and how far beyond
+ * it the uncapped PGXP shadow extends.  The regular 60-frame diagnostic
+ * window additionally records the distribution and whether those values
+ * survive transport to rendered GPU vertices.
  *
  * Not thread safe by design. The GTE runs on the emulation thread; a
  * torn read costs a wrong digit in a log line, which is not worth a
  * locked instruction even in a diagnostic build. */
 #if PGXP_DIAG
 extern uint64_t pgxp_z_total;      /* vertices through pgxp_precise_z    */
-extern uint64_t pgxp_z_ceiling;    /* ...of those, clamped at 0xFFFF     */
+extern uint64_t pgxp_z_ceiling;    /* ...of those, beyond 0xFFFF         */
 extern double   pgxp_z_ceiling_max;/* largest pre-clamp Z seen, else 0.0 */
 
 /* stats[0] total, [1] ceiling hits, [2] largest pre-clamp Z (rounded). */

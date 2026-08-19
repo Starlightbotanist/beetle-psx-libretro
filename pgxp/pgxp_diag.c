@@ -159,6 +159,12 @@ typedef struct
 	uint64_t cpu_load_region[PGXP_DIAG_ADDR_REGIONS];
 	PGXP_diag_address_page cpu_load_page[PGXP_DIAG_ADDRESS_PAGES];
 	uint64_t gte_vertices;
+	uint64_t projection_z_band[7];
+	double projection_z_max;
+	uint64_t rendered_z_valid[3];
+	uint64_t rendered_z_far[3];
+	uint64_t rendered_z_band[3][4];
+	float rendered_z_max[3];
 	uint64_t vertex_tracked;
 	uint64_t vertex_cache;
 	uint64_t vertex_native;
@@ -1481,6 +1487,31 @@ void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
 	window.event_hash = hash_bytes(window.event_hash, &z, sizeof(z));
 }
 
+void PGXP_DiagProjectionZ(double raw_z, float precise_z, uint16_t h)
+{
+	unsigned band;
+	double floor_z = (double)h * 0.5;
+
+	if (raw_z <= 0.0)
+		band = 0;
+	else if (raw_z <= floor_z)
+		band = 1;
+	else if (raw_z <= 65535.0)
+		band = 2;
+	else if (raw_z <= 73727.0)
+		band = 3;
+	else if (raw_z <= 98302.5)
+		band = 4;
+	else if (raw_z <= 131070.0)
+		band = 5;
+	else
+		band = 6;
+	window.projection_z_band[band]++;
+	if (raw_z > window.projection_z_max)
+		window.projection_z_max = raw_z;
+	hash_event(8, (uint32_t)band, (uint32_t)precise_z);
+}
+
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		unsigned slot, uint32_t value, const PGXP_value* shadow,
 		float x, float y, float w, int valid_w,
@@ -1489,6 +1520,26 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 	uint8_t terminal_reason;
 	unsigned writer_width;
 	unsigned writer_stage;
+	if (source <= PGXP_DIAG_VERTEX_NATIVE && valid_w)
+	{
+		unsigned z_band;
+		window.rendered_z_valid[source]++;
+		if (w > window.rendered_z_max[source])
+			window.rendered_z_max[source] = w;
+		if (w > 65535.0f)
+		{
+			window.rendered_z_far[source]++;
+			if (w <= 73727.0f)
+				z_band = 0;
+			else if (w <= 98302.5f)
+				z_band = 1;
+			else if (w <= 131070.0f)
+				z_band = 2;
+			else
+				z_band = 3;
+			window.rendered_z_band[source][z_band]++;
+		}
+	}
 	if (source == PGXP_DIAG_VERTEX_TRACKED)
 		terminal_reason = 0;
 	else if (source == PGXP_DIAG_VERTEX_CACHE)
@@ -1780,6 +1831,40 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.vertex_native_value_mismatch,
 		(unsigned long long)window.vertex_native_both,
 		vc[3], vc[4], vc[5], vc[6]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_projection_z] f=%llu raw=nonpos:%llu floor:%llu normal:%llu "
+		"far:%llu/%llu/%llu/%llu max=%.3f rendered-valid=%llu/%llu/%llu "
+		"rendered-far=%llu/%llu/%llu rendered-max=%.3f/%.3f/%.3f\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.projection_z_band[0],
+		(unsigned long long)window.projection_z_band[1],
+		(unsigned long long)window.projection_z_band[2],
+		(unsigned long long)window.projection_z_band[3],
+		(unsigned long long)window.projection_z_band[4],
+		(unsigned long long)window.projection_z_band[5],
+		(unsigned long long)window.projection_z_band[6],
+		window.projection_z_max,
+		(unsigned long long)window.rendered_z_valid[0],
+		(unsigned long long)window.rendered_z_valid[1],
+		(unsigned long long)window.rendered_z_valid[2],
+		(unsigned long long)window.rendered_z_far[0],
+		(unsigned long long)window.rendered_z_far[1],
+		(unsigned long long)window.rendered_z_far[2],
+		window.rendered_z_max[0], window.rendered_z_max[1],
+		window.rendered_z_max[2]);
+	{
+		unsigned source;
+		for (source = 0; source < 3; source++)
+			if (window.rendered_z_far[source])
+				log_cb(RETRO_LOG_INFO,
+					"[pgxp_rendered_z_far] f=%llu source=%u "
+					"band=%llu/%llu/%llu/%llu\n",
+					(unsigned long long)frame_number, source,
+					(unsigned long long)window.rendered_z_band[source][0],
+					(unsigned long long)window.rendered_z_band[source][1],
+					(unsigned long long)window.rendered_z_band[source][2],
+					(unsigned long long)window.rendered_z_band[source][3]);
+	}
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
 		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "

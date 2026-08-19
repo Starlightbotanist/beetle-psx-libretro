@@ -422,7 +422,7 @@ void PGXP_DiagDump(void)
 	 * an order of magnitude past it means the clamp is folding real
 	 * depth range onto one plane. */
 	log_cb(RETRO_LOG_INFO,
-		"[pgxp_diag] transforms %llu | Z at ceiling %llu (%.4f%%) | max pre-clamp Z %.0f\n",
+		"[pgxp_diag] transforms %llu | Z beyond 0xFFFF %llu (%.4f%%) | max raw Z %.0f\n",
 		(unsigned long long)pgxp_z_total,
 		(unsigned long long)pgxp_z_ceiling,
 		sat_pct,
