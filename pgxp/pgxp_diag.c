@@ -164,6 +164,16 @@ typedef struct
 	uint64_t rendered_z_linked[3];
 	uint64_t rendered_z_far[3];
 	uint64_t rendered_z_band[3][4];
+	uint64_t vertex_delta_class[3][6];
+	uint64_t vertex_axis_exact[3][2];
+	uint64_t vertex_axis_subpixel[3][2];
+	uint64_t vertex_axis_ge_one[3][2];
+	uint64_t vertex_axis_sign[3][2][3];
+	double vertex_delta_abs_sum[3][2];
+	double vertex_delta_sum[3][2];
+	float vertex_delta_max[3][2];
+	uint64_t vertex_stage_delta[PGXP_DIAG_TRACE_STAGES][6];
+	uint64_t vertex_writer_delta[PGXP_DIAG_WRITER_WIDTHS][6];
 	uint64_t vertex_tracked;
 	uint64_t vertex_cache;
 	uint64_t vertex_native;
@@ -1519,12 +1529,19 @@ void PGXP_DiagProjectionZ(double raw_z, float precise_z, uint16_t h)
 
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		unsigned slot, uint32_t value, const PGXP_value* shadow,
-		float x, float y, float w, int valid_w,
+		float x, float y, float w, int32_t native_x, int32_t native_y,
+		int valid_w,
 		int valid_xy, int value_match)
 {
 	uint8_t terminal_reason;
 	unsigned writer_width;
 	unsigned writer_stage;
+	unsigned delta_class;
+	float dx = x - (float)native_x;
+	float dy = y - (float)native_y;
+	float abs_dx = dx < 0.0f ? -dx : dx;
+	float abs_dy = dy < 0.0f ? -dy : dy;
+	float max_delta = abs_dx > abs_dy ? abs_dx : abs_dy;
 	if (source <= PGXP_DIAG_VERTEX_NATIVE &&
 	    trace_metadata_valid(shadow) && shadow->trace_reserved[6] >= 1 &&
 	    shadow->trace_reserved[6] <= 7)
@@ -1556,6 +1573,53 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 	writer_stage = cb_provenance[slot].writer.stage;
 	if (writer_stage >= PGXP_DIAG_TRACE_STAGES)
 		writer_stage = PGXP_TRACE_NONE;
+	if (max_delta == 0.0f)
+		delta_class = 0;
+	else if (max_delta <= 0.25f)
+		delta_class = 1;
+	else if (max_delta <= 0.5f)
+		delta_class = 2;
+	else if (max_delta < 1.0f)
+		delta_class = 3;
+	else if (max_delta <= 4.0f)
+		delta_class = 4;
+	else
+		delta_class = 5;
+	if (source <= PGXP_DIAG_VERTEX_NATIVE)
+	{
+		float delta[2];
+		float abs_delta[2];
+		unsigned axis;
+		delta[0] = dx;
+		delta[1] = dy;
+		abs_delta[0] = abs_dx;
+		abs_delta[1] = abs_dy;
+		window.vertex_delta_class[source][delta_class]++;
+		for (axis = 0; axis < 2; axis++)
+		{
+			unsigned sign = delta[axis] < 0.0f ? 0 :
+				delta[axis] > 0.0f ? 2 : 1;
+			window.vertex_axis_sign[source][axis][sign]++;
+			window.vertex_delta_abs_sum[source][axis] += abs_delta[axis];
+			window.vertex_delta_sum[source][axis] += delta[axis];
+			if (abs_delta[axis] > window.vertex_delta_max[source][axis])
+				window.vertex_delta_max[source][axis] = abs_delta[axis];
+			if (abs_delta[axis] == 0.0f)
+				window.vertex_axis_exact[source][axis]++;
+			else if (abs_delta[axis] < 1.0f)
+				window.vertex_axis_subpixel[source][axis]++;
+			else
+				window.vertex_axis_ge_one[source][axis]++;
+		}
+		if (source == PGXP_DIAG_VERTEX_TRACKED)
+		{
+			unsigned stage = shadow &&
+				shadow->trace_stage < PGXP_DIAG_TRACE_STAGES ?
+				shadow->trace_stage : PGXP_TRACE_NONE;
+			window.vertex_stage_delta[stage][delta_class]++;
+			window.vertex_writer_delta[writer_width][delta_class]++;
+		}
+	}
 	if (packet_vertex_count < 3)
 	{
 		PGXP_diag_packet_vertex* packet_vertex =
@@ -1847,6 +1911,92 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.rendered_z_far[0],
 		(unsigned long long)window.rendered_z_far[1],
 		(unsigned long long)window.rendered_z_far[2]);
+	{
+		unsigned source;
+		for (source = 0; source < 3; source++)
+		{
+			uint64_t total = 0;
+			unsigned c;
+			for (c = 0; c < 6; c++)
+				total += window.vertex_delta_class[source][c];
+			if (!total)
+				continue;
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_precision] f=%llu source=%u total=%llu "
+				"delta=%llu/%llu/%llu/%llu/%llu/%llu "
+				"axis_exact=%llu/%llu subpixel=%llu/%llu ge1=%llu/%llu "
+				"sign_x=%llu/%llu/%llu sign_y=%llu/%llu/%llu "
+				"mean_abs=%.6f/%.6f bias=%.6f/%.6f max=%.3f/%.3f\n",
+				(unsigned long long)frame_number, source,
+				(unsigned long long)total,
+				(unsigned long long)window.vertex_delta_class[source][0],
+				(unsigned long long)window.vertex_delta_class[source][1],
+				(unsigned long long)window.vertex_delta_class[source][2],
+				(unsigned long long)window.vertex_delta_class[source][3],
+				(unsigned long long)window.vertex_delta_class[source][4],
+				(unsigned long long)window.vertex_delta_class[source][5],
+				(unsigned long long)window.vertex_axis_exact[source][0],
+				(unsigned long long)window.vertex_axis_exact[source][1],
+				(unsigned long long)window.vertex_axis_subpixel[source][0],
+				(unsigned long long)window.vertex_axis_subpixel[source][1],
+				(unsigned long long)window.vertex_axis_ge_one[source][0],
+				(unsigned long long)window.vertex_axis_ge_one[source][1],
+				(unsigned long long)window.vertex_axis_sign[source][0][0],
+				(unsigned long long)window.vertex_axis_sign[source][0][1],
+				(unsigned long long)window.vertex_axis_sign[source][0][2],
+				(unsigned long long)window.vertex_axis_sign[source][1][0],
+				(unsigned long long)window.vertex_axis_sign[source][1][1],
+				(unsigned long long)window.vertex_axis_sign[source][1][2],
+				window.vertex_delta_abs_sum[source][0] / (double)total,
+				window.vertex_delta_abs_sum[source][1] / (double)total,
+				window.vertex_delta_sum[source][0] / (double)total,
+				window.vertex_delta_sum[source][1] / (double)total,
+				window.vertex_delta_max[source][0],
+				window.vertex_delta_max[source][1]);
+		}
+	}
+	{
+		unsigned stage;
+		for (stage = 0; stage < PGXP_DIAG_TRACE_STAGES; stage++)
+		{
+			uint64_t total = 0;
+			unsigned c;
+			for (c = 0; c < 6; c++) total += window.vertex_stage_delta[stage][c];
+			if (total)
+				log_cb(RETRO_LOG_INFO,
+					"[pgxp_precision_stage] f=%llu stage=%u total=%llu "
+					"delta=%llu/%llu/%llu/%llu/%llu/%llu\n",
+					(unsigned long long)frame_number, stage,
+					(unsigned long long)total,
+					(unsigned long long)window.vertex_stage_delta[stage][0],
+					(unsigned long long)window.vertex_stage_delta[stage][1],
+					(unsigned long long)window.vertex_stage_delta[stage][2],
+					(unsigned long long)window.vertex_stage_delta[stage][3],
+					(unsigned long long)window.vertex_stage_delta[stage][4],
+					(unsigned long long)window.vertex_stage_delta[stage][5]);
+		}
+	}
+	{
+		unsigned width;
+		for (width = 0; width < PGXP_DIAG_WRITER_WIDTHS; width++)
+		{
+			uint64_t total = 0;
+			unsigned c;
+			for (c = 0; c < 6; c++) total += window.vertex_writer_delta[width][c];
+			if (total)
+				log_cb(RETRO_LOG_INFO,
+					"[pgxp_precision_writer] f=%llu width=%u total=%llu "
+					"delta=%llu/%llu/%llu/%llu/%llu/%llu\n",
+					(unsigned long long)frame_number, width,
+					(unsigned long long)total,
+					(unsigned long long)window.vertex_writer_delta[width][0],
+					(unsigned long long)window.vertex_writer_delta[width][1],
+					(unsigned long long)window.vertex_writer_delta[width][2],
+					(unsigned long long)window.vertex_writer_delta[width][3],
+					(unsigned long long)window.vertex_writer_delta[width][4],
+					(unsigned long long)window.vertex_writer_delta[width][5]);
+		}
+	}
 	{
 		unsigned source;
 		for (source = 0; source < 3; source++)

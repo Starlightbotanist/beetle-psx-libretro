@@ -672,7 +672,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	}
 
 	PGXP_DiagVertex(source, offset, psxWord, vert, pOutput->x, pOutput->y,
-		pOutput->valid_w ? pOutput->w : 0.0f, pOutput->valid_w,
+		pOutput->valid_w ? pOutput->w : 0.0f, psxX + xOffs,
+		psxY + yOffs, pOutput->valid_w,
 		valid_xy, value_match);
 
 	/* clear upper 5 bits in x and y - same 27-bit signed clamp as
