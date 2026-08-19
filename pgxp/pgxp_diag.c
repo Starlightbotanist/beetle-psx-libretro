@@ -187,6 +187,8 @@ typedef struct
 	uint64_t vertex_w_gate_rejected_width[PGXP_DIAG_WRITER_WIDTHS];
 	uint64_t nclip_compares;
 	uint64_t nclip_sign_disagreements;
+	uint64_t nclip_applied_sign_changes;
+	uint64_t nclip_precise_zero_fallbacks;
 	uint64_t lineage_mfc2;
 	uint64_t lineage_sll5_candidates;
 	uint64_t lineage_sll5_matches;
@@ -1823,12 +1825,18 @@ int PGXP_DiagVertexWEligible(unsigned slot, const PGXP_value* shadow)
 	return eligible;
 }
 
-void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value)
+void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value,
+		int32_t applied_value)
 {
 	window.nclip_compares++;
 	if ((native_value < 0) != (precise_value < 0) ||
 	    (native_value == 0) != (precise_value == 0))
 		window.nclip_sign_disagreements++;
+	if ((native_value < 0) != (applied_value < 0) ||
+	    (native_value == 0) != (applied_value == 0))
+		window.nclip_applied_sign_changes++;
+	if (precise_value == 0 && native_value != 0)
+		window.nclip_precise_zero_fallbacks++;
 	hash_event(7, (uint32_t)native_value, (uint32_t)precise_value);
 }
 
@@ -1895,7 +1903,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_frame] f=%llu backend=%s mode=0x%02x state=%016llx events=%016llx "
 		"mem-r=%llu/%llu mem-w=%llu/%llu gte-v=%llu "
-		"vertex=%llu/%llu/%llu w=%llu nclip=%llu/%llu "
+		"vertex=%llu/%llu/%llu w=%llu nclip=%llu/%llu/%llu/%llu "
 		"reject=%llu/%llu/%llu cache=%u/%u/%u/%u\n",
 		(unsigned long long)frame_number,
 		backend_name(backend), mode,
@@ -1912,6 +1920,8 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.vertex_valid_w,
 		(unsigned long long)window.nclip_compares,
 		(unsigned long long)window.nclip_sign_disagreements,
+		(unsigned long long)window.nclip_applied_sign_changes,
+		(unsigned long long)window.nclip_precise_zero_fallbacks,
 		(unsigned long long)window.vertex_native_invalid_xy,
 		(unsigned long long)window.vertex_native_value_mismatch,
 		(unsigned long long)window.vertex_native_both,

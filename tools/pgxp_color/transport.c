@@ -368,6 +368,22 @@ static void test_vertex_w_provenance_gate(void)
       fail("GTE-proven W rejected", out.valid_w, 1);
 }
 
+static void test_nclip_sign_only(void)
+{
+   if (PGXP_NCLIP_sign_only(1234, -77) != -1234)
+      fail("NCLIP positive sign replacement", PGXP_NCLIP_sign_only(1234, -77), -1234);
+   if (PGXP_NCLIP_sign_only(-4321, 88) != 4321)
+      fail("NCLIP negative sign replacement", PGXP_NCLIP_sign_only(-4321, 88), 4321);
+   if (PGXP_NCLIP_sign_only(1234, 77) != 1234)
+      fail("NCLIP same sign changed magnitude", PGXP_NCLIP_sign_only(1234, 77), 1234);
+   if (PGXP_NCLIP_sign_only(-4321, -88) != -4321)
+      fail("NCLIP same negative changed magnitude", PGXP_NCLIP_sign_only(-4321, -88), -4321);
+   if (PGXP_NCLIP_sign_only(1234, 0) != 1234)
+      fail("NCLIP precise zero replaced native", PGXP_NCLIP_sign_only(1234, 0), 1234);
+   if (PGXP_NCLIP_sign_only(0, -88) != -1)
+      fail("NCLIP native zero lost precise sign", PGXP_NCLIP_sign_only(0, -88), -1);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -398,6 +414,9 @@ int main(void)
 
    printf("[T8] vertex W provenance gate preserves precise XY\n");
    test_vertex_w_provenance_gate();
+
+   printf("[T9] NCLIP precise sign preserves native magnitude\n");
+   test_nclip_sign_only();
 
    if (failures)
    {

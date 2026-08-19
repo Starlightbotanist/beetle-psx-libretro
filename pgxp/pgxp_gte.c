@@ -276,6 +276,24 @@ double PGXP_NCLIP()
 	return nclip;
 }
 
+int32_t PGXP_NCLIP_sign_only(int32_t native_value, int32_t precise_value)
+{
+	/* NCLIP is used as an orientation test, but MAC0 remains visible to the
+	 * emulated CPU.  Preserve the native area magnitude so enabling PGXP
+	 * culling cannot inject an unrelated floating-point magnitude into game
+	 * logic; borrow only the precise sign when it is non-zero. */
+	uint32_t magnitude;
+	if (precise_value == 0)
+		return native_value;
+	if (native_value == 0)
+		return precise_value < 0 ? -1 : 1;
+	if ((native_value < 0) == (precise_value < 0))
+		return native_value;
+	magnitude = native_value < 0 ? (uint32_t)(-(int64_t)native_value) :
+		(uint32_t)native_value;
+	return precise_value < 0 ? -(int32_t)magnitude : (int32_t)magnitude;
+}
+
 static void PGXP_MTC2_int(PGXP_value value, uint32_t reg)
 {
 	switch(reg)
