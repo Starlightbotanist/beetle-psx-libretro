@@ -1438,27 +1438,16 @@ static INLINE float pgxp_precise_z(int64_t acc)
    }
 #endif
 
-   /* No 0xFFFF ceiling. The architectural SZ3 saturates there because it
-    * is a uint16_t, and the shadow used to be clamped to match. Matching
-    * it was wrong: past saturation the integer path places a vertex
-    * (z / 65535) times too far from the projection centre, so the error
-    * is proportional rather than bounded - 1% past the clamp is half a
-    * pixel, twice past it is 80 pixels for a vertex 80 pixels out, and it
-    * grows without limit. Reproducing that in the shadow discards the one
-    * correct answer PGXP has.
-    *
-    * Removing it cannot regress anything: for z <= 65535 the clamp never
-    * fired, so the result is bit-identical to before, and the only inputs
-    * whose behaviour changes are the ones the old code got wrong. The 2D
-    * tolerance heuristic is self-limiting here rather than a hazard - if
-    * it is enabled and the corrected position lands far from the integer
-    * one, it substitutes the integer coordinate, which is exactly the old
-    * behaviour.
-    *
-    * The float_max floor stays. That one mirrors Divide()'s own overflow
-    * behaviour rather than a storage width, so it is not the same kind of
-    * artefact. */
-   return float_max(H/2.f, (float)z);
+   /* Keep the fractional component recovered from the raw accumulator, but
+    * do not extend projection depth beyond architectural SZ3.  Both
+    * SwanStation and DuckStation's default PGXP path use saturated SZ3;
+    * exceeding it is their separately-selectable preserve-projection-
+    * precision mode.  Treating the extension as unconditional made far
+    * geometry internally precise but potentially incompatible with games
+    * which construct visibility/display lists around the saturated GTE
+    * result (Ridge Racer Type 4's tunnels are the controlled A/B case).
+    * The near H/2 floor remains unchanged. */
+   return float_max(H/2.f, float_min((float)z, 65535.0f));
 }
 
 /* Companion to pgxp_precise_z: the shadow's h/z, with the H == 0 corner
