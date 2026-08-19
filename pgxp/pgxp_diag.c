@@ -77,9 +77,13 @@ typedef struct
 typedef struct
 {
 	uint32_t value;
+	uint32_t invalid_value;
+	uint32_t invalid_flags;
+	uint32_t invalid_frame;
 	float x;
 	float y;
 	float z;
+	uint8_t invalid_stage;
 	uint8_t valid;
 } PGXP_diag_address_vertex;
 
@@ -245,6 +249,7 @@ static uint64_t address_misses;
 static uint64_t address_unavailable;
 static uint64_t address_value_mismatch;
 static uint64_t address_stage_hits[PGXP_DIAG_TRACE_STAGES];
+static uint32_t address_miss_samples;
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
 static uint8_t current_opcode;
@@ -528,6 +533,7 @@ void PGXP_DiagInit(void)
 	address_attempts = address_hits = address_misses = 0;
 	address_unavailable = address_value_mismatch = 0;
 	memset(address_stage_hits, 0, sizeof(address_stage_hits));
+	address_miss_samples = 0;
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
 	current_packet = 0;
@@ -696,6 +702,11 @@ void PGXP_DiagMemoryWrite(uint32_t addr, const PGXP_value* value,
 	{
 		address_invalidations += history->valid != 0;
 		history->valid = 0;
+		history->invalid_value = value->value;
+		history->invalid_flags = value->flags;
+		history->invalid_frame = mode_frame;
+		history->invalid_stage = trace_metadata_valid(value) ?
+			value->trace_stage : PGXP_TRACE_NONE;
 	}
 }
 
@@ -901,7 +912,23 @@ address_fallback:
 			}
 			address_misses++;
 			if (!history->valid)
+			{
 				address_unavailable++;
+				if (address_miss_samples < 32 && log_cb)
+				{
+					log_cb(RETRO_LOG_INFO,
+						"[pgxp_address_miss] n=%u mf=%u slot=%u "
+						"addr=%08x gpu=%08x precise=%08x invalid=%08x "
+						"flags=%08x stage=%u invalid_mf=%u\n",
+						address_miss_samples + 1, mode_frame, slot,
+						addr, value, history->value,
+						history->invalid_value,
+						history->invalid_flags,
+						history->invalid_stage,
+						history->invalid_frame);
+					address_miss_samples++;
+				}
+			}
 			else
 				address_value_mismatch++;
 		}
@@ -2059,6 +2086,7 @@ void PGXP_DiagFrame(int backend)
 	address_attempts = address_hits = address_misses = 0;
 	address_unavailable = address_value_mismatch = 0;
 	memset(address_stage_hits, 0, sizeof(address_stage_hits));
+	address_miss_samples = 0;
 	dispatch_samples = 0;
 }
 
