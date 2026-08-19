@@ -588,6 +588,19 @@ void PGXP_GetColorStats(uint32_t stats[4])
 #endif
 }
 
+/* The GTE/GPU vertex integer component is signed 11-bit.  Preserve the
+ * fractional component, wrap only the transformed coordinate, then let the
+ * drawing offset remain an ordinary screen-space translation.  This is the
+ * ordering used by SwanStation and canonical GPL DuckStation. */
+static inline float PGXP_TruncateVertexPosition(float position)
+{
+	int32_t integer = (int32_t)position;
+	uint32_t low = (uint32_t)integer & UINT32_C(0x7ff);
+	int32_t wrapped = (low & UINT32_C(0x400)) ?
+		(int32_t)(low | ~UINT32_C(0x7ff)) : (int32_t)low;
+	return (float)wrapped + (position - (float)integer);
+}
+
 int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutput, int xOffs, int yOffs)
 {
 	PGXP_value* vert = PGXP_ReadCB(offset);          /* pointer to vertex */
@@ -609,8 +622,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	{
 		source = PGXP_DIAG_VERTEX_TRACKED;
 		/* There is a value here with valid X and Y coordinates */
-		pOutput->x = (vert->x + xOffs);
-		pOutput->y = (vert->y + yOffs);
+		pOutput->x = PGXP_TruncateVertexPosition(vert->x) + xOffs;
+		pOutput->y = PGXP_TruncateVertexPosition(vert->y) + yOffs;
 		pOutput->z = 0.95f;
 		pOutput->w = vert->z;
 		pOutput->valid_w = 1;
@@ -636,8 +649,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		    &recovered_y, &recovered_z))
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
-			pOutput->x = recovered_x + xOffs;
-			pOutput->y = recovered_y + yOffs;
+			pOutput->x = PGXP_TruncateVertexPosition(recovered_x) + xOffs;
+			pOutput->y = PGXP_TruncateVertexPosition(recovered_y) + yOffs;
 			pOutput->z = 0.95f;
 			pOutput->w = recovered_z;
 			pOutput->valid_w = 1;
@@ -646,27 +659,18 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
 			/* a value is found, it is from the current session and is unambiguous (there was only one value recorded at that position) */
-			pOutput->x = cache_vert->x + xOffs;
-			pOutput->y = cache_vert->y + yOffs;
+			pOutput->x = PGXP_TruncateVertexPosition(cache_vert->x) + xOffs;
+			pOutput->y = PGXP_TruncateVertexPosition(cache_vert->y) + yOffs;
 			pOutput->z = 0.95f;
 			pOutput->w = cache_vert->z;
 			pOutput->valid_w = 0;	/* iCB: Getting the wrong w component causes too great an error when using perspective correction so disable it */
 		}
 		else
 		{
-			/* no valid value can be found anywhere, use the native PSX
-			 * data.  The original `((psxData[0] + xOffs) << 5) >> 5`
-			 * was a clamp-to-11-bit-signed-and-sign-extend; the
-			 * left-shift was UB on signed when the value crossed the
-			 * sign bit (compiler with -fwrapv tolerates it, but the
-			 * left-shift exception isn't covered by that flag).
-			 * Replace with an explicit mask-and-sign-extend. */
-			int32_t sx = psxX + xOffs;
-			int32_t sy = psxY + yOffs;
-			sx &= 0x07FFFFFF; if (sx & 0x04000000) sx |= ~0x07FFFFFF;
-			sy &= 0x07FFFFFF; if (sy & 0x04000000) sy |= ~0x07FFFFFF;
-			pOutput->x = (float)sx;
-			pOutput->y = (float)sy;
+			/* Native packed coordinates are already signed values; the
+			 * drawing offset is applied afterward and is not re-wrapped. */
+			pOutput->x = (float)(psxX + xOffs);
+			pOutput->y = (float)(psxY + yOffs);
 			pOutput->valid_w = 0;
 		}
 	}
@@ -675,26 +679,6 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		pOutput->valid_w ? pOutput->w : 0.0f, psxX + xOffs,
 		psxY + yOffs, pOutput->valid_w,
 		valid_xy, value_match);
-
-	/* clear upper 5 bits in x and y - same 27-bit signed clamp as
-	 * above, but applied in the 16.16 fixed-point domain (i.e. 11
-	 * integer bits with 16 fractional) so we keep sub-pixel
-	 * precision from the PGXP path.  Original code did
-	 * `(int)x << 5 >> 5` which is the same UB.  Mask-and-sign-
-	 * extend via unsigned avoids it.  The (int32_t)float cast can
-	 * still be UB if the float is out of int32 range; for our
-	 * normal inputs (vert->x + xOffs in -2048..2046 -> * 65536 is
-	 * < 2^28, well within int32) it's fine. */
-	{
-		float x = pOutput->x * (1 << 16);
-		float y = pOutput->y * (1 << 16);
-		int32_t ix = (int32_t)x;
-		int32_t iy = (int32_t)y;
-		ix &= 0x07FFFFFF; if (ix & 0x04000000) ix |= ~0x07FFFFFF;
-		iy &= 0x07FFFFFF; if (iy & 0x04000000) iy |= ~0x07FFFFFF;
-		pOutput->x = (float)ix / (1 << 16);
-		pOutput->y = (float)iy / (1 << 16);
-	}
 
 	return 1;
 }
