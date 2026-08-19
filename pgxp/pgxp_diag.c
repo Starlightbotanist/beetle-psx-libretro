@@ -246,8 +246,12 @@ static uint64_t writer_native_reason[PGXP_DIAG_WRITER_WIDTHS]
 	[PGXP_TRACE_REASON_COUNT];
 static uint64_t writer_native_stage[PGXP_DIAG_WRITER_WIDTHS]
 	[PGXP_DIAG_TRACE_STAGES];
+static uint64_t writer_tracked[PGXP_DIAG_WRITER_WIDTHS];
+static uint64_t writer_tracked_source_w[PGXP_DIAG_WRITER_WIDTHS];
+static uint64_t writer_tracked_retained_w[PGXP_DIAG_WRITER_WIDTHS];
 static uint64_t writer_tracked_invalid_w;
 static uint32_t writer_samples;
+static uint32_t writer_tracked_samples;
 static uint64_t packet_ordinal;
 static uint64_t current_packet;
 static uint8_t current_opcode;
@@ -531,8 +535,12 @@ void PGXP_DiagInit(void)
 	memset(writer_native, 0, sizeof(writer_native));
 	memset(writer_native_reason, 0, sizeof(writer_native_reason));
 	memset(writer_native_stage, 0, sizeof(writer_native_stage));
+	memset(writer_tracked, 0, sizeof(writer_tracked));
+	memset(writer_tracked_source_w, 0, sizeof(writer_tracked_source_w));
+	memset(writer_tracked_retained_w, 0, sizeof(writer_tracked_retained_w));
 	writer_tracked_invalid_w = 0;
 	writer_samples = 0;
+	writer_tracked_samples = 0;
 	memset(trace_tracked_ids, 0, sizeof(trace_tracked_ids));
 	packet_ordinal = 0;
 	current_packet = 0;
@@ -1533,6 +1541,35 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		window.vertex_valid_w++;
 	else if (source == PGXP_DIAG_VERTEX_TRACKED)
 		writer_tracked_invalid_w++;
+	if (source == PGXP_DIAG_VERTEX_TRACKED)
+	{
+		writer_tracked[writer_width]++;
+		if ((cb_provenance[slot].writer.flags & VALID_2) == VALID_2)
+			writer_tracked_source_w[writer_width]++;
+		else if (valid_w)
+		{
+			writer_tracked_retained_w[writer_width]++;
+			if (writer_width == 2 && writer_tracked_samples < 48 && log_cb)
+			{
+				log_cb(RETRO_LOG_INFO,
+					"[pgxp_writer_retained_w] n=%u mf=%u slot=%u "
+					"addr=%08x gpu=%08x shadow=%08x shadow_flags=%08x "
+					"writer_mf=%u writer_value=%08x writer_flags=%08x "
+					"writer_stage=%u trace=%llu age=%u w=%.6f\n",
+					writer_tracked_samples + 1, mode_frame, slot,
+					cb_provenance[slot].addr, value,
+					shadow ? shadow->value : 0,
+					shadow ? shadow->flags : 0,
+					cb_provenance[slot].writer.frame,
+					cb_provenance[slot].writer.value,
+					cb_provenance[slot].writer.flags, writer_stage,
+					(unsigned long long)cb_provenance[slot].writer.trace_id,
+					cb_provenance[slot].writer.frame <= mode_frame ?
+					mode_frame - cb_provenance[slot].writer.frame : 0, w);
+				writer_tracked_samples++;
+			}
+		}
+	}
 	if (cb_provenance[slot].lineage.valid &&
 	    lineage_vertex_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
 	{
@@ -1917,6 +1954,24 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)writer_native[2],
 		(unsigned long long)writer_native[3],
 		(unsigned long long)writer_tracked_invalid_w, writer_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_writer_w] f=%llu tracked=%llu/%llu/%llu/%llu "
+		"source_w=%llu/%llu/%llu/%llu retained_w=%llu/%llu/%llu/%llu "
+		"samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)writer_tracked[0],
+		(unsigned long long)writer_tracked[1],
+		(unsigned long long)writer_tracked[2],
+		(unsigned long long)writer_tracked[3],
+		(unsigned long long)writer_tracked_source_w[0],
+		(unsigned long long)writer_tracked_source_w[1],
+		(unsigned long long)writer_tracked_source_w[2],
+		(unsigned long long)writer_tracked_source_w[3],
+		(unsigned long long)writer_tracked_retained_w[0],
+		(unsigned long long)writer_tracked_retained_w[1],
+		(unsigned long long)writer_tracked_retained_w[2],
+		(unsigned long long)writer_tracked_retained_w[3],
+		writer_tracked_samples);
 	{
 		unsigned width;
 		for (width = 0; width < PGXP_DIAG_WRITER_WIDTHS; width++)
@@ -2094,8 +2149,12 @@ void PGXP_DiagFrame(int backend)
 	memset(writer_native, 0, sizeof(writer_native));
 	memset(writer_native_reason, 0, sizeof(writer_native_reason));
 	memset(writer_native_stage, 0, sizeof(writer_native_stage));
+	memset(writer_tracked, 0, sizeof(writer_tracked));
+	memset(writer_tracked_source_w, 0, sizeof(writer_tracked_source_w));
+	memset(writer_tracked_retained_w, 0, sizeof(writer_tracked_retained_w));
 	writer_tracked_invalid_w = 0;
 	writer_samples = 0;
+	writer_tracked_samples = 0;
 	dispatch_samples = 0;
 }
 
