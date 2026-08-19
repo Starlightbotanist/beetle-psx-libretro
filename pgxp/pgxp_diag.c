@@ -161,10 +161,9 @@ typedef struct
 	uint64_t gte_vertices;
 	uint64_t projection_z_band[7];
 	double projection_z_max;
-	uint64_t rendered_z_valid[3];
+	uint64_t rendered_z_linked[3];
 	uint64_t rendered_z_far[3];
 	uint64_t rendered_z_band[3][4];
-	float rendered_z_max[3];
 	uint64_t vertex_tracked;
 	uint64_t vertex_cache;
 	uint64_t vertex_native;
@@ -207,6 +206,7 @@ static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
 static uint32_t cache_vertex_samples;
+static uint8_t pending_projection_z_band;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
 static uint32_t lineage_drop_samples;
@@ -516,6 +516,7 @@ void PGXP_DiagInit(void)
 	dispatch_samples = 0;
 	vertex_samples = 0;
 	cache_vertex_samples = 0;
+	pending_projection_z_band = 0;
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
 	lineage_drop_samples = 0;
@@ -788,6 +789,9 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 		return;
 	/* A GTE result starts a fresh provenance chain. */
 	memset(value->trace_reserved, 0, sizeof(value->trace_reserved));
+	/* Byte 6 is diagnostic-only projection provenance. Bytes 0..5 retain
+	 * their existing lineage and original-MFC2 roles. */
+	value->trace_reserved[6] = pending_projection_z_band;
 	value->trace_id = trace_next_id++;
 	value->trace_stage = PGXP_TRACE_GTE;
 	trace_record(PGXP_TRACE_EVENT_GTE, 0, value->trace_id,
@@ -1507,6 +1511,7 @@ void PGXP_DiagProjectionZ(double raw_z, float precise_z, uint16_t h)
 	else
 		band = 6;
 	window.projection_z_band[band]++;
+	pending_projection_z_band = (uint8_t)(band + 1);
 	if (raw_z > window.projection_z_max)
 		window.projection_z_max = raw_z;
 	hash_event(8, (uint32_t)band, (uint32_t)precise_z);
@@ -1520,24 +1525,16 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 	uint8_t terminal_reason;
 	unsigned writer_width;
 	unsigned writer_stage;
-	if (source <= PGXP_DIAG_VERTEX_NATIVE && valid_w)
+	if (source <= PGXP_DIAG_VERTEX_NATIVE &&
+	    trace_metadata_valid(shadow) && shadow->trace_reserved[6] >= 1 &&
+	    shadow->trace_reserved[6] <= 7)
 	{
-		unsigned z_band;
-		window.rendered_z_valid[source]++;
-		if (w > window.rendered_z_max[source])
-			window.rendered_z_max[source] = w;
-		if (w > 65535.0f)
+		unsigned source_band = shadow->trace_reserved[6] - 1;
+		window.rendered_z_linked[source]++;
+		if (source_band >= 3)
 		{
 			window.rendered_z_far[source]++;
-			if (w <= 73727.0f)
-				z_band = 0;
-			else if (w <= 98302.5f)
-				z_band = 1;
-			else if (w <= 131070.0f)
-				z_band = 2;
-			else
-				z_band = 3;
-			window.rendered_z_band[source][z_band]++;
+			window.rendered_z_band[source][source_band - 3]++;
 		}
 	}
 	if (source == PGXP_DIAG_VERTEX_TRACKED)
@@ -1833,8 +1830,8 @@ void PGXP_DiagFrame(int backend)
 		vc[3], vc[4], vc[5], vc[6]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_projection_z] f=%llu raw=nonpos:%llu floor:%llu normal:%llu "
-		"far:%llu/%llu/%llu/%llu max=%.3f rendered-valid=%llu/%llu/%llu "
-		"rendered-far=%llu/%llu/%llu rendered-max=%.3f/%.3f/%.3f\n",
+		"far:%llu/%llu/%llu/%llu max=%.3f rendered-linked=%llu/%llu/%llu "
+		"rendered-far=%llu/%llu/%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)window.projection_z_band[0],
 		(unsigned long long)window.projection_z_band[1],
@@ -1844,14 +1841,12 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.projection_z_band[5],
 		(unsigned long long)window.projection_z_band[6],
 		window.projection_z_max,
-		(unsigned long long)window.rendered_z_valid[0],
-		(unsigned long long)window.rendered_z_valid[1],
-		(unsigned long long)window.rendered_z_valid[2],
+		(unsigned long long)window.rendered_z_linked[0],
+		(unsigned long long)window.rendered_z_linked[1],
+		(unsigned long long)window.rendered_z_linked[2],
 		(unsigned long long)window.rendered_z_far[0],
 		(unsigned long long)window.rendered_z_far[1],
-		(unsigned long long)window.rendered_z_far[2],
-		window.rendered_z_max[0], window.rendered_z_max[1],
-		window.rendered_z_max[2]);
+		(unsigned long long)window.rendered_z_far[2]);
 	{
 		unsigned source;
 		for (source = 0; source < 3; source++)
