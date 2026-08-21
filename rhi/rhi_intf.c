@@ -888,7 +888,7 @@ void rhi_intf_push_quad(
                depth_shift,
                /* Sprite modulation uses a zero dither offset. */
                dither && !is_sprite,
-               blend_mode, mask_test, set_mask);
+               blend_mode, mask_test, set_mask, is_sprite, may_be_2d);
 #endif
          break;
       case RHI_VULKAN:

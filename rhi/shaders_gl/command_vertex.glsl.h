@@ -22,6 +22,7 @@ in uint semi_transparent;
 in uvec4 texture_window;
 in uvec4 texture_limits;
 in uint framebuffer_feedback;
+in uint uv_offset;
 
 // Drawing offset
 uniform ivec2 offset;
@@ -76,7 +77,10 @@ void main() {
    frag_fog = fog;
 
    // Let OpenGL interpolate the texel position
-   frag_texture_coord = vec2(texture_coord) + vec2(0.001, 0.001);
+   // Match Vulkan's default scaled path: true 3D polygons sample half a
+   // texel inward, while sprites and likely-2D quads retain exact UVs.
+   frag_texture_coord = vec2(texture_coord) +
+      (uv_offset != 0U ? vec2(0.5, 0.5) : vec2(0.0, 0.0));
 
    frag_texture_page = texture_page;
    frag_clut = clut;
