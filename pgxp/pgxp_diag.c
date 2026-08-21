@@ -10,6 +10,7 @@
 #include "pgxp_gpu.h"
 #include "pgxp_gte.h"
 #include "pgxp_main.h"
+#include "pgxp_mem.h"
 #include "pgxp_value.h"
 
 extern retro_log_printf_t log_cb;
@@ -185,6 +186,10 @@ typedef struct
 	uint64_t vertex_w_gate_rejected;
 	uint64_t vertex_w_gate_rejected_stage[PGXP_DIAG_TRACE_STAGES];
 	uint64_t vertex_w_gate_rejected_width[PGXP_DIAG_WRITER_WIDTHS];
+	/* Cross-tab the command-buffer snapshot decision against the live
+	 * source-memory decision SwanStation makes when consuming a vertex.
+	 * Columns are eligible/no-address/invalid-xy/value-mismatch. */
+	uint64_t vertex_live_state[3][4];
 	uint64_t nclip_compares;
 	uint64_t nclip_sign_disagreements;
 	uint64_t nclip_applied_sign_changes;
@@ -249,6 +254,7 @@ static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
 static uint32_t cache_vertex_samples;
+static uint32_t vertex_live_samples;
 static uint8_t pending_projection_z_band;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
@@ -571,6 +577,7 @@ void PGXP_DiagInit(void)
 	dispatch_samples = 0;
 	vertex_samples = 0;
 	cache_vertex_samples = 0;
+	vertex_live_samples = 0;
 	pending_projection_z_band = 0;
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
@@ -1763,6 +1770,10 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		int valid_w,
 		int valid_xy, int value_match)
 {
+	const PGXP_value* live_shadow = NULL;
+	uint32_t source_addr = slot < 16 ? cb_provenance[slot].addr : 0;
+	uint32_t physical_addr = source_addr & UINT32_C(0x1fffffff);
+	unsigned live_state;
 	uint8_t terminal_reason;
 	unsigned writer_width;
 	unsigned writer_stage;
@@ -1796,6 +1807,38 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		terminal_reason = 2;
 	else
 		terminal_reason = 3;
+	/* SwanStation keeps the DMA source address beside each FIFO word and
+	 * rereads its PGXP shadow here.  Beetle instead carries the shadow
+	 * snapshot taken at FIFO insertion.  Measure that semantic gap without
+	 * changing rendering.  GPU MMIO addresses are not source memory in
+	 * SwanStation; RAM mirrors and scratchpad are. */
+	if (physical_addr < UINT32_C(0x00800000) ||
+	    (physical_addr >= UINT32_C(0x1f800000) &&
+	     physical_addr < UINT32_C(0x1f800400)))
+		live_shadow = ReadMem(source_addr);
+	if (!live_shadow)
+		live_state = 1;
+	else if ((live_shadow->flags & VALID_01) != VALID_01)
+		live_state = 2;
+	else if (live_shadow->value != value)
+		live_state = 3;
+	else
+		live_state = 0;
+	if (source <= PGXP_DIAG_VERTEX_NATIVE)
+		window.vertex_live_state[source][live_state]++;
+	if (source == PGXP_DIAG_VERTEX_TRACKED && live_state != 0 &&
+	    vertex_live_samples < 64 && log_cb)
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_vertex_live_reject] n=%u mf=%u slot=%u addr=%08x "
+			"psx=%08x snapshot=%08x/%08x live=%08x/%08x state=%u\n",
+			vertex_live_samples + 1, mode_frame, slot, source_addr, value,
+			shadow ? shadow->value : 0, shadow ? shadow->flags : 0,
+			live_shadow ? live_shadow->value : 0,
+			live_shadow ? live_shadow->flags : 0, live_state);
+		vertex_live_samples++;
+	}
+
 	writer_width = cb_provenance[slot].writer.valid ?
 		cb_provenance[slot].writer.width : 0;
 	if (writer_width >= PGXP_DIAG_WRITER_WIDTHS)
@@ -2204,6 +2247,23 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.vertex_native_value_mismatch,
 		(unsigned long long)window.vertex_native_both,
 		vc[3], vc[4], vc[5], vc[6]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_vertex_live] f=%llu "
+		"tracked=%llu/%llu/%llu/%llu cache=%llu/%llu/%llu/%llu "
+		"native=%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.vertex_live_state[0][0],
+		(unsigned long long)window.vertex_live_state[0][1],
+		(unsigned long long)window.vertex_live_state[0][2],
+		(unsigned long long)window.vertex_live_state[0][3],
+		(unsigned long long)window.vertex_live_state[1][0],
+		(unsigned long long)window.vertex_live_state[1][1],
+		(unsigned long long)window.vertex_live_state[1][2],
+		(unsigned long long)window.vertex_live_state[1][3],
+		(unsigned long long)window.vertex_live_state[2][0],
+		(unsigned long long)window.vertex_live_state[2][1],
+		(unsigned long long)window.vertex_live_state[2][2],
+		(unsigned long long)window.vertex_live_state[2][3]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_projection_z] f=%llu raw=nonpos:%llu floor:%llu normal:%llu "
 		"far:%llu/%llu/%llu/%llu max=%.3f rendered-linked=%llu/%llu/%llu "
