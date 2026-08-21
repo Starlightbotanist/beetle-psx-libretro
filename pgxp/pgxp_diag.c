@@ -189,6 +189,10 @@ typedef struct
 	uint64_t nclip_sign_disagreements;
 	uint64_t nclip_applied_sign_changes;
 	uint64_t nclip_precise_zero_fallbacks;
+	uint64_t nclip_validity_attempts;
+	uint64_t nclip_validity_invalid;
+	uint64_t nclip_invalid_mask[8];
+	uint64_t nclip_mismatch_mask[8];
 	uint64_t gpu_triangles[3];
 	uint64_t gpu_area_native_sign[3];
 	uint64_t gpu_area_precise_sign[3];
@@ -333,6 +337,8 @@ static uint32_t gpu_area_samples;
 static uint32_t gpu_area_window_samples;
 static uint32_t gpu_fold_samples;
 static uint32_t gpu_fold_window_samples;
+static uint32_t nclip_invalid_samples;
+static uint32_t nclip_invalid_window_samples;
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -620,6 +626,8 @@ void PGXP_DiagInit(void)
 	gpu_area_window_samples = 0;
 	gpu_fold_samples = 0;
 	gpu_fold_window_samples = 0;
+	nclip_invalid_samples = 0;
+	nclip_invalid_window_samples = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -2048,6 +2056,40 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value,
 	hash_event(7, (uint32_t)native_value, (uint32_t)precise_value);
 }
 
+void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
+		uint32_t sxy0, uint32_t sxy1, uint32_t sxy2,
+		const PGXP_value* shadow0, const PGXP_value* shadow1,
+		const PGXP_value* shadow2)
+{
+	const PGXP_value* shadow[3] = { shadow0, shadow1, shadow2 };
+	unsigned i;
+	invalid_mask &= 7u;
+	mismatch_mask &= 7u;
+	window.nclip_validity_attempts++;
+	window.nclip_invalid_mask[invalid_mask]++;
+	window.nclip_mismatch_mask[mismatch_mask]++;
+	if (!invalid_mask)
+		return;
+	window.nclip_validity_invalid++;
+	if (!log_cb || nclip_invalid_window_samples >= 8)
+		return;
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_nclip_invalid] n=%u mf=%u invalid=%u mismatch=%u "
+		"native=%08x/%08x/%08x\n",
+		nclip_invalid_samples + 1, mode_frame, invalid_mask, mismatch_mask,
+		sxy0, sxy1, sxy2);
+	for (i = 0; i < 3; i++)
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_nclip_shadow] n=%u v=%u value=%08x flags=%08x "
+			"xy=%.6f/%.6f count=%u stage=%u trace=%llu\n",
+			nclip_invalid_samples + 1, i, shadow[i]->value,
+			shadow[i]->flags, shadow[i]->x, shadow[i]->y,
+			shadow[i]->count, shadow[i]->trace_stage,
+			(unsigned long long)shadow[i]->trace_id);
+	nclip_invalid_samples++;
+	nclip_invalid_window_samples++;
+}
+
 void PGXP_DiagFrame(int backend)
 {
 	uint64_t state_hash = UINT64_C(1469598103934665603);
@@ -2173,6 +2215,31 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.vertex_w_gate_rejected_width[1],
 		(unsigned long long)window.vertex_w_gate_rejected_width[2],
 		(unsigned long long)window.vertex_w_gate_rejected_width[3]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_nclip_validity] f=%llu attempts=%llu invalid=%llu "
+		"invalid_mask=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"mismatch_mask=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.nclip_validity_attempts,
+		(unsigned long long)window.nclip_validity_invalid,
+		(unsigned long long)window.nclip_invalid_mask[0],
+		(unsigned long long)window.nclip_invalid_mask[1],
+		(unsigned long long)window.nclip_invalid_mask[2],
+		(unsigned long long)window.nclip_invalid_mask[3],
+		(unsigned long long)window.nclip_invalid_mask[4],
+		(unsigned long long)window.nclip_invalid_mask[5],
+		(unsigned long long)window.nclip_invalid_mask[6],
+		(unsigned long long)window.nclip_invalid_mask[7],
+		(unsigned long long)window.nclip_mismatch_mask[0],
+		(unsigned long long)window.nclip_mismatch_mask[1],
+		(unsigned long long)window.nclip_mismatch_mask[2],
+		(unsigned long long)window.nclip_mismatch_mask[3],
+		(unsigned long long)window.nclip_mismatch_mask[4],
+		(unsigned long long)window.nclip_mismatch_mask[5],
+		(unsigned long long)window.nclip_mismatch_mask[6],
+		(unsigned long long)window.nclip_mismatch_mask[7],
+		nclip_invalid_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gpu_area_summary] f=%llu tri=%llu/%llu/%llu "
 		"native_sign=%llu/%llu/%llu precise_sign=%llu/%llu/%llu "
@@ -2711,6 +2778,7 @@ void PGXP_DiagFrame(int backend)
 	window.event_hash = UINT64_C(1469598103934665603);
 	gpu_area_window_samples = 0;
 	gpu_fold_window_samples = 0;
+	nclip_invalid_window_samples = 0;
 	primitive_total = 0;
 	memset(primitive_class, 0, sizeof(primitive_class));
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));

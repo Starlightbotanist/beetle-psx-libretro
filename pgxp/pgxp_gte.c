@@ -244,12 +244,19 @@ void PGXP_pushRGBf(float _r, float _g, float _b, uint32_t _v)
 
 int PGXP_NCLIP_valid(uint32_t sxy0, uint32_t sxy1, uint32_t sxy2)
 {
+	unsigned mismatch_mask = (SXY0.value != sxy0 ? 1u : 0u) |
+		(SXY1.value != sxy1 ? 2u : 0u) |
+		(SXY2.value != sxy2 ? 4u : 0u);
+	unsigned invalid_mask;
 	Validate(&SXY0, sxy0);
 	Validate(&SXY1, sxy1);
 	Validate(&SXY2, sxy2);
-	if (((SXY0.flags & SXY1.flags & SXY2.flags & VALID_01) == VALID_01))/* && Config.PGXP_GTE && (Config.PGXP_Mode > 0)) */
-		return 1;
-	return 0;
+	invalid_mask = ((SXY0.flags & VALID_01) != VALID_01 ? 1u : 0u) |
+		((SXY1.flags & VALID_01) != VALID_01 ? 2u : 0u) |
+		((SXY2.flags & VALID_01) != VALID_01 ? 4u : 0u);
+	PGXP_DiagNCLIPValidity(invalid_mask, mismatch_mask, sxy0, sxy1, sxy2,
+		&SXY0, &SXY1, &SXY2);
+	return invalid_mask == 0;
 }
 
 double PGXP_NCLIP()
