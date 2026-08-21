@@ -601,6 +601,17 @@ static inline float PGXP_TruncateVertexPosition(float position)
 	return (float)wrapped + (position - (float)integer);
 }
 
+/* PGXP stores projected Z in 15-bit fixed-point scale.  Clip-space W is
+ * homogeneous, so this common scale cancels after perspective division, but
+ * retaining the raw value sends coordinates in the tens of thousands to the
+ * host rasterizer.  SwanStation and canonical GPL DuckStation normalize here
+ * as well, keeping clipping and interpolation in a numerically ordinary
+ * range without changing the resulting NDC position. */
+static inline float PGXP_NormalizeVertexW(float z)
+{
+	return z * (1.0f / 32768.0f);
+}
+
 int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutput, int xOffs, int yOffs)
 {
 	PGXP_value* vert = PGXP_ReadCB(offset);          /* pointer to vertex */
@@ -625,7 +636,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		pOutput->x = PGXP_TruncateVertexPosition(vert->x) + xOffs;
 		pOutput->y = PGXP_TruncateVertexPosition(vert->y) + yOffs;
 		pOutput->z = 0.95f;
-		pOutput->w = vert->z;
+		pOutput->w = PGXP_NormalizeVertexW(vert->z);
 		pOutput->valid_w = 1;
 
 		if ((vert->flags & VALID_2) != VALID_2)
@@ -660,7 +671,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			pOutput->x = PGXP_TruncateVertexPosition(recovered_x) + xOffs;
 			pOutput->y = PGXP_TruncateVertexPosition(recovered_y) + yOffs;
 			pOutput->z = 0.95f;
-			pOutput->w = recovered_z;
+			pOutput->w = PGXP_NormalizeVertexW(recovered_z);
 			pOutput->valid_w = 1;
 		}
 		else if ((cache_vert = PGXP_GetCachedVertex(psxX, psxY)) != NULL)
@@ -670,7 +681,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			pOutput->x = PGXP_TruncateVertexPosition(cache_vert->x) + xOffs;
 			pOutput->y = PGXP_TruncateVertexPosition(cache_vert->y) + yOffs;
 			pOutput->z = 0.95f;
-			pOutput->w = cache_vert->z;
+			pOutput->w = PGXP_NormalizeVertexW(cache_vert->z);
 			pOutput->valid_w = 0;	/* iCB: Getting the wrong w component causes too great an error when using perspective correction so disable it */
 		}
 		else

@@ -364,8 +364,8 @@ static void test_vertex_w_provenance_gate(void)
    PGXP_WriteCB(&shadow, 0);
    memset(&out, 0, sizeof(out));
    PGXP_GetVertex(0, &packed, &out, 0, 0);
-   if (!out.valid_w || out.w != shadow.z)
-      fail("GTE-proven W rejected", out.valid_w, 1);
+	if (!out.valid_w || out.w != shadow.z / 32768.0f)
+		fail("GTE-proven W rejected", out.valid_w, 1);
 }
 
 static void test_nclip_sign_only(void)
