@@ -202,7 +202,6 @@ typedef struct
 	uint64_t gpu_quad_precise_fold;
 	uint64_t gpu_quad_fold_introduced;
 	uint64_t gpu_quad_fold_removed;
-	uint64_t gpu_quad_fold_fallbacks;
 	uint64_t gpu_quad_fold_introduced_y[4];
 	uint64_t gpu_quad_fold_introduced_opcode[32];
 	uint64_t gpu_triangle_invalid_w;
@@ -1676,11 +1675,6 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	}
 }
 
-void PGXP_DiagGPUFoldFallback(void)
-{
-	window.gpu_quad_fold_fallbacks++;
-}
-
 static void trace_sample_tracked(unsigned slot, uint32_t value,
 		const PGXP_value* shadow, float x, float y, float w, int valid_w)
 {
@@ -2214,7 +2208,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.gpu_area_anomaly_y[3]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gpu_quad_summary] f=%llu pairs=%llu native_fold=%llu "
-		"precise_fold=%llu introduced=%llu removed=%llu fallback=%llu "
+		"precise_fold=%llu introduced=%llu removed=%llu "
 		"oversize=%llu/%llu oversize_disagree=%llu samples=%u\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)window.gpu_quad_pairs,
@@ -2222,7 +2216,6 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.gpu_quad_precise_fold,
 		(unsigned long long)window.gpu_quad_fold_introduced,
 		(unsigned long long)window.gpu_quad_fold_removed,
-		(unsigned long long)window.gpu_quad_fold_fallbacks,
 		(unsigned long long)window.gpu_oversize_x,
 		(unsigned long long)window.gpu_oversize_y,
 		(unsigned long long)window.gpu_oversize_sign_disagreements,

@@ -13,61 +13,6 @@
 extern int psx_pgxp_color;
 extern int psx_pgxp_fog;
 
-static int PGXP_AreaSign(double area)
-{
-	return area < 0.0 ? -1 : area > 0.0 ? 1 : 0;
-}
-
-/* A PS1 quad is decoded as triangles [0,1,2] and [1,2,3], while the
- * hardware renderer reverses the second half to [3,2,1].  Preserve precise
- * geometry normally, but identify the narrow case where a native quad that
- * is coherent or rounded degenerate becomes a folded precise quad. */
-static bool PGXP_QuadIntroducesFold(const tri_vertex *first,
-		const tri_vertex vertices[3])
-{
-	double native0 =
-		((double)vertices[0].x - first->x) *
-		((double)vertices[1].y - first->y) -
-		((double)vertices[1].x - first->x) *
-		((double)vertices[0].y - first->y);
-	double native1 =
-		((double)vertices[1].x - vertices[0].x) *
-		((double)vertices[2].y - vertices[0].y) -
-		((double)vertices[2].x - vertices[0].x) *
-		((double)vertices[1].y - vertices[0].y);
-	double precise0 =
-		((double)vertices[0].precise[0] - first->precise[0]) *
-		((double)vertices[1].precise[1] - first->precise[1]) -
-		((double)vertices[1].precise[0] - first->precise[0]) *
-		((double)vertices[0].precise[1] - first->precise[1]);
-	double precise1 =
-		((double)vertices[1].precise[0] - vertices[0].precise[0]) *
-		((double)vertices[2].precise[1] - vertices[0].precise[1]) -
-		((double)vertices[2].precise[0] - vertices[0].precise[0]) *
-		((double)vertices[1].precise[1] - vertices[0].precise[1]);
-	int native_sign0 = PGXP_AreaSign(native0);
-	int native_sign1 = PGXP_AreaSign(native1);
-	int precise_sign0 = PGXP_AreaSign(precise0);
-	int precise_sign1 = PGXP_AreaSign(precise1);
-	int native_fold = native_sign0 && native_sign1 &&
-		native_sign0 == native_sign1;
-	int precise_fold = precise_sign0 && precise_sign1 &&
-		precise_sign0 == precise_sign1;
-	return !native_fold && precise_fold;
-}
-
-static void PGXP_RevertQuadXY(tri_vertex *first, tri_vertex vertices[3])
-{
-	unsigned i;
-	first->precise[0] = (float)first->x;
-	first->precise[1] = (float)first->y;
-	for (i = 0; i < 3; i++)
-	{
-		vertices[i].precise[0] = (float)vertices[i].x;
-		vertices[i].precise[1] = (float)vertices[i].y;
-	}
-}
-
 static float gpu_precise_rgb_buf[12];
 static float gpu_precise_fog_buf[16];
 
@@ -1751,12 +1696,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          gpu->InQuad_clut = clut; \
          gpu->InQuad_invalidW = invalidW; \
       } \
-   } \
-   if (PGXP_LIT && NV_LIT == 4 && gpu->InCmd == INCMD_NONE && \
-       PGXP_QuadIntroducesFold(&gpu->InQuad_F3Vertices[0], vertices)) \
-   { \
-      PGXP_RevertQuadXY(&gpu->InQuad_F3Vertices[0], vertices); \
-      PGXP_DiagGPUFoldFallback(); \
    } \
    if (abs(vertices[2].y - vertices[0].y) >= (512 << gpu->upscale_shift) || \
        abs(vertices[2].y - vertices[1].y) >= (512 << gpu->upscale_shift) || \
