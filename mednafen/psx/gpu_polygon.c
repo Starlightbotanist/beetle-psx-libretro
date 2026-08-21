@@ -20,8 +20,8 @@ static int PGXP_AreaSign(double area)
 
 /* A PS1 quad is decoded as triangles [0,1,2] and [1,2,3], while the
  * hardware renderer reverses the second half to [3,2,1].  Preserve precise
- * geometry normally, but identify the narrow case where two non-degenerate,
- * coherent native halves become a folded precise quad. */
+ * geometry normally, but identify the narrow case where a native quad that
+ * is coherent or rounded degenerate becomes a folded precise quad. */
 static bool PGXP_QuadIntroducesFold(const tri_vertex *first,
 		const tri_vertex vertices[3])
 {
@@ -49,8 +49,11 @@ static bool PGXP_QuadIntroducesFold(const tri_vertex *first,
 	int native_sign1 = PGXP_AreaSign(native1);
 	int precise_sign0 = PGXP_AreaSign(precise0);
 	int precise_sign1 = PGXP_AreaSign(precise1);
-	return native_sign0 && native_sign1 && native_sign0 != native_sign1 &&
-		precise_sign0 && precise_sign1 && precise_sign0 == precise_sign1;
+	int native_fold = native_sign0 && native_sign1 &&
+		native_sign0 == native_sign1;
+	int precise_fold = precise_sign0 && precise_sign1 &&
+		precise_sign0 == precise_sign1;
+	return !native_fold && precise_fold;
 }
 
 static void PGXP_RevertQuadXY(tri_vertex *first, tri_vertex vertices[3])
