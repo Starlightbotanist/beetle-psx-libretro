@@ -1370,54 +1370,20 @@ static INLINE void TransformDQ(int64_t h_div_sz)
    SET_IR(0, Lm_H(((int64_t)DQB + DQA * h_div_sz) >> 12));
 }
 
-/* Turn the raw 44-bit Z accumulator into the float W the PGXP shadow uses
- * for perspective correction.
+/* Select the depth used by the PGXP projection shadow.
  *
- * The architectural SZ3 is Lm_D(acc >> 12) stored through a uint16_t, i.e.
- * integer-truncated and saturated to [0, 0xFFFF].  Reading W back out of
- * Z_FIFO(3), as this code used to, therefore threw away every fractional bit
- * of the transform for no reason: the exact value is still sitting in the
- * accumulator one line above the store.  This is not a new deviation from
- * the integer pipeline either - precise_h_div_sz has always been a true
- * divide rather than the GTE's reciprocal table, so precise_x/y already
- * depart from the architectural result deliberately.  All this does is make
- * x, y and w derive from one exact Z instead of a truncated one.
+ * Beetle currently combines the fractional, pre-SZ3 Z accumulator with the
+ * architectural (integer) IR1/IR2 values. SwanStation and GPL DuckStation do
+ * not use that hybrid: their default mode uses architectural SZ3 and IR1/IR2,
+ * while their optional "preserve projection precision" mode uses all three
+ * pre-quantized accumulators. The successful instrumented SwanStation R4 run
+ * had that option disabled.
  *
- * Scope, measured rather than assumed.  Both ends of the range are pinned by
- * clamps that this patch leaves alone, so the affected band is exactly
- * z in (H/2, 0xFFFF):
- *
- *   - Below H/2 the float_max floor dominates and the result is bit-identical
- *     to before.  The floor mirrors Divide()'s own overflow behaviour, so the
- *     near-camera case people usually reach for as the motivating example is
- *     in fact a strict no-op here.
- *   - Above 0xFFFF the ceiling is kept on purpose.  Lifting it is a separate
- *     and genuinely behavioural change: past saturation the shadow would stop
- *     disagreeing with the architectural screen coordinates by fractions of a
- *     pixel and start disagreeing by tens of pixels, which is a different risk
- *     class (the 2D-tolerance heuristic, and any game that clipped against its
- *     own saturated result).  That wants its own patch and its own per-game
- *     testing.
- *
- * Inside the band the recovered fraction is worth at most 2/H in relative W
- * error, peaking just past the floor and decaying as 1/z.  For H = 320 that
- * is 0.62% at z ~ 161, which is about one screen pixel of vertex placement
- * error at the edge of a 320-wide frame; by z = 1000 it is under a tenth of
- * a pixel.  Modest, but sub-pixel vertex placement is the entire point of
- * PGXP, so a whole pixel near the clip plane is on-mission.
- *
- * acc is sign-extended to 44 bits by A_MV, so (double)acc is exact (44 < 53
- * mantissa bits) and scaling by 2^-12 is exact as well - verified over 40M
- * random 44-bit accumulators.  The conversion introduces no rounding of its
- * own and is bit-identical across arch, FPU mode and optimisation level; it
- * cannot become a determinism divergence the way a recomputed floating-point
- * transform could.  W moves by at most one SZ3 unit at any vertex (the bound
- * is 1.0 and is attained, not approached: a z just under an integer can round
- * up to it in the narrowing to float).
- *
- * Pre-existing and untouched: H == 0 with a non-positive Z still yields
- * precise_z == 0 and a non-finite precise_h_div_sz downstream, exactly as
- * before.  Fixing that is orthogonal to this patch. */
+ * This controlled A/B therefore restores architectural SZ3 for both PGXP W
+ * and the true H/Z divide, matching the reference mode without touching any
+ * architectural GTE state. The raw 44-bit accumulator remains available to
+ * diagnostics, which classify the generated and actually rendered vertices
+ * by the difference from Beetle's previous fractional-Z projection. */
 static INLINE float pgxp_precise_z(int64_t acc)
 {
    double z = (double)acc * (1.0 / 4096.0);
@@ -1438,13 +1404,10 @@ static INLINE float pgxp_precise_z(int64_t acc)
    }
 #endif
 
-   /* f1ac005c restored the architectural 0xFFFF ceiling as a controlled
-    * field test. R4, GT2 and both Spyro games showed neither improvement
-    * nor regression, so retain the pre-test uncapped behaviour and measure
-    * both generated and rendered far-depth geometry in the regular PGXP
-    * diagnostic window. */
+   /* Match the default SwanStation/GPL DuckStation projection inputs: SZ3,
+    * IR1 and IR2 are all architectural values. */
    {
-      float precise_z = float_max(H/2.f, (float)z);
+      float precise_z = float_max(H/2.f, (float)Z_FIFO(3));
       PGXP_DiagProjectionZ(z, precise_z, H);
       return precise_z;
    }

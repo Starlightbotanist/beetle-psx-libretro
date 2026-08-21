@@ -177,9 +177,13 @@ typedef struct
 	uint64_t gte_vertices;
 	uint64_t projection_z_band[7];
 	double projection_z_max;
+	uint64_t projection_z_delta[6];
+	double projection_z_delta_sum;
+	double projection_z_delta_max;
 	uint64_t rendered_z_linked[3];
 	uint64_t rendered_z_far[3];
 	uint64_t rendered_z_band[3][4];
+	uint64_t rendered_z_delta[3][6];
 	uint64_t vertex_delta_class[3][6];
 	uint64_t vertex_axis_exact[3][2];
 	uint64_t vertex_axis_subpixel[3][2];
@@ -283,6 +287,7 @@ static uint32_t vertex_live_samples;
 static uint32_t vertex_coherence_samples;
 static uint32_t line_hack_samples;
 static uint8_t pending_projection_z_band;
+static uint8_t pending_projection_z_delta;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
 static uint32_t lineage_drop_samples;
@@ -614,6 +619,7 @@ void PGXP_DiagInit(void)
 	vertex_coherence_samples = 0;
 	line_hack_samples = 0;
 	pending_projection_z_band = 0;
+	pending_projection_z_delta = 0;
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
 	lineage_drop_samples = 0;
@@ -901,9 +907,11 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 		return;
 	/* A GTE result starts a fresh provenance chain. */
 	memset(value->trace_reserved, 0, sizeof(value->trace_reserved));
-	/* Byte 6 is diagnostic-only projection provenance. Bytes 0..5 retain
-	 * their existing lineage and original-MFC2 roles. */
-	value->trace_reserved[6] = pending_projection_z_band;
+	/* Byte 6 is diagnostic-only projection provenance. The low nibble is the
+	 * raw-Z band and the high nibble is the exact-vs-applied delta class;
+	 * bytes 0..5 retain their existing lineage and original-MFC2 roles. */
+	value->trace_reserved[6] = (uint8_t)(pending_projection_z_band |
+		(pending_projection_z_delta << 4));
 	value->trace_id = trace_next_id++;
 	value->trace_stage = PGXP_TRACE_GTE;
 	trace_record(PGXP_TRACE_EVENT_GTE, 0, value->trace_id,
@@ -1864,7 +1872,33 @@ void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
 void PGXP_DiagProjectionZ(double raw_z, float precise_z, uint16_t h)
 {
 	unsigned band;
+	unsigned delta_class;
 	double floor_z = (double)h * 0.5;
+	float exact_z = (float)raw_z;
+	double delta;
+
+	if (exact_z < (float)floor_z)
+		exact_z = (float)floor_z;
+	delta = (double)exact_z - (double)precise_z;
+	if (delta < 0.0)
+		delta = -delta;
+	if (delta == 0.0)
+		delta_class = 0;
+	else if (delta <= 0.125)
+		delta_class = 1;
+	else if (delta <= 0.25)
+		delta_class = 2;
+	else if (delta <= 0.5)
+		delta_class = 3;
+	else if (delta < 1.0)
+		delta_class = 4;
+	else
+		delta_class = 5;
+	window.projection_z_delta[delta_class]++;
+	window.projection_z_delta_sum += delta;
+	if (delta > window.projection_z_delta_max)
+		window.projection_z_delta_max = delta;
+	pending_projection_z_delta = (uint8_t)(delta_class + 1);
 
 	if (raw_z <= 0.0)
 		band = 0;
@@ -1884,7 +1918,8 @@ void PGXP_DiagProjectionZ(double raw_z, float precise_z, uint16_t h)
 	pending_projection_z_band = (uint8_t)(band + 1);
 	if (raw_z > window.projection_z_max)
 		window.projection_z_max = raw_z;
-	hash_event(8, (uint32_t)band, (uint32_t)precise_z);
+	hash_event(8, (uint32_t)band | ((uint32_t)delta_class << 8),
+		(uint32_t)precise_z);
 }
 
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
@@ -1906,11 +1941,11 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 	float abs_dx = dx < 0.0f ? -dx : dx;
 	float abs_dy = dy < 0.0f ? -dy : dy;
 	float max_delta = abs_dx > abs_dy ? abs_dx : abs_dy;
-	if (source <= PGXP_DIAG_VERTEX_NATIVE &&
-	    trace_metadata_valid(shadow) && shadow->trace_reserved[6] >= 1 &&
-	    shadow->trace_reserved[6] <= 7)
+	if (source <= PGXP_DIAG_VERTEX_NATIVE && trace_metadata_valid(shadow) &&
+	    (shadow->trace_reserved[6] & 0x0f) >= 1 &&
+	    (shadow->trace_reserved[6] & 0x0f) <= 7)
 	{
-		unsigned source_band = shadow->trace_reserved[6] - 1;
+		unsigned source_band = (shadow->trace_reserved[6] & 0x0f) - 1;
 		window.rendered_z_linked[source]++;
 		if (source_band >= 3)
 		{
@@ -1918,6 +1953,11 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 			window.rendered_z_band[source][source_band - 3]++;
 		}
 	}
+	if (source <= PGXP_DIAG_VERTEX_NATIVE && trace_metadata_valid(shadow) &&
+	    (shadow->trace_reserved[6] >> 4) >= 1 &&
+	    (shadow->trace_reserved[6] >> 4) <= 6)
+		window.rendered_z_delta[source]
+			[(shadow->trace_reserved[6] >> 4) - 1]++;
 	if (source == PGXP_DIAG_VERTEX_TRACKED)
 		terminal_reason = 0;
 	else if (source == PGXP_DIAG_VERTEX_CACHE)
@@ -2500,6 +2540,41 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.rendered_z_far[0],
 		(unsigned long long)window.rendered_z_far[1],
 		(unsigned long long)window.rendered_z_far[2]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_projection_delta] f=%llu applied=architectural-sz3 "
+		"generated=exact:%llu le.125:%llu le.25:%llu le.5:%llu lt1:%llu ge1:%llu "
+		"sum=%.3f max=%.3f\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.projection_z_delta[0],
+		(unsigned long long)window.projection_z_delta[1],
+		(unsigned long long)window.projection_z_delta[2],
+		(unsigned long long)window.projection_z_delta[3],
+		(unsigned long long)window.projection_z_delta[4],
+		(unsigned long long)window.projection_z_delta[5],
+		window.projection_z_delta_sum,
+		window.projection_z_delta_max);
+	{
+		unsigned source;
+		for (source = 0; source < 3; source++)
+		{
+			uint64_t total = 0;
+			unsigned c;
+			for (c = 0; c < 6; c++)
+				total += window.rendered_z_delta[source][c];
+			if (total)
+				log_cb(RETRO_LOG_INFO,
+					"[pgxp_rendered_projection_delta] f=%llu source=%u total=%llu "
+					"delta=%llu/%llu/%llu/%llu/%llu/%llu\n",
+					(unsigned long long)frame_number, source,
+					(unsigned long long)total,
+					(unsigned long long)window.rendered_z_delta[source][0],
+					(unsigned long long)window.rendered_z_delta[source][1],
+					(unsigned long long)window.rendered_z_delta[source][2],
+					(unsigned long long)window.rendered_z_delta[source][3],
+					(unsigned long long)window.rendered_z_delta[source][4],
+					(unsigned long long)window.rendered_z_delta[source][5]);
+		}
+	}
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_w_gate] f=%llu kept=%llu rejected=%llu "
 		"stage=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
