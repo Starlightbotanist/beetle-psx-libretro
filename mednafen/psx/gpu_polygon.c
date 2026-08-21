@@ -1651,7 +1651,12 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    for (v = 0; v < 3; v++) \
       PGXP_DIAG_PRIMITIVE_AFTER(pgxp_diag_vertices, v, vertices[v]); \
    if (PGXP_LIT) \
+   { \
       PGXP_DiagPrimitive(pgxp_diag_vertices, invalidW, psx_pgxp_2d_tol); \
+      PGXP_DiagGPUPrimitive(pgxp_diag_vertices, \
+         NV_LIT == 4 ? (gpu->InCmd == INCMD_QUAD ? 2 : 1) : 0, \
+         invalidW, gpu->upscale_shift); \
+   } \
    /* Copy before Calc_UVOffsets which modifies vertices */ \
    /* Calc_UVOffsets likes to see unadjusted vertices */ \
    if (NV_LIT == 4 && gpu->InCmd != INCMD_QUAD) \

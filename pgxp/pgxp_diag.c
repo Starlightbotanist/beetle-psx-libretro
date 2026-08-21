@@ -189,6 +189,23 @@ typedef struct
 	uint64_t nclip_sign_disagreements;
 	uint64_t nclip_applied_sign_changes;
 	uint64_t nclip_precise_zero_fallbacks;
+	uint64_t gpu_triangles[3];
+	uint64_t gpu_area_native_sign[3];
+	uint64_t gpu_area_precise_sign[3];
+	uint64_t gpu_area_sign_disagreements;
+	uint64_t gpu_area_precise_zero;
+	uint64_t gpu_area_near_native[5];
+	uint64_t gpu_area_near_precise[5];
+	uint64_t gpu_area_anomaly_y[4];
+	uint64_t gpu_quad_pairs;
+	uint64_t gpu_quad_native_fold;
+	uint64_t gpu_quad_precise_fold;
+	uint64_t gpu_quad_fold_introduced;
+	uint64_t gpu_quad_fold_removed;
+	uint64_t gpu_triangle_invalid_w;
+	uint64_t gpu_oversize_x;
+	uint64_t gpu_oversize_y;
+	uint64_t gpu_oversize_sign_disagreements;
 	uint64_t lineage_mfc2;
 	uint64_t lineage_sll5_candidates;
 	uint64_t lineage_sll5_matches;
@@ -306,6 +323,12 @@ static uint64_t primitive_native_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
 	[PGXP_TRACE_REASON_COUNT];
 static uint64_t primitive_native_sra5_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
 	[PGXP_TRACE_REASON_COUNT];
+static uint64_t gpu_quad_packet;
+static int gpu_quad_native_sign;
+static int gpu_quad_precise_sign;
+static int gpu_quad_invalid_w;
+static uint32_t gpu_area_samples;
+static uint32_t gpu_area_window_samples;
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -585,6 +608,12 @@ void PGXP_DiagInit(void)
 	memset(primitive_native_reason, 0, sizeof(primitive_native_reason));
 	memset(primitive_native_sra5_reason, 0,
 		sizeof(primitive_native_sra5_reason));
+	gpu_quad_packet = 0;
+	gpu_quad_native_sign = 0;
+	gpu_quad_precise_sign = 0;
+	gpu_quad_invalid_w = 0;
+	gpu_area_samples = 0;
+	gpu_area_window_samples = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -1467,6 +1496,142 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	}
 }
 
+static int pgxp_diag_area_sign(double area)
+{
+	return area < 0.0 ? -1 : area > 0.0 ? 1 : 0;
+}
+
+static unsigned pgxp_diag_area_band(double area)
+{
+	double magnitude = area < 0.0 ? -area : area;
+	if (magnitude == 0.0) return 0;
+	if (magnitude < 1.0) return 1;
+	if (magnitude < 16.0) return 2;
+	if (magnitude < 256.0) return 3;
+	return 4;
+}
+
+void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
+		unsigned quad_part, int invalid_w, unsigned upscale_shift)
+{
+	double scale = (double)(UINT32_C(1) << upscale_shift);
+	double scale2 = scale * scale;
+	double native_area =
+		((double)vertices[1].native_x - vertices[0].native_x) *
+		((double)vertices[2].native_y - vertices[0].native_y) -
+		((double)vertices[2].native_x - vertices[0].native_x) *
+		((double)vertices[1].native_y - vertices[0].native_y);
+	double precise_area =
+		((double)vertices[1].precise_after_x - vertices[0].precise_after_x) *
+		((double)vertices[2].precise_after_y - vertices[0].precise_after_y) -
+		((double)vertices[2].precise_after_x - vertices[0].precise_after_x) *
+		((double)vertices[1].precise_after_y - vertices[0].precise_after_y);
+	int native_sign;
+	int precise_sign;
+	int sign_disagreement;
+	int oversize_x;
+	int oversize_y;
+	int average_y;
+	unsigned y_band;
+	unsigned part = quad_part <= 2 ? quad_part : 0;
+	unsigned i;
+
+	native_area /= scale2;
+	precise_area /= scale2;
+	native_sign = pgxp_diag_area_sign(native_area);
+	precise_sign = pgxp_diag_area_sign(precise_area);
+	sign_disagreement = native_sign != precise_sign;
+	oversize_x = 0;
+	oversize_y = 0;
+	for (i = 0; i < 3; i++)
+	{
+		unsigned j = (i + 1) % 3;
+		int64_t dx = (int64_t)vertices[i].native_x - vertices[j].native_x;
+		int64_t dy = (int64_t)vertices[i].native_y - vertices[j].native_y;
+		if (dx < 0) dx = -dx;
+		if (dy < 0) dy = -dy;
+		if (dx >= ((int64_t)1024 << upscale_shift)) oversize_x = 1;
+		if (dy >= ((int64_t)512 << upscale_shift)) oversize_y = 1;
+	}
+	average_y = (vertices[0].native_y + vertices[1].native_y +
+		vertices[2].native_y) / 3;
+	average_y >>= upscale_shift;
+	y_band = average_y < 64 ? 0 : average_y < 128 ? 1 :
+		average_y < 192 ? 2 : 3;
+
+	window.gpu_triangles[part]++;
+	window.gpu_area_native_sign[native_sign + 1]++;
+	window.gpu_area_precise_sign[precise_sign + 1]++;
+	window.gpu_area_near_native[pgxp_diag_area_band(native_area)]++;
+	window.gpu_area_near_precise[pgxp_diag_area_band(precise_area)]++;
+	if (sign_disagreement)
+	{
+		window.gpu_area_sign_disagreements++;
+		window.gpu_area_anomaly_y[y_band]++;
+	}
+	if (!precise_sign)
+		window.gpu_area_precise_zero++;
+	if (invalid_w)
+		window.gpu_triangle_invalid_w++;
+	if (oversize_x)
+		window.gpu_oversize_x++;
+	if (oversize_y)
+		window.gpu_oversize_y++;
+	if ((oversize_x || oversize_y) && sign_disagreement)
+		window.gpu_oversize_sign_disagreements++;
+
+	if (part == 1)
+	{
+		gpu_quad_packet = current_packet;
+		gpu_quad_native_sign = native_sign;
+		gpu_quad_precise_sign = precise_sign;
+		gpu_quad_invalid_w = invalid_w;
+	}
+	else if (part == 2 && gpu_quad_packet == current_packet)
+	{
+		int native_fold = gpu_quad_native_sign != 0 && native_sign != 0 &&
+			gpu_quad_native_sign != native_sign;
+		int precise_fold = gpu_quad_precise_sign != 0 && precise_sign != 0 &&
+			gpu_quad_precise_sign != precise_sign;
+		window.gpu_quad_pairs++;
+		if (native_fold) window.gpu_quad_native_fold++;
+		if (precise_fold) window.gpu_quad_precise_fold++;
+		if (!native_fold && precise_fold) window.gpu_quad_fold_introduced++;
+		if (native_fold && !precise_fold) window.gpu_quad_fold_removed++;
+		if (precise_fold) window.gpu_area_anomaly_y[y_band]++;
+		invalid_w |= gpu_quad_invalid_w;
+	}
+
+	if (log_cb && gpu_area_window_samples < 12 &&
+	    (sign_disagreement || oversize_x || oversize_y ||
+	     (part == 2 && gpu_quad_packet == current_packet &&
+	      gpu_quad_precise_sign != 0 && precise_sign != 0 &&
+	      gpu_quad_precise_sign != precise_sign)))
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_gpu_area] n=%u mf=%u packet=%llu op=%02x part=%u "
+			"native=%.6f/%d precise=%.6f/%d invalid_w=%d "
+			"oversize=%d/%d yband=%u vertices="
+			"%d/%d:%.3f/%.3f/%.6f,%d/%d:%.3f/%.3f/%.6f,"
+			"%d/%d:%.3f/%.3f/%.6f\n",
+			gpu_area_samples + 1, mode_frame,
+			(unsigned long long)current_packet, current_opcode, part,
+			native_area, native_sign, precise_area, precise_sign, invalid_w,
+			oversize_x, oversize_y, y_band,
+			vertices[0].native_x, vertices[0].native_y,
+			vertices[0].precise_after_x, vertices[0].precise_after_y,
+			vertices[0].precise_after_w,
+			vertices[1].native_x, vertices[1].native_y,
+			vertices[1].precise_after_x, vertices[1].precise_after_y,
+			vertices[1].precise_after_w,
+			vertices[2].native_x, vertices[2].native_y,
+			vertices[2].precise_after_x, vertices[2].precise_after_y,
+			vertices[2].precise_after_w);
+		gpu_area_samples++;
+		gpu_area_window_samples++;
+	}
+}
+
 static void trace_sample_tracked(unsigned slot, uint32_t value,
 		const PGXP_value* shadow, float x, float y, float w, int valid_w)
 {
@@ -1965,6 +2130,53 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.vertex_w_gate_rejected_width[1],
 		(unsigned long long)window.vertex_w_gate_rejected_width[2],
 		(unsigned long long)window.vertex_w_gate_rejected_width[3]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gpu_area_summary] f=%llu tri=%llu/%llu/%llu "
+		"native_sign=%llu/%llu/%llu precise_sign=%llu/%llu/%llu "
+		"disagree=%llu precise_zero=%llu invalid_w=%llu "
+		"near_native=%llu/%llu/%llu/%llu/%llu "
+		"near_precise=%llu/%llu/%llu/%llu/%llu y=%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.gpu_triangles[0],
+		(unsigned long long)window.gpu_triangles[1],
+		(unsigned long long)window.gpu_triangles[2],
+		(unsigned long long)window.gpu_area_native_sign[0],
+		(unsigned long long)window.gpu_area_native_sign[1],
+		(unsigned long long)window.gpu_area_native_sign[2],
+		(unsigned long long)window.gpu_area_precise_sign[0],
+		(unsigned long long)window.gpu_area_precise_sign[1],
+		(unsigned long long)window.gpu_area_precise_sign[2],
+		(unsigned long long)window.gpu_area_sign_disagreements,
+		(unsigned long long)window.gpu_area_precise_zero,
+		(unsigned long long)window.gpu_triangle_invalid_w,
+		(unsigned long long)window.gpu_area_near_native[0],
+		(unsigned long long)window.gpu_area_near_native[1],
+		(unsigned long long)window.gpu_area_near_native[2],
+		(unsigned long long)window.gpu_area_near_native[3],
+		(unsigned long long)window.gpu_area_near_native[4],
+		(unsigned long long)window.gpu_area_near_precise[0],
+		(unsigned long long)window.gpu_area_near_precise[1],
+		(unsigned long long)window.gpu_area_near_precise[2],
+		(unsigned long long)window.gpu_area_near_precise[3],
+		(unsigned long long)window.gpu_area_near_precise[4],
+		(unsigned long long)window.gpu_area_anomaly_y[0],
+		(unsigned long long)window.gpu_area_anomaly_y[1],
+		(unsigned long long)window.gpu_area_anomaly_y[2],
+		(unsigned long long)window.gpu_area_anomaly_y[3]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gpu_quad_summary] f=%llu pairs=%llu native_fold=%llu "
+		"precise_fold=%llu introduced=%llu removed=%llu "
+		"oversize=%llu/%llu oversize_disagree=%llu samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.gpu_quad_pairs,
+		(unsigned long long)window.gpu_quad_native_fold,
+		(unsigned long long)window.gpu_quad_precise_fold,
+		(unsigned long long)window.gpu_quad_fold_introduced,
+		(unsigned long long)window.gpu_quad_fold_removed,
+		(unsigned long long)window.gpu_oversize_x,
+		(unsigned long long)window.gpu_oversize_y,
+		(unsigned long long)window.gpu_oversize_sign_disagreements,
+		gpu_area_samples);
 	{
 		unsigned source;
 		for (source = 0; source < 3; source++)
@@ -2410,6 +2622,7 @@ void PGXP_DiagFrame(int backend)
 
 	memset(&window, 0, sizeof(window));
 	window.event_hash = UINT64_C(1469598103934665603);
+	gpu_area_window_samples = 0;
 	primitive_total = 0;
 	memset(primitive_class, 0, sizeof(primitive_class));
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));

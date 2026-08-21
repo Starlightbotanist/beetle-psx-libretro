@@ -79,6 +79,8 @@ void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 		unsigned tex_mode, int mask_eval);
 void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		int invalid_w, int tolerance);
+void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
+		unsigned quad_part, int invalid_w, unsigned upscale_shift);
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		unsigned slot, uint32_t value, const PGXP_value* shadow,
 		float x, float y, float w, int32_t native_x, int32_t native_y,
@@ -131,6 +133,7 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value,
 #define PGXP_DiagCBWrite(slot, fifo_pos) ((void)0)
 #define PGXP_DiagPacket(opcode, words, abr, tex_mode, mask_eval) ((void)0)
 #define PGXP_DiagPrimitive(vertices, invalid_w, tolerance) ((void)0)
+#define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, native_x, native_y, valid_w, valid_xy, value_match) ((void)0)
 #define PGXP_DiagNCLIP(native_value, precise_value, applied_value) ((void)0)
 #define PGXP_DIAG_PRIMITIVE_DECLARE(name)
