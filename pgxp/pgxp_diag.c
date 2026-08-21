@@ -202,6 +202,8 @@ typedef struct
 	uint64_t gpu_quad_precise_fold;
 	uint64_t gpu_quad_fold_introduced;
 	uint64_t gpu_quad_fold_removed;
+	uint64_t gpu_quad_fold_introduced_y[4];
+	uint64_t gpu_quad_fold_introduced_opcode[32];
 	uint64_t gpu_triangle_invalid_w;
 	uint64_t gpu_oversize_x;
 	uint64_t gpu_oversize_y;
@@ -329,6 +331,8 @@ static int gpu_quad_invalid_w;
 static int gpu_quad_pending;
 static uint32_t gpu_area_samples;
 static uint32_t gpu_area_window_samples;
+static uint32_t gpu_fold_samples;
+static uint32_t gpu_fold_window_samples;
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -614,6 +618,8 @@ void PGXP_DiagInit(void)
 	gpu_quad_pending = 0;
 	gpu_area_samples = 0;
 	gpu_area_window_samples = 0;
+	gpu_fold_samples = 0;
+	gpu_fold_window_samples = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -1531,6 +1537,7 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	int sign_disagreement;
 	int oversize_x;
 	int oversize_y;
+	int pair_native_fold = 0;
 	int pair_precise_fold = 0;
 	int average_y;
 	unsigned y_band;
@@ -1602,7 +1609,13 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		if (precise_fold) window.gpu_quad_precise_fold++;
 		if (!native_fold && precise_fold) window.gpu_quad_fold_introduced++;
 		if (native_fold && !precise_fold) window.gpu_quad_fold_removed++;
+		if (!native_fold && precise_fold)
+		{
+			window.gpu_quad_fold_introduced_y[y_band]++;
+			window.gpu_quad_fold_introduced_opcode[current_opcode & 0x1f]++;
+		}
 		if (precise_fold) window.gpu_area_anomaly_y[y_band]++;
+		pair_native_fold = native_fold;
 		pair_precise_fold = precise_fold;
 		invalid_w |= gpu_quad_invalid_w;
 		gpu_quad_pending = 0;
@@ -1635,6 +1648,30 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 			vertices[2].precise_after_w);
 		gpu_area_samples++;
 		gpu_area_window_samples++;
+	}
+	if (log_cb && gpu_fold_window_samples < 8 &&
+	    !pair_native_fold && pair_precise_fold)
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_gpu_fold] n=%u mf=%u packet=%llu op=%02x yband=%u "
+			"invalid_w=%d native_sign=%d/%d precise_sign=%d/%d vertices="
+			"%d/%d:%.3f/%.3f/%.6f,%d/%d:%.3f/%.3f/%.6f,"
+			"%d/%d:%.3f/%.3f/%.6f\n",
+			gpu_fold_samples + 1, mode_frame,
+			(unsigned long long)current_packet, current_opcode, y_band,
+			invalid_w, gpu_quad_native_sign, native_sign,
+			gpu_quad_precise_sign, precise_sign,
+			vertices[0].native_x, vertices[0].native_y,
+			vertices[0].precise_after_x, vertices[0].precise_after_y,
+			vertices[0].precise_after_w,
+			vertices[1].native_x, vertices[1].native_y,
+			vertices[1].precise_after_x, vertices[1].precise_after_y,
+			vertices[1].precise_after_w,
+			vertices[2].native_x, vertices[2].native_y,
+			vertices[2].precise_after_x, vertices[2].precise_after_y,
+			vertices[2].precise_after_w);
+		gpu_fold_samples++;
+		gpu_fold_window_samples++;
 	}
 }
 
@@ -2183,6 +2220,50 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.gpu_oversize_y,
 		(unsigned long long)window.gpu_oversize_sign_disagreements,
 		gpu_area_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gpu_fold_summary] f=%llu introduced_y=%llu/%llu/%llu/%llu "
+		"opcode=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/"
+		"%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/"
+		"%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/"
+		"%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.gpu_quad_fold_introduced_y[0],
+		(unsigned long long)window.gpu_quad_fold_introduced_y[1],
+		(unsigned long long)window.gpu_quad_fold_introduced_y[2],
+		(unsigned long long)window.gpu_quad_fold_introduced_y[3],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[0],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[1],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[2],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[3],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[4],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[5],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[6],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[7],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[8],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[9],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[10],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[11],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[12],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[13],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[14],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[15],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[16],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[17],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[18],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[19],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[20],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[21],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[22],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[23],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[24],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[25],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[26],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[27],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[28],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[29],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[30],
+		(unsigned long long)window.gpu_quad_fold_introduced_opcode[31],
+		gpu_fold_samples);
 	{
 		unsigned source;
 		for (source = 0; source < 3; source++)
@@ -2629,6 +2710,7 @@ void PGXP_DiagFrame(int backend)
 	memset(&window, 0, sizeof(window));
 	window.event_hash = UINT64_C(1469598103934665603);
 	gpu_area_window_samples = 0;
+	gpu_fold_window_samples = 0;
 	primitive_total = 0;
 	memset(primitive_class, 0, sizeof(primitive_class));
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));
