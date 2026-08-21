@@ -1914,8 +1914,9 @@ static int32_t NCLIP(uint32_t instr)
       if (PGXP_NCLIP_valid(v0, v1, v2)) {
          int32_t native_sum = (int32_t)(a + b + c);
          int32_t precise_sum = (int32_t)PGXP_NCLIP();
+         int32_t reference_sum = (int32_t)PGXP_NCLIP_reference();
          sum = PGXP_NCLIP_sign_only(native_sum, precise_sum);
-         PGXP_DiagNCLIP(native_sum, precise_sum, sum);
+         PGXP_DiagNCLIP(native_sum, precise_sum, reference_sum, sum);
          used_pgxp = true;
       }
    }

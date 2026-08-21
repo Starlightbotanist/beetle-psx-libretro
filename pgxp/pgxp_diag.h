@@ -87,7 +87,7 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		int valid_w,
 		int valid_xy, int value_match);
 void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value,
-		int32_t applied_value);
+		int32_t reference_value, int32_t applied_value);
 void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 		uint32_t sxy0, uint32_t sxy1, uint32_t sxy2,
 		const PGXP_value* shadow0, const PGXP_value* shadow1,
@@ -139,7 +139,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagPrimitive(vertices, invalid_w, tolerance) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, native_x, native_y, valid_w, valid_xy, value_match) ((void)0)
-#define PGXP_DiagNCLIP(native_value, precise_value, applied_value) ((void)0)
+#define PGXP_DiagNCLIP(native_value, precise_value, reference_value, applied_value) ((void)0)
 #define PGXP_DiagNCLIPValidity(invalid_mask, mismatch_mask, sxy0, sxy1, sxy2, shadow0, shadow1, shadow2) ((void)0)
 #define PGXP_DIAG_PRIMITIVE_DECLARE(name)
 #define PGXP_DIAG_PRIMITIVE_BEFORE(name, i, vertex) ((void)0)

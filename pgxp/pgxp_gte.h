@@ -77,6 +77,7 @@ void	PGXP_RTPS(uint32_t _n, uint32_t _v);
 
 int		PGXP_NCLIP_valid(uint32_t sxy0, uint32_t sxy1, uint32_t sxy2);
 double	PGXP_NCLIP();
+float	PGXP_NCLIP_reference();
 int32_t PGXP_NCLIP_sign_only(int32_t native_value, int32_t precise_value);
 
 // Data transfer tracking

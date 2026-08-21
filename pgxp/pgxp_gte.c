@@ -283,6 +283,19 @@ double PGXP_NCLIP()
 	return nclip;
 }
 
+float PGXP_NCLIP_reference()
+{
+	/* SwanStation / GPL DuckStation reference formulation.  Keep this
+	 * separate from the applied factored-double result so diagnostics can
+	 * measure the behavioral difference without changing emulation. */
+	float nclip = (SX0 * SY1) + (SX1 * SY2) + (SX2 * SY0) -
+		(SX0 * SY2) - (SX1 * SY0) - (SX2 * SY1);
+	float nclip_abs = fabsf(nclip);
+	if (0.1f < nclip_abs && nclip_abs < 1.0f)
+		nclip += nclip < 0.0f ? -1.0f : 1.0f;
+	return nclip;
+}
+
 int32_t PGXP_NCLIP_sign_only(int32_t native_value, int32_t precise_value)
 {
 	/* NCLIP is used as an orientation test, but MAC0 remains visible to the
