@@ -1590,10 +1590,13 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	}
 	else if (part == 2 && gpu_quad_pending)
 	{
+		/* The decoder presents the second half as [1,2,3], while the hardware
+		 * renderer submits that half as [3,2,1].  Equal decoder-space signs
+		 * therefore mean opposite renderer-space winding: a folded quad. */
 		int native_fold = gpu_quad_native_sign != 0 && native_sign != 0 &&
-			gpu_quad_native_sign != native_sign;
+			gpu_quad_native_sign == native_sign;
 		int precise_fold = gpu_quad_precise_sign != 0 && precise_sign != 0 &&
-			gpu_quad_precise_sign != precise_sign;
+			gpu_quad_precise_sign == precise_sign;
 		window.gpu_quad_pairs++;
 		if (native_fold) window.gpu_quad_native_fold++;
 		if (precise_fold) window.gpu_quad_precise_fold++;
