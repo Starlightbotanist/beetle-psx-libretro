@@ -985,6 +985,11 @@ struct gl_renderer {
    /* Counter for preserving primitive draw order in the z-buffer
     * since we draw semi-transparent primitives out-of-order. */
    int16_t primitive_ordering;
+   /* The GL context is shared with the frontend. Record the raster state we
+    * inherit, and separately remember whether face culling has ever arrived
+    * enabled so a field log can prove or disprove the R4 tunnel hypothesis. */
+   bool raster_state_logged;
+   bool inherited_cull_seen;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -5995,6 +6000,45 @@ void rhi_gl_prepare_frame(void)
    }
 
    gl_normalize_inherited_state();
+
+   /* PlayStation polygons are two-sided. Vulkan pins its pipeline to
+    * VK_CULL_MODE_NONE and the software rasterizer never performs host-side
+    * face culling, but the GL renderer previously inherited GL_CULL_FACE from
+    * RetroArch's shared context. That is especially hazardous under PGXP:
+    * sub-pixel correction legitimately changes the winding of near-degenerate
+    * triangles (R4 produces thousands of these), allowing a frontend state
+    * leak to look exactly like bad PGXP NCLIP/culling while native vertices
+    * continue to look correct.
+    *
+    * Log the first observed state and the first enabled observation. The
+    * latter may happen after startup if the frontend changes its presentation
+    * path between fields. Then force the backend contract immediately before
+    * any queued PSX primitives are submitted. */
+   {
+      GLboolean inherited_cull = glIsEnabled(GL_CULL_FACE);
+      bool newly_seen_cull = inherited_cull && !renderer->inherited_cull_seen;
+
+      if (!renderer->raster_state_logged || newly_seen_cull)
+      {
+         GLint cull_mode = 0;
+         GLint front_face = 0;
+         GLboolean depth_write = GL_FALSE;
+
+         glGetIntegerv(GL_CULL_FACE_MODE, &cull_mode);
+         glGetIntegerv(GL_FRONT_FACE, &front_face);
+         glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write);
+         log_cb(RETRO_LOG_INFO,
+               "[pgxp_gl_raster_state] inherited_cull=%u cull_mode=0x%x "
+               "front_face=0x%x depth_write=%u action=disable-cull\n",
+               (unsigned)(inherited_cull != GL_FALSE),
+               (unsigned)cull_mode, (unsigned)front_face,
+               (unsigned)(depth_write != GL_FALSE));
+         renderer->raster_state_logged = true;
+      }
+      if (inherited_cull)
+         renderer->inherited_cull_seen = true;
+      glDisable(GL_CULL_FACE);
+   }
 
    /* In case we're upscaling we need to increase the line width
     * proportionally */
