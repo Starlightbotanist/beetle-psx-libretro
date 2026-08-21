@@ -1370,20 +1370,12 @@ static INLINE void TransformDQ(int64_t h_div_sz)
    SET_IR(0, Lm_H(((int64_t)DQB + DQA * h_div_sz) >> 12));
 }
 
-/* Select the depth used by the PGXP projection shadow.
- *
- * Beetle currently combines the fractional, pre-SZ3 Z accumulator with the
- * architectural (integer) IR1/IR2 values. SwanStation and GPL DuckStation do
- * not use that hybrid: their default mode uses architectural SZ3 and IR1/IR2,
- * while their optional "preserve projection precision" mode uses all three
- * pre-quantized accumulators. The successful instrumented SwanStation R4 run
- * had that option disabled.
- *
- * This controlled A/B therefore restores architectural SZ3 for both PGXP W
- * and the true H/Z divide, matching the reference mode without touching any
- * architectural GTE state. The raw 44-bit accumulator remains available to
- * diagnostics, which classify the generated and actually rendered vertices
- * by the difference from Beetle's previous fractional-Z projection. */
+/* Recover the fractional, pre-SZ3 Z accumulator used by the PGXP projection
+ * shadow.  The controlled architectural-SZ3 test at 342a0c6e changed 79.1%
+ * of R4's rendered tracked vertices, but only 0.025% by a full depth unit and
+ * produced no visible tunnel change.  Restore the higher-precision input and
+ * retain the comparison in diagnostics rather than carrying the ineffective
+ * rendering change. */
 static INLINE float pgxp_precise_z(int64_t acc)
 {
    double z = (double)acc * (1.0 / 4096.0);
@@ -1404,11 +1396,12 @@ static INLINE float pgxp_precise_z(int64_t acc)
    }
 #endif
 
-   /* Match the default SwanStation/GPL DuckStation projection inputs: SZ3,
-    * IR1 and IR2 are all architectural values. */
+   /* Keep the long-standing fractional projection.  Diagnostics still record
+    * its distance from architectural SZ3 so later audits retain the evidence
+    * from the controlled test. */
    {
-      float precise_z = float_max(H/2.f, (float)Z_FIFO(3));
-      PGXP_DiagProjectionZ(z, precise_z, H);
+      float precise_z = float_max(H/2.f, (float)z);
+      PGXP_DiagProjectionZ(z, precise_z, Z_FIFO(3), H);
       return precise_z;
    }
 }

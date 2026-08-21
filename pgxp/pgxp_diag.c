@@ -1869,17 +1869,18 @@ void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
 	window.event_hash = hash_bytes(window.event_hash, &z, sizeof(z));
 }
 
-void PGXP_DiagProjectionZ(double raw_z, float precise_z, uint16_t h)
+void PGXP_DiagProjectionZ(double raw_z, float precise_z,
+		uint16_t architectural_z, uint16_t h)
 {
 	unsigned band;
 	unsigned delta_class;
 	double floor_z = (double)h * 0.5;
-	float exact_z = (float)raw_z;
+	float reference_z = (float)architectural_z;
 	double delta;
 
-	if (exact_z < (float)floor_z)
-		exact_z = (float)floor_z;
-	delta = (double)exact_z - (double)precise_z;
+	if (reference_z < (float)floor_z)
+		reference_z = (float)floor_z;
+	delta = (double)precise_z - (double)reference_z;
 	if (delta < 0.0)
 		delta = -delta;
 	if (delta == 0.0)
@@ -2541,7 +2542,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.rendered_z_far[1],
 		(unsigned long long)window.rendered_z_far[2]);
 	log_cb(RETRO_LOG_INFO,
-		"[pgxp_projection_delta] f=%llu applied=architectural-sz3 "
+		"[pgxp_projection_delta] f=%llu applied=fractional-raw-z reference=architectural-sz3 "
 		"generated=exact:%llu le.125:%llu le.25:%llu le.5:%llu lt1:%llu ge1:%llu "
 		"sum=%.3f max=%.3f\n",
 		(unsigned long long)frame_number,

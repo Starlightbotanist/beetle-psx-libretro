@@ -51,7 +51,8 @@ void PGXP_DiagCPUDispatch(uint32_t instr, uint32_t addr, unsigned dest,
 		uint32_t before_mask, uint32_t before_flags,
 		uint16_t before_gflags);
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value);
-void PGXP_DiagProjectionZ(double raw_z, float precise_z, uint16_t h);
+void PGXP_DiagProjectionZ(double raw_z, float precise_z,
+		uint16_t architectural_z, uint16_t h);
 int PGXP_DiagVertexWEligible(unsigned slot, const PGXP_value* shadow);
 void PGXP_DiagTraceGTE(PGXP_value* value);
 int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
@@ -121,7 +122,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagCPUInvalidMask() UINT32_C(0)
 #define PGXP_DiagCPUDispatch(instr, addr, dest, before_mask, before_flags, before_gflags) ((void)0)
 #define PGXP_DiagGTEVertex(x, y, z, value) ((void)0)
-#define PGXP_DiagProjectionZ(raw_z, precise_z, h) ((void)0)
+#define PGXP_DiagProjectionZ(raw_z, precise_z, architectural_z, h) ((void)0)
 #define PGXP_DiagVertexWEligible(slot, shadow) 1
 #define PGXP_DiagTraceGTE(value) ((void)0)
 #define PGXP_DiagRecoverVertex(value, stale, slot, x, y, z) 0
