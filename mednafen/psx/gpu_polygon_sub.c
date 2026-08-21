@@ -11,6 +11,7 @@
 #include "gpu.h"
 #include "../../rhi/rhi_intf.h"
 #include "../../beetle_psx_globals.h"
+#include "../../pgxp/pgxp_diag.h"
 
 #include <retro_miscellaneous.h>
 
@@ -266,11 +267,6 @@ bool Hack_FindLine(PS_GPU *gpu, tri_vertex* vertices, tri_vertex* outVertices)
 	int32_t pxWidth = 1 << gpu->upscale_shift;	/* width of a single pixel */
 	uint8_t cornerIdx, shortIdx, longIdx;
 
-	/* reject 3D elements */
-	if ((vertices[0].precise[2] != vertices[1].precise[2]) ||
-		(vertices[1].precise[2] != vertices[2].precise[2]))
-		return false;
-
 	/* find short side of triangle / end of line with 2 vertices (guess which vertex is the right angle) */
 	if ((vertices[0].u == vertices[1].u) && (vertices[0].v == vertices[1].v))
 		cornerIdx = 0;
@@ -298,6 +294,14 @@ bool Hack_FindLine(PS_GPU *gpu, tri_vertex* vertices, tri_vertex* outVertices)
 		}
 		else if (vertices[cornerIdx].y != vertices[longIdx].y)
 			return false;
+		if ((vertices[0].precise[2] != vertices[1].precise[2]) ||
+		    (vertices[1].precise[2] != vertices[2].precise[2]))
+		{
+			PGXP_DiagLineHack((vertices[0].y + vertices[1].y +
+				vertices[2].y) / 3, 1, vertices[0].precise[2],
+				vertices[1].precise[2], vertices[2].precise[2]);
+			return false;
+		}
 
 		/* flip corner index to other side of quad */
 		outVertices[cornerIdx] = vertices[longIdx];
@@ -316,6 +320,14 @@ bool Hack_FindLine(PS_GPU *gpu, tri_vertex* vertices, tri_vertex* outVertices)
 		}
 		else if (vertices[cornerIdx].x != vertices[longIdx].x)
 			return false;
+		if ((vertices[0].precise[2] != vertices[1].precise[2]) ||
+		    (vertices[1].precise[2] != vertices[2].precise[2]))
+		{
+			PGXP_DiagLineHack((vertices[0].y + vertices[1].y +
+				vertices[2].y) / 3, 1, vertices[0].precise[2],
+				vertices[1].precise[2], vertices[2].precise[2]);
+			return false;
+		}
 
 		/* flip corner index to other side of quad */
 		outVertices[cornerIdx] = vertices[longIdx];
@@ -327,6 +339,9 @@ bool Hack_FindLine(PS_GPU *gpu, tri_vertex* vertices, tri_vertex* outVertices)
 
 	outVertices[shortIdx] = vertices[shortIdx];
 	outVertices[longIdx] = vertices[longIdx];
+	PGXP_DiagLineHack((vertices[0].y + vertices[1].y + vertices[2].y) / 3,
+		0, vertices[0].precise[2], vertices[1].precise[2],
+		vertices[2].precise[2]);
 
 	return true;
 }

@@ -208,6 +208,8 @@ typedef struct
 	uint64_t vertex_coherence_delta[4][6];
 	uint64_t vertex_coherence_cross_stage[4];
 	double vertex_coherence_w_delta[4];
+	uint64_t line_hack_candidates[4];
+	uint64_t line_hack_w_rejects[4];
 	uint64_t nclip_compares;
 	uint64_t nclip_sign_disagreements;
 	uint64_t nclip_applied_sign_changes;
@@ -279,6 +281,7 @@ static uint32_t vertex_samples;
 static uint32_t cache_vertex_samples;
 static uint32_t vertex_live_samples;
 static uint32_t vertex_coherence_samples;
+static uint32_t line_hack_samples;
 static uint8_t pending_projection_z_band;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
@@ -609,6 +612,7 @@ void PGXP_DiagInit(void)
 	cache_vertex_samples = 0;
 	vertex_live_samples = 0;
 	vertex_coherence_samples = 0;
+	line_hack_samples = 0;
 	pending_projection_z_band = 0;
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
@@ -1732,6 +1736,27 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	}
 }
 
+void PGXP_DiagLineHack(int32_t average_y, int rejected_w,
+		float w0, float w1, float w2)
+{
+	unsigned y_band = average_y < 64 ? 0 : average_y < 128 ? 1 :
+		average_y < 256 ? 2 : 3;
+	window.line_hack_candidates[y_band]++;
+	if (!rejected_w)
+		return;
+	window.line_hack_w_rejects[y_band]++;
+	if (y_band == 3 && log_cb && line_hack_samples < 64)
+	{
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_line_hack_reject] n=%u mf=%u packet=%llu op=%02x "
+			"y=%d w=%.6f/%.6f/%.6f\n",
+			line_hack_samples + 1, mode_frame,
+			(unsigned long long)current_packet, current_opcode,
+			average_y, w0, w1, w2);
+		line_hack_samples++;
+	}
+}
+
 static void trace_sample_tracked(unsigned slot, uint32_t value,
 		const PGXP_value* shadow, float x, float y, float w, int valid_w)
 {
@@ -2443,6 +2468,19 @@ void PGXP_DiagFrame(int backend)
 		window.vertex_coherence_w_delta[1],
 		window.vertex_coherence_w_delta[2],
 		window.vertex_coherence_w_delta[3], vertex_coherence_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_line_hack] f=%llu candidates=%llu/%llu/%llu/%llu "
+		"w-reject=%llu/%llu/%llu/%llu samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.line_hack_candidates[0],
+		(unsigned long long)window.line_hack_candidates[1],
+		(unsigned long long)window.line_hack_candidates[2],
+		(unsigned long long)window.line_hack_candidates[3],
+		(unsigned long long)window.line_hack_w_rejects[0],
+		(unsigned long long)window.line_hack_w_rejects[1],
+		(unsigned long long)window.line_hack_w_rejects[2],
+		(unsigned long long)window.line_hack_w_rejects[3],
+		line_hack_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_projection_z] f=%llu raw=nonpos:%llu floor:%llu normal:%llu "
 		"far:%llu/%llu/%llu/%llu max=%.3f rendered-linked=%llu/%llu/%llu "
