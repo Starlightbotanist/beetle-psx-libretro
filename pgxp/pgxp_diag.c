@@ -202,6 +202,11 @@ typedef struct
 	uint64_t nclip_validity_invalid;
 	uint64_t nclip_invalid_mask[8];
 	uint64_t nclip_mismatch_mask[8];
+	uint64_t nclip_z_invalid_mask[8];
+	uint64_t nclip_xy_only_attempts;
+	uint64_t nclip_xy_only_compares;
+	uint64_t nclip_xy_only_sign_changes;
+	uint64_t nclip_xy_only_y_band[4];
 	uint64_t gpu_triangles[3];
 	uint64_t gpu_area_native_sign[3];
 	uint64_t gpu_area_precise_sign[3];
@@ -351,6 +356,9 @@ static uint32_t nclip_invalid_samples;
 static uint32_t nclip_invalid_window_samples;
 static uint32_t nclip_reference_samples;
 static uint32_t nclip_reference_window_samples;
+static uint32_t nclip_xy_only_samples;
+static uint32_t nclip_xy_only_window_samples;
+static unsigned pending_nclip_z_mask;
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -643,6 +651,9 @@ void PGXP_DiagInit(void)
 	nclip_invalid_window_samples = 0;
 	nclip_reference_samples = 0;
 	nclip_reference_window_samples = 0;
+	nclip_xy_only_samples = 0;
+	nclip_xy_only_window_samples = 0;
+	pending_nclip_z_mask = 0;
 }
 
 uint32_t PGXP_DiagCPUInvalidMask(void)
@@ -2099,6 +2110,13 @@ void PGXP_DiagNCLIP(int32_t native_value, int32_t precise_value,
 		((precise_value < 0) != (reference_value < 0)) ||
 		((precise_value == 0) != (reference_value == 0));
 	window.nclip_compares++;
+	if (pending_nclip_z_mask)
+	{
+		window.nclip_xy_only_compares++;
+		if ((native_value < 0) != (applied_value < 0) ||
+		    (native_value == 0) != (applied_value == 0))
+			window.nclip_xy_only_sign_changes++;
+	}
 	if ((native_value < 0) != (precise_value < 0) ||
 	    (native_value == 0) != (precise_value == 0))
 		window.nclip_sign_disagreements++;
@@ -2134,11 +2152,40 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 {
 	const PGXP_value* shadow[3] = { shadow0, shadow1, shadow2 };
 	unsigned i;
+	unsigned z_invalid_mask;
+	int32_t average_y;
+	unsigned y_band;
 	invalid_mask &= 7u;
 	mismatch_mask &= 7u;
+	z_invalid_mask = ((shadow0->flags & VALID_2) != VALID_2 ? 1u : 0u) |
+		((shadow1->flags & VALID_2) != VALID_2 ? 2u : 0u) |
+		((shadow2->flags & VALID_2) != VALID_2 ? 4u : 0u);
+	pending_nclip_z_mask = !invalid_mask ? z_invalid_mask : 0;
 	window.nclip_validity_attempts++;
 	window.nclip_invalid_mask[invalid_mask]++;
 	window.nclip_mismatch_mask[mismatch_mask]++;
+	window.nclip_z_invalid_mask[z_invalid_mask]++;
+	if (!invalid_mask && z_invalid_mask)
+	{
+		window.nclip_xy_only_attempts++;
+		average_y = ((int16_t)(sxy0 >> 16) + (int16_t)(sxy1 >> 16) +
+			(int16_t)(sxy2 >> 16)) / 3;
+		y_band = average_y < 64 ? 0 : average_y < 128 ? 1 :
+			average_y < 256 ? 2 : 3;
+		window.nclip_xy_only_y_band[y_band]++;
+		if (log_cb && nclip_xy_only_window_samples < 8 &&
+		    nclip_xy_only_samples < 64)
+		{
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_nclip_xy_only] n=%u mf=%u zmask=%u yband=%u "
+				"native=%08x/%08x/%08x flags=%08x/%08x/%08x\n",
+				nclip_xy_only_samples + 1, mode_frame, z_invalid_mask,
+				y_band, sxy0, sxy1, sxy2, shadow0->flags,
+				shadow1->flags, shadow2->flags);
+			nclip_xy_only_samples++;
+			nclip_xy_only_window_samples++;
+		}
+	}
 	if (!invalid_mask)
 		return;
 	window.nclip_validity_invalid++;
@@ -2328,6 +2375,27 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.nclip_mismatch_mask[6],
 		(unsigned long long)window.nclip_mismatch_mask[7],
 		nclip_invalid_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_nclip_xyz] f=%llu zmask=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"xy-only=%llu compares=%llu sign-change=%llu y=%llu/%llu/%llu/%llu "
+		"samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.nclip_z_invalid_mask[0],
+		(unsigned long long)window.nclip_z_invalid_mask[1],
+		(unsigned long long)window.nclip_z_invalid_mask[2],
+		(unsigned long long)window.nclip_z_invalid_mask[3],
+		(unsigned long long)window.nclip_z_invalid_mask[4],
+		(unsigned long long)window.nclip_z_invalid_mask[5],
+		(unsigned long long)window.nclip_z_invalid_mask[6],
+		(unsigned long long)window.nclip_z_invalid_mask[7],
+		(unsigned long long)window.nclip_xy_only_attempts,
+		(unsigned long long)window.nclip_xy_only_compares,
+		(unsigned long long)window.nclip_xy_only_sign_changes,
+		(unsigned long long)window.nclip_xy_only_y_band[0],
+		(unsigned long long)window.nclip_xy_only_y_band[1],
+		(unsigned long long)window.nclip_xy_only_y_band[2],
+		(unsigned long long)window.nclip_xy_only_y_band[3],
+		nclip_xy_only_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_nclip_reference_summary] f=%llu comparisons=%llu "
 		"double_reference_disagree=%llu native_reference_disagree=%llu "
@@ -2879,6 +2947,7 @@ void PGXP_DiagFrame(int backend)
 	gpu_fold_window_samples = 0;
 	nclip_invalid_window_samples = 0;
 	nclip_reference_window_samples = 0;
+	nclip_xy_only_window_samples = 0;
 	primitive_total = 0;
 	memset(primitive_class, 0, sizeof(primitive_class));
 	memset(primitive_y_band, 0, sizeof(primitive_y_band));
