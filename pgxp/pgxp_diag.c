@@ -323,10 +323,10 @@ static uint64_t primitive_native_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
 	[PGXP_TRACE_REASON_COUNT];
 static uint64_t primitive_native_sra5_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
 	[PGXP_TRACE_REASON_COUNT];
-static uint64_t gpu_quad_packet;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
+static int gpu_quad_pending;
 static uint32_t gpu_area_samples;
 static uint32_t gpu_area_window_samples;
 
@@ -608,10 +608,10 @@ void PGXP_DiagInit(void)
 	memset(primitive_native_reason, 0, sizeof(primitive_native_reason));
 	memset(primitive_native_sra5_reason, 0,
 		sizeof(primitive_native_sra5_reason));
-	gpu_quad_packet = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
+	gpu_quad_pending = 0;
 	gpu_area_samples = 0;
 	gpu_area_window_samples = 0;
 }
@@ -1531,6 +1531,7 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	int sign_disagreement;
 	int oversize_x;
 	int oversize_y;
+	int pair_precise_fold = 0;
 	int average_y;
 	unsigned y_band;
 	unsigned part = quad_part <= 2 ? quad_part : 0;
@@ -1582,12 +1583,12 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 
 	if (part == 1)
 	{
-		gpu_quad_packet = current_packet;
 		gpu_quad_native_sign = native_sign;
 		gpu_quad_precise_sign = precise_sign;
 		gpu_quad_invalid_w = invalid_w;
+		gpu_quad_pending = 1;
 	}
-	else if (part == 2 && gpu_quad_packet == current_packet)
+	else if (part == 2 && gpu_quad_pending)
 	{
 		int native_fold = gpu_quad_native_sign != 0 && native_sign != 0 &&
 			gpu_quad_native_sign != native_sign;
@@ -1599,14 +1600,16 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		if (!native_fold && precise_fold) window.gpu_quad_fold_introduced++;
 		if (native_fold && !precise_fold) window.gpu_quad_fold_removed++;
 		if (precise_fold) window.gpu_area_anomaly_y[y_band]++;
+		pair_precise_fold = precise_fold;
 		invalid_w |= gpu_quad_invalid_w;
+		gpu_quad_pending = 0;
 	}
+	else if (part == 0)
+		gpu_quad_pending = 0;
 
 	if (log_cb && gpu_area_window_samples < 12 &&
 	    (sign_disagreement || oversize_x || oversize_y ||
-	     (part == 2 && gpu_quad_packet == current_packet &&
-	      gpu_quad_precise_sign != 0 && precise_sign != 0 &&
-	      gpu_quad_precise_sign != precise_sign)))
+	     pair_precise_fold))
 	{
 		log_cb(RETRO_LOG_INFO,
 			"[pgxp_gpu_area] n=%u mf=%u packet=%llu op=%02x part=%u "
