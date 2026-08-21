@@ -2,6 +2,7 @@
 
 #if PGXP_DIAG
 
+#include <math.h>
 #include <string.h>
 
 #include <libretro.h>
@@ -32,6 +33,8 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_RECOVERY_WAYS 4u
 #define PGXP_DIAG_RAM_WORDS (2048u * 1024u / 4u)
 #define PGXP_DIAG_WRITER_WIDTHS 4u
+#define PGXP_DIAG_COHERENCE_BUCKETS 16384u
+#define PGXP_DIAG_COHERENCE_WAYS 4u
 
 enum PGXP_trace_event_type
 {
@@ -145,6 +148,18 @@ typedef struct
 
 typedef struct
 {
+	uint32_t key;
+	uint32_t frame;
+	uint64_t packet;
+	float x;
+	float y;
+	float w;
+	uint8_t stage;
+	uint8_t valid;
+} PGXP_diag_coherence_vertex;
+
+typedef struct
+{
 	uint64_t mem_reads;
 	uint64_t mem_writes;
 	uint64_t mem_invalid_reads;
@@ -190,6 +205,9 @@ typedef struct
 	 * source-memory decision SwanStation makes when consuming a vertex.
 	 * Columns are eligible/no-address/invalid-xy/value-mismatch. */
 	uint64_t vertex_live_state[3][4];
+	uint64_t vertex_coherence_delta[4][6];
+	uint64_t vertex_coherence_cross_stage[4];
+	double vertex_coherence_w_delta[4];
 	uint64_t nclip_compares;
 	uint64_t nclip_sign_disagreements;
 	uint64_t nclip_applied_sign_changes;
@@ -260,6 +278,7 @@ static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
 static uint32_t cache_vertex_samples;
 static uint32_t vertex_live_samples;
+static uint32_t vertex_coherence_samples;
 static uint8_t pending_projection_z_band;
 static uint32_t lineage_fifo_samples;
 static uint32_t lineage_vertex_samples;
@@ -278,6 +297,8 @@ static PGXP_value lineage_pre_shadow[32];
 static PGXP_diag_lineage lineage_pre_lineage[32];
 static PGXP_diag_lineage lineage_mem[PGXP_DIAG_STORE8_SLOTS];
 static PGXP_diag_gpu_provenance cb_provenance[16];
+static PGXP_diag_coherence_vertex coherence_vertices
+	[PGXP_DIAG_COHERENCE_BUCKETS][PGXP_DIAG_COHERENCE_WAYS];
 static PGXP_trace_event trace_ring[PGXP_TRACE_RING_SIZE];
 static uint64_t trace_next_id = 1;
 static uint64_t trace_sequence;
@@ -582,10 +603,12 @@ void PGXP_DiagInit(void)
 	memset(lineage_pre_lineage, 0, sizeof(lineage_pre_lineage));
 	memset(lineage_mem, 0, sizeof(lineage_mem));
 	memset(cb_provenance, 0, sizeof(cb_provenance));
+	memset(coherence_vertices, 0, sizeof(coherence_vertices));
 	dispatch_samples = 0;
 	vertex_samples = 0;
 	cache_vertex_samples = 0;
 	vertex_live_samples = 0;
+	vertex_coherence_samples = 0;
 	pending_projection_z_band = 0;
 	lineage_fifo_samples = 0;
 	lineage_vertex_samples = 0;
@@ -1740,6 +1763,70 @@ static void trace_sample_tracked(unsigned slot, uint32_t value,
 		x - native_x, y - native_y, w, valid_w);
 }
 
+static void vertex_coherence_observe(int32_t native_x, int32_t native_y,
+		float x, float y, float w, unsigned stage)
+{
+	uint32_t key = ((uint32_t)(uint16_t)native_y << 16) |
+		(uint16_t)native_x;
+	uint32_t bucket = (key * UINT32_C(2654435761)) >> 18;
+	PGXP_diag_coherence_vertex* ways = coherence_vertices[bucket];
+	PGXP_diag_coherence_vertex* previous = NULL;
+	PGXP_diag_coherence_vertex* replacement = &ways[0];
+	unsigned y_band = native_y < 64 ? 0 : native_y < 128 ? 1 :
+		native_y < 256 ? 2 : 3;
+	unsigned i;
+
+	for (i = 0; i < PGXP_DIAG_COHERENCE_WAYS; i++)
+	{
+		if (ways[i].valid && ways[i].key == key &&
+		    ways[i].frame == mode_frame && ways[i].packet < current_packet &&
+		    (!previous || ways[i].packet > previous->packet))
+			previous = &ways[i];
+		if (!ways[i].valid || ways[i].frame != mode_frame ||
+		    ways[i].packet < replacement->packet)
+			replacement = &ways[i];
+	}
+
+	if (previous)
+	{
+		float dx = fabsf(x - previous->x);
+		float dy = fabsf(y - previous->y);
+		float delta = dx > dy ? dx : dy;
+		float w_delta = w > 0.0f && previous->w > 0.0f ?
+			fabsf(w - previous->w) : 0.0f;
+		unsigned delta_class = delta == 0.0f ? 0 : delta <= 0.25f ? 1 :
+			delta <= 0.5f ? 2 : delta < 1.0f ? 3 :
+			delta <= 4.0f ? 4 : 5;
+		window.vertex_coherence_delta[y_band][delta_class]++;
+		window.vertex_coherence_w_delta[y_band] += w_delta;
+		if (stage != previous->stage)
+			window.vertex_coherence_cross_stage[y_band]++;
+		if (y_band == 3 && delta > 0.25f && log_cb &&
+		    vertex_coherence_samples < 64)
+		{
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_vertex_coherence] n=%u mf=%u packet=%llu prev=%llu "
+				"native=%d/%d precise=%.3f/%.3f prev_xy=%.3f/%.3f "
+				"delta=%.3f w=%.3f/%.3f dw=%.3f stage=%u/%u\n",
+				vertex_coherence_samples + 1, mode_frame,
+				(unsigned long long)current_packet,
+				(unsigned long long)previous->packet, native_x, native_y,
+				x, y, previous->x, previous->y, delta, w, previous->w,
+				w_delta, stage, previous->stage);
+			vertex_coherence_samples++;
+		}
+	}
+
+	replacement->key = key;
+	replacement->frame = mode_frame;
+	replacement->packet = current_packet;
+	replacement->x = x;
+	replacement->y = y;
+	replacement->w = w;
+	replacement->stage = (uint8_t)stage;
+	replacement->valid = 1;
+}
+
 void PGXP_DiagGTEVertex(float x, float y, float z, uint32_t value)
 {
 	window.gte_vertices++;
@@ -1939,6 +2026,10 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		writer_tracked_invalid_w++;
 	if (source == PGXP_DIAG_VERTEX_TRACKED)
 	{
+		unsigned stage = shadow && shadow->trace_stage < PGXP_DIAG_TRACE_STAGES ?
+			shadow->trace_stage : PGXP_TRACE_NONE;
+		vertex_coherence_observe(native_x, native_y, x, y,
+			valid_w ? w : 0.0f, stage);
 		writer_tracked[writer_width]++;
 		if ((cb_provenance[slot].writer.flags & VALID_2) == VALID_2)
 			writer_tracked_source_w[writer_width]++;
@@ -2311,6 +2402,47 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.vertex_live_state[2][1],
 		(unsigned long long)window.vertex_live_state[2][2],
 		(unsigned long long)window.vertex_live_state[2][3]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_vertex_coherence_summary] f=%llu "
+		"y0=%llu/%llu/%llu/%llu/%llu/%llu "
+		"y1=%llu/%llu/%llu/%llu/%llu/%llu "
+		"y2=%llu/%llu/%llu/%llu/%llu/%llu "
+		"y3=%llu/%llu/%llu/%llu/%llu/%llu "
+		"cross-stage=%llu/%llu/%llu/%llu w-delta=%.3f/%.3f/%.3f/%.3f "
+		"samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)window.vertex_coherence_delta[0][0],
+		(unsigned long long)window.vertex_coherence_delta[0][1],
+		(unsigned long long)window.vertex_coherence_delta[0][2],
+		(unsigned long long)window.vertex_coherence_delta[0][3],
+		(unsigned long long)window.vertex_coherence_delta[0][4],
+		(unsigned long long)window.vertex_coherence_delta[0][5],
+		(unsigned long long)window.vertex_coherence_delta[1][0],
+		(unsigned long long)window.vertex_coherence_delta[1][1],
+		(unsigned long long)window.vertex_coherence_delta[1][2],
+		(unsigned long long)window.vertex_coherence_delta[1][3],
+		(unsigned long long)window.vertex_coherence_delta[1][4],
+		(unsigned long long)window.vertex_coherence_delta[1][5],
+		(unsigned long long)window.vertex_coherence_delta[2][0],
+		(unsigned long long)window.vertex_coherence_delta[2][1],
+		(unsigned long long)window.vertex_coherence_delta[2][2],
+		(unsigned long long)window.vertex_coherence_delta[2][3],
+		(unsigned long long)window.vertex_coherence_delta[2][4],
+		(unsigned long long)window.vertex_coherence_delta[2][5],
+		(unsigned long long)window.vertex_coherence_delta[3][0],
+		(unsigned long long)window.vertex_coherence_delta[3][1],
+		(unsigned long long)window.vertex_coherence_delta[3][2],
+		(unsigned long long)window.vertex_coherence_delta[3][3],
+		(unsigned long long)window.vertex_coherence_delta[3][4],
+		(unsigned long long)window.vertex_coherence_delta[3][5],
+		(unsigned long long)window.vertex_coherence_cross_stage[0],
+		(unsigned long long)window.vertex_coherence_cross_stage[1],
+		(unsigned long long)window.vertex_coherence_cross_stage[2],
+		(unsigned long long)window.vertex_coherence_cross_stage[3],
+		window.vertex_coherence_w_delta[0],
+		window.vertex_coherence_w_delta[1],
+		window.vertex_coherence_w_delta[2],
+		window.vertex_coherence_w_delta[3], vertex_coherence_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_projection_z] f=%llu raw=nonpos:%llu floor:%llu normal:%llu "
 		"far:%llu/%llu/%llu/%llu max=%.3f rendered-linked=%llu/%llu/%llu "
