@@ -11,7 +11,7 @@ PGXP_SRC := $(ROOT)/pgxp/pgxp_gpu.c $(ROOT)/pgxp/pgxp_gte.c \
             $(ROOT)/pgxp/pgxp_main.c $(ROOT)/pgxp/pgxp_value.c \
             $(ROOT)/pgxp/pgxp_diag.c
 
-all: oracle transport range
+all: oracle transport range repair
 
 oracle: oracle.c $(PGXP_SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ oracle.c $(PGXP_SRC) stub_log.c -lm
@@ -22,14 +22,19 @@ range: range.c $(PGXP_SRC)
 transport: transport.c $(PGXP_SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ transport.c $(PGXP_SRC) stub_log.c -lm
 
-check: oracle transport range
+repair: repair.c $(PGXP_SRC)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ repair.c $(PGXP_SRC) stub_log.c -lm
+
+check: oracle transport range repair
 	./oracle
 	@echo
 	./transport
 	@echo
 	./range
+	@echo
+	./repair
 
 clean:
-	rm -f oracle transport range
+	rm -f oracle transport range repair
 
 .PHONY: all check clean

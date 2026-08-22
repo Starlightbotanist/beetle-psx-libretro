@@ -2801,9 +2801,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
    if (!renderer->command_buffer->map)
    {
       /* A previous command-buffer map failed; nothing was pushed and the
-       * buffer is not mapped, so there is nothing to unmap or draw.
-       * Clear the batch bookkeeping and retry the map. */
+      * buffer is not mapped, so there is nothing to unmap or draw.
+      * Clear the batch bookkeeping and retry the map. */
       renderer->command_buffer->map_index = 0;
+      PGXP_DiagGLRepair(NULL, 0, 0);
       renderer->primitive_ordering        = 0;
       gl_primitive_batch_vec_clear(&renderer->batches);
       renderer->vertex_index_pos          = 0;
@@ -2882,6 +2883,12 @@ static void gl_renderer_draw(gl_renderer *renderer)
          }
       }
    }
+
+   /* The command buffer is still CPU-mapped here.  Repair only guarded PGXP
+    * short-edge junctions before GL consumes the final vertex stream. */
+   PGXP_DiagGLRepair(renderer->command_buffer->map,
+         (unsigned)renderer->command_buffer->map_index,
+         (unsigned)sizeof(gl_command_vertex));
 
    /* Bind and unmap the command buffer */
    glBindBuffer(GL_ARRAY_BUFFER, renderer->command_buffer->id);
@@ -5199,6 +5206,11 @@ static void push_primitive(
       vertex_preprocessing(renderer, v, count, mode, stm, mask_test, set_mask, hd);
    }
 
+   /* vertex_preprocessing may flush a full command buffer.  Record the
+    * sidecar only afterwards, when it is guaranteed to begin at the same
+    * vertex as this mapped GL stream. */
+   PGXP_DiagGLPrimitive(v, count, (unsigned)sizeof(v[0]));
+
    index     = gl_draw_buffer_next_index(renderer->command_buffer);
    index_pos = renderer->vertex_index_pos;
 
@@ -6717,7 +6729,6 @@ void rhi_gl_push_triangle(
            for (_fc = 0; _fc < 4; _fc++)
               v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
 
-      PGXP_DiagGLPrimitive(v, 3, (unsigned)sizeof(v[0]));
       gl_vram_sync_primitive(renderer, v, 3);
       push_primitive(renderer, v, 3, GL_TRIANGLES,
             semi_transparency_mode, mask_test, set_mask);
@@ -6872,8 +6883,6 @@ void rhi_gl_push_quad(
          expanded[3] = v[3];
          expanded[4] = v[2];
          expanded[5] = v[1];
-         PGXP_DiagGLPrimitive(expanded, 6,
-               (unsigned)sizeof(expanded[0]));
          renderer->submission_quads++;
          push_primitive(renderer, expanded, 6, GL_TRIANGLES,
                semi_transparency_mode, mask_test, set_mask);

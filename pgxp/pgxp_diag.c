@@ -53,6 +53,10 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_SUBMIT_SAMPLES 4096u
 #define PGXP_DIAG_SUBMIT_WINDOW_SAMPLES 16u
 #define PGXP_DIAG_SUBMIT_MAX_BBOX_PIXELS 65536u
+#define PGXP_DIAG_GL_VERTEX_CAPACITY 16384u
+#define PGXP_DIAG_GL_HASH_BUCKETS 32768u
+#define PGXP_DIAG_GL_PAIR_CAPACITY 65536u
+#define PGXP_DIAG_GL_WINDOW_SAMPLES 16u
 
 enum PGXP_trace_event_type
 {
@@ -273,6 +277,41 @@ typedef struct
 	uint32_t next;
 	uint8_t vertex;
 } PGXP_diag_submit_node;
+
+/* Sidecar for the currently mapped OpenGL command buffer.  Keeping native
+ * topology outside gl_command_vertex avoids changing the release renderer's
+ * vertex ABI while still letting the final buffered stream be repaired with
+ * full packet provenance. */
+typedef struct
+{
+	int32_t native_x;
+	int32_t native_y;
+	uint64_t packet;
+	uint32_t triangle_start;
+	uint8_t opcode;
+	uint8_t vertex;
+	uint8_t upscale_shift;
+	uint8_t textured;
+	uint8_t gouraud;
+	uint8_t invalid_w;
+	uint8_t semi_transparent;
+	uint8_t valid;
+} PGXP_diag_gl_vertex;
+
+typedef struct
+{
+	float x;
+	float y;
+	uint16_t count;
+	uint8_t conflict;
+	uint8_t apply;
+} PGXP_diag_gl_proposal;
+
+typedef struct
+{
+	uint32_t point;
+	uint32_t linked;
+} PGXP_diag_gl_pair;
 
 typedef struct
 {
@@ -578,6 +617,43 @@ static uint64_t submit_raster_bbox_skips;
 static uint64_t submit_raster_degenerate;
 static uint32_t submit_samples;
 static uint32_t submit_window_samples;
+static PGXP_diag_gl_vertex gl_vertices[PGXP_DIAG_GL_VERTEX_CAPACITY];
+static PGXP_diag_gl_proposal gl_proposals[PGXP_DIAG_GL_VERTEX_CAPACITY];
+static PGXP_diag_gl_pair gl_pairs[PGXP_DIAG_GL_PAIR_CAPACITY];
+static uint32_t gl_hash_heads[PGXP_DIAG_GL_HASH_BUCKETS];
+static uint32_t gl_hash_next[PGXP_DIAG_GL_VERTEX_CAPACITY];
+static uint32_t gl_vertex_count;
+static uint8_t gl_vertex_overflow;
+static uint64_t gl_repair_buffers;
+static uint64_t gl_repair_vertices;
+static uint64_t gl_repair_metadata_mismatch;
+static uint64_t gl_repair_metadata_overflow;
+static uint64_t gl_repair_inactive;
+static uint64_t gl_repair_triangles;
+static uint64_t gl_repair_edges;
+static uint64_t gl_repair_lattice_edges;
+static uint64_t gl_repair_long_edges;
+static uint64_t gl_repair_interior_points;
+static uint64_t gl_repair_matches;
+static uint64_t gl_repair_topology[PGXP_DIAG_TJ_TOPOLOGIES];
+static uint64_t gl_repair_candidates;
+static uint64_t gl_repair_gate_invalid_w;
+static uint64_t gl_repair_gate_movement;
+static uint64_t gl_repair_pair_overflow;
+static uint64_t gl_repair_proposals;
+static uint64_t gl_repair_consistent;
+static uint64_t gl_repair_conflicts;
+static uint64_t gl_repair_atomic_pairs;
+static uint64_t gl_repair_moved;
+static uint64_t gl_repair_y[4];
+static uint64_t gl_repair_gouraud[4];
+static uint64_t gl_repair_packet[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t gl_repair_opcode[32][32];
+static uint64_t gl_repair_move_bins[PGXP_DIAG_EDGE_DELTA_BINS];
+static double gl_repair_move_sum;
+static float gl_repair_move_max;
+static uint32_t gl_repair_samples;
+static uint32_t gl_repair_window_samples;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -593,6 +669,45 @@ static uint32_t nclip_reference_window_samples;
 static uint32_t nclip_xy_only_samples;
 static uint32_t nclip_xy_only_window_samples;
 static unsigned pending_nclip_z_mask;
+
+static void pgxp_diag_gl_reset_stream(void)
+{
+	gl_vertex_count = 0;
+	gl_vertex_overflow = 0;
+}
+
+static void pgxp_diag_gl_reset_window(void)
+{
+	gl_repair_buffers = 0;
+	gl_repair_vertices = 0;
+	gl_repair_metadata_mismatch = 0;
+	gl_repair_metadata_overflow = 0;
+	gl_repair_inactive = 0;
+	gl_repair_triangles = 0;
+	gl_repair_edges = 0;
+	gl_repair_lattice_edges = 0;
+	gl_repair_long_edges = 0;
+	gl_repair_interior_points = 0;
+	gl_repair_matches = 0;
+	memset(gl_repair_topology, 0, sizeof(gl_repair_topology));
+	gl_repair_candidates = 0;
+	gl_repair_gate_invalid_w = 0;
+	gl_repair_gate_movement = 0;
+	gl_repair_pair_overflow = 0;
+	gl_repair_proposals = 0;
+	gl_repair_consistent = 0;
+	gl_repair_conflicts = 0;
+	gl_repair_atomic_pairs = 0;
+	gl_repair_moved = 0;
+	memset(gl_repair_y, 0, sizeof(gl_repair_y));
+	memset(gl_repair_gouraud, 0, sizeof(gl_repair_gouraud));
+	memset(gl_repair_packet, 0, sizeof(gl_repair_packet));
+	memset(gl_repair_opcode, 0, sizeof(gl_repair_opcode));
+	memset(gl_repair_move_bins, 0, sizeof(gl_repair_move_bins));
+	gl_repair_move_sum = 0.0;
+	gl_repair_move_max = 0.0f;
+	gl_repair_window_samples = 0;
+}
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -955,6 +1070,9 @@ void PGXP_DiagInit(void)
 	submit_raster_degenerate = 0;
 	submit_samples = 0;
 	submit_window_samples = 0;
+	pgxp_diag_gl_reset_stream();
+	pgxp_diag_gl_reset_window();
+	gl_repair_samples = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
@@ -2796,11 +2914,27 @@ void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
 {
 	const uint8_t* bytes = (const uint8_t*)vertices;
 	uint64_t mismatches = 0;
+	unsigned base = gl_vertex_count;
+	int sidecar_space = count <= PGXP_DIAG_GL_VERTEX_CAPACITY -
+		gl_vertex_count;
 	unsigned i;
 
-	/* Sprites and non-PGXP callers share the same RHI entry points.  They do
-	 * not install a pending polygon record and are intentionally invisible to
-	 * this transport check. */
+	/* Every GL command vertex gets a sidecar slot, including sprites and
+	 * lines.  Invalid placeholders preserve exact alignment across mixed draw
+	 * calls; only final polygon triangles receive topology metadata. */
+	if (sidecar_space)
+	{
+		memset(&gl_vertices[base], 0, count * sizeof(gl_vertices[0]));
+		gl_vertex_count += count;
+	}
+	else
+	{
+		gl_vertex_overflow = 1;
+		gl_repair_metadata_overflow++;
+	}
+
+	/* Sprites and non-PGXP callers do not install a pending polygon record.
+	 * Their placeholder slots must remain invalid. */
 	if (!submit_pending_valid)
 		return;
 	submit_transport_calls++;
@@ -2844,7 +2978,441 @@ void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
 		submit_transport_mismatch_calls++;
 		submit_transport_mismatch_vertices += mismatches;
 	}
+	else if (sidecar_space)
+	{
+		for (i = 0; i < count; i++)
+		{
+			const PGXP_diag_submit_triangle* expected =
+				&submit_triangles[submit_pending_triangle + i / 3u];
+			PGXP_diag_gl_vertex* output = &gl_vertices[base + i];
+			unsigned vertex = i % 3u;
+			output->native_x = expected->native_x[vertex];
+			output->native_y = expected->native_y[vertex];
+			output->packet = expected->packet;
+			output->triangle_start = base + (i / 3u) * 3u;
+			output->opcode = expected->opcode;
+			output->vertex = (uint8_t)vertex;
+			output->upscale_shift = expected->upscale_shift;
+			output->textured = expected->textured;
+			output->gouraud = expected->gouraud;
+			output->invalid_w = expected->invalid_w;
+			output->semi_transparent = expected->semi_transparent;
+			output->valid = 1;
+		}
+	}
 	submit_pending_valid = 0;
+}
+
+static int pgxp_diag_gl_triangle_valid(uint32_t start, unsigned count)
+{
+	unsigned i;
+	if (start > count || count - start < 3u)
+		return 0;
+	for (i = 0; i < 3; i++)
+		if (!gl_vertices[start + i].valid ||
+		    gl_vertices[start + i].triangle_start != start ||
+		    gl_vertices[start + i].vertex != i)
+			return 0;
+	return 1;
+}
+
+static float* pgxp_diag_gl_position(void* vertices, unsigned stride_bytes,
+		uint32_t index)
+{
+	return (float*)((uint8_t*)vertices + (size_t)index * stride_bytes);
+}
+
+static void pgxp_diag_gl_add_proposal(uint32_t index, float x, float y,
+		float epsilon)
+{
+	PGXP_diag_gl_proposal* proposal = &gl_proposals[index];
+	if (!proposal->count)
+	{
+		proposal->x = x;
+		proposal->y = y;
+	}
+	else if (fabsf(proposal->x - x) > epsilon ||
+	         fabsf(proposal->y - y) > epsilon)
+		proposal->conflict = 1;
+	if (proposal->count != UINT16_MAX)
+		proposal->count++;
+}
+
+/* Repair T-junctions in the actual mapped OpenGL stream.  The long triangle
+ * retains its PGXP coordinates; only the two vertices forming the matching
+ * short boundary are projected onto it.  All decisions are buffered so a
+ * vertex with disagreeing targets is left untouched, and both ends of a
+ * boundary must survive conflict resolution before either move is applied. */
+void PGXP_DiagGLRepair(void* vertices, unsigned count,
+		unsigned stride_bytes)
+{
+	static const uint8_t edge_vertices[3][3] = {
+		{ 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }
+	};
+	uint32_t pair_count = 0;
+	uint32_t edge_start;
+	int pair_overflow = 0;
+
+	if (!vertices || !count)
+	{
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
+
+	gl_repair_buffers++;
+	gl_repair_vertices += count;
+	if (stride_bytes < 4u * sizeof(float) ||
+	    gl_vertex_overflow || count != gl_vertex_count)
+	{
+		gl_repair_metadata_mismatch++;
+		if (log_cb && gl_repair_metadata_mismatch <= 8)
+			log_cb(RETRO_LOG_ERROR,
+				"[pgxp_gl_repair_error] mf=%u vertices=%u sidecar=%u "
+				"stride=%u overflow=%u\n", mode_frame, count,
+				gl_vertex_count, stride_bytes, gl_vertex_overflow);
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
+	if (!(PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)))
+	{
+		gl_repair_inactive++;
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
+
+	memset(gl_hash_heads, 0xff, sizeof(gl_hash_heads));
+	memset(gl_proposals, 0, count * sizeof(gl_proposals[0]));
+	for (edge_start = 0; edge_start < count; edge_start++)
+	{
+		uint32_t bucket;
+		if (!gl_vertices[edge_start].valid)
+		{
+			gl_hash_next[edge_start] = UINT32_MAX;
+			continue;
+		}
+		bucket = pgxp_diag_submit_hash(gl_vertices[edge_start].native_x,
+			gl_vertices[edge_start].native_y) &
+			(PGXP_DIAG_GL_HASH_BUCKETS - 1u);
+		gl_hash_next[edge_start] = gl_hash_heads[bucket];
+		gl_hash_heads[bucket] = edge_start;
+	}
+
+	for (edge_start = 0; edge_start < count; edge_start++)
+	{
+		const PGXP_diag_gl_vertex* edge_triangle;
+		unsigned edge_index;
+		if (!pgxp_diag_gl_triangle_valid(edge_start, count) ||
+		    gl_vertices[edge_start].vertex != 0)
+			continue;
+		edge_triangle = &gl_vertices[edge_start];
+		gl_repair_triangles++;
+		if (!edge_triangle->textured || edge_triangle->semi_transparent)
+			continue;
+
+		for (edge_index = 0; edge_index < 3; edge_index++)
+		{
+			unsigned first = edge_vertices[edge_index][0];
+			unsigned second = edge_vertices[edge_index][1];
+			unsigned third = edge_vertices[edge_index][2];
+			const PGXP_diag_gl_vertex* edge_first =
+				&gl_vertices[edge_start + first];
+			const PGXP_diag_gl_vertex* edge_second =
+				&gl_vertices[edge_start + second];
+			int32_t x0 = edge_first->native_x;
+			int32_t y0 = edge_first->native_y;
+			int32_t x1 = edge_second->native_x;
+			int32_t y1 = edge_second->native_y;
+			int32_t dx = x1 - x0;
+			int32_t dy = y1 - y0;
+			unsigned abs_dx = (unsigned)(dx < 0 ? -dx : dx);
+			unsigned abs_dy = (unsigned)(dy < 0 ? -dy : dy);
+			unsigned steps = pgxp_diag_tj_gcd(abs_dx, abs_dy);
+			unsigned step;
+
+			gl_repair_edges++;
+			if (steps <= 1)
+				continue;
+			gl_repair_lattice_edges++;
+			gl_repair_interior_points += steps - 1u;
+			if (steps > PGXP_DIAG_TJ_MAX_STEPS)
+			{
+				gl_repair_long_edges++;
+				continue;
+			}
+
+			for (step = 1; step < steps; step++)
+			{
+				int32_t point_x = x0 +
+					(int32_t)(((int64_t)dx * step) / steps);
+				int32_t point_y = y0 +
+					(int32_t)(((int64_t)dy * step) / steps);
+				uint32_t bucket = pgxp_diag_submit_hash(point_x, point_y) &
+					(PGXP_DIAG_GL_HASH_BUCKETS - 1u);
+				uint32_t point_index = gl_hash_heads[bucket];
+
+				while (point_index != UINT32_MAX && point_index < count)
+				{
+					uint32_t current_index = point_index;
+					const PGXP_diag_gl_vertex* point =
+						&gl_vertices[current_index];
+					uint32_t point_start = point->triangle_start;
+					unsigned point_vertex = point->vertex;
+					unsigned linked_vertex = 3u;
+					unsigned other_vertex = 3u;
+					unsigned linked_count = 0;
+					int64_t edge_side;
+					int64_t point_side = 0;
+					int mixed_side = 0;
+					unsigned topology = 0;
+					unsigned neighbor;
+					float* edge_position0;
+					float* edge_position1;
+					float* point_position;
+					float* linked_position;
+					float edge_dx;
+					float edge_dy;
+					float length_squared;
+					float signed_perpendicular;
+					float perpendicular;
+					float scale;
+					float point_t;
+					float linked_t;
+					float point_target_x;
+					float point_target_y;
+					float linked_target_x;
+					float linked_target_y;
+					float point_move;
+					float linked_move;
+					uint64_t gap;
+
+					point_index = gl_hash_next[current_index];
+					if (!point->valid || point->native_x != point_x ||
+					    point->native_y != point_y ||
+					    point_start == edge_start ||
+					    point->packet == edge_triangle->packet ||
+					    point->upscale_shift != edge_triangle->upscale_shift ||
+					    !pgxp_diag_gl_triangle_valid(point_start, count))
+						continue;
+					gl_repair_matches++;
+					edge_side = pgxp_diag_tj_native_cross(x0, y0, x1, y1,
+						gl_vertices[edge_start + third].native_x,
+						gl_vertices[edge_start + third].native_y);
+					for (neighbor = 0; neighbor < 3; neighbor++)
+					{
+						const PGXP_diag_gl_vertex* candidate;
+						int64_t side;
+						if (neighbor == point_vertex)
+							continue;
+						candidate = &gl_vertices[point_start + neighbor];
+						if (pgxp_diag_tj_point_on_segment(x0, y0, x1, y1,
+							candidate->native_x, candidate->native_y))
+						{
+							linked_vertex = neighbor;
+							linked_count++;
+							continue;
+						}
+						other_vertex = neighbor;
+						side = pgxp_diag_tj_native_cross(x0, y0, x1, y1,
+							candidate->native_x, candidate->native_y);
+						if (!side)
+							continue;
+						if (!point_side)
+							point_side = side;
+						else if ((point_side < 0) != (side < 0))
+							mixed_side = 1;
+					}
+					if (linked_count == 1u && other_vertex != 3u)
+						topology = !mixed_side && edge_side && point_side &&
+							((edge_side < 0) != (point_side < 0)) ? 2u : 1u;
+					gl_repair_topology[topology]++;
+					if (topology != 2u || !point->textured ||
+					    point->semi_transparent)
+						continue;
+
+					scale = (float)(1u << edge_triangle->upscale_shift);
+					edge_position0 = pgxp_diag_gl_position(vertices,
+						stride_bytes, edge_start + first);
+					edge_position1 = pgxp_diag_gl_position(vertices,
+						stride_bytes, edge_start + second);
+					point_position = pgxp_diag_gl_position(vertices,
+						stride_bytes, current_index);
+					linked_position = pgxp_diag_gl_position(vertices,
+						stride_bytes, point_start + linked_vertex);
+					edge_dx = (edge_position1[0] - edge_position0[0]) / scale;
+					edge_dy = (edge_position1[1] - edge_position0[1]) / scale;
+					length_squared = edge_dx * edge_dx + edge_dy * edge_dy;
+					if (length_squared <= 1.0e-12f)
+						continue;
+					signed_perpendicular = (edge_dx *
+						((point_position[1] - edge_position0[1]) / scale) -
+						edge_dy *
+						((point_position[0] - edge_position0[0]) / scale)) /
+						sqrtf(length_squared);
+					perpendicular = fabsf(signed_perpendicular);
+					if ((signed_perpendicular < 0) == (edge_side < 0) ||
+					    perpendicular <= (1.0f / 64.0f) ||
+					    perpendicular > 4.0f)
+						continue;
+
+					gl_repair_candidates++;
+					gl_repair_y[point_y < 64 ? 0u : point_y < 128 ? 1u :
+						point_y < 192 ? 2u : 3u]++;
+					gl_repair_gouraud[(edge_triangle->gouraud ? 2u : 0u) |
+						(point->gouraud ? 1u : 0u)]++;
+					gap = edge_triangle->packet > point->packet ?
+						edge_triangle->packet - point->packet :
+						point->packet - edge_triangle->packet;
+					gl_repair_packet[pgxp_diag_edge_packet_bin(gap)]++;
+					gl_repair_opcode[edge_triangle->opcode & 0x1fu]
+						[point->opcode & 0x1fu]++;
+					if (edge_triangle->invalid_w || point->invalid_w)
+					{
+						gl_repair_gate_invalid_w++;
+						continue;
+					}
+
+					point_t = ((float)(point_x - x0) * dx +
+						(float)(point_y - y0) * dy) /
+						(float)((int64_t)dx * dx + (int64_t)dy * dy);
+					linked_t = ((float)(gl_vertices[point_start + linked_vertex].native_x - x0) * dx +
+						(float)(gl_vertices[point_start + linked_vertex].native_y - y0) * dy) /
+						(float)((int64_t)dx * dx + (int64_t)dy * dy);
+					point_target_x = edge_position0[0] + point_t *
+						(edge_position1[0] - edge_position0[0]);
+					point_target_y = edge_position0[1] + point_t *
+						(edge_position1[1] - edge_position0[1]);
+					linked_target_x = edge_position0[0] + linked_t *
+						(edge_position1[0] - edge_position0[0]);
+					linked_target_y = edge_position0[1] + linked_t *
+						(edge_position1[1] - edge_position0[1]);
+					point_move = hypotf(point_target_x - point_position[0],
+						point_target_y - point_position[1]) / scale;
+					linked_move = hypotf(linked_target_x - linked_position[0],
+						linked_target_y - linked_position[1]) / scale;
+					if (!isfinite(point_move) || !isfinite(linked_move) ||
+					    point_move > 4.0f || linked_move > 4.0f)
+					{
+						gl_repair_gate_movement++;
+						continue;
+					}
+					if (pair_count >= PGXP_DIAG_GL_PAIR_CAPACITY)
+					{
+						pair_overflow = 1;
+						continue;
+					}
+
+					pgxp_diag_gl_add_proposal(current_index, point_target_x,
+						point_target_y, scale / 64.0f);
+					pgxp_diag_gl_add_proposal(point_start + linked_vertex,
+						linked_target_x, linked_target_y, scale / 64.0f);
+					gl_pairs[pair_count].point = current_index;
+					gl_pairs[pair_count].linked = point_start + linked_vertex;
+					pair_count++;
+					gl_repair_proposals += 2;
+
+					if (log_cb &&
+					    gl_repair_samples < PGXP_DIAG_SUBMIT_SAMPLES &&
+					    gl_repair_window_samples < PGXP_DIAG_GL_WINDOW_SAMPLES)
+					{
+						log_cb(RETRO_LOG_INFO,
+							"[pgxp_gl_repair_candidate] n=%u mf=%u "
+							"edge=%llu/%02x point=%llu/%02x "
+							"native=%d/%d-%d/%d point=%d/%d linked=%d/%d "
+							"point_xy=%.5f/%.5f->%.5f/%.5f "
+							"linked_xy=%.5f/%.5f->%.5f/%.5f "
+							"perp=%.6f move=%.6f/%.6f scale=%.0f gap=%llu\n",
+							gl_repair_samples + 1, mode_frame,
+							(unsigned long long)edge_triangle->packet,
+							edge_triangle->opcode,
+							(unsigned long long)point->packet, point->opcode,
+							x0, y0, x1, y1, point_x, point_y,
+							gl_vertices[point_start + linked_vertex].native_x,
+							gl_vertices[point_start + linked_vertex].native_y,
+							point_position[0], point_position[1],
+							point_target_x, point_target_y,
+							linked_position[0], linked_position[1],
+							linked_target_x, linked_target_y,
+							perpendicular, point_move, linked_move, scale,
+							(unsigned long long)gap);
+						gl_repair_samples++;
+						gl_repair_window_samples++;
+					}
+				}
+			}
+		}
+	}
+
+	if (pair_overflow)
+	{
+		gl_repair_pair_overflow++;
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
+	/* A conflict at either end invalidates its whole boundary.  Propagate that
+	 * decision through shared pairs before applying anything, so an ambiguous
+	 * junction cannot leave a half-repaired short edge behind. */
+	{
+		int changed;
+		do
+		{
+			changed = 0;
+			for (edge_start = 0; edge_start < pair_count; edge_start++)
+			{
+				PGXP_diag_gl_proposal* point =
+					&gl_proposals[gl_pairs[edge_start].point];
+				PGXP_diag_gl_proposal* linked =
+					&gl_proposals[gl_pairs[edge_start].linked];
+				if (point->conflict != linked->conflict)
+				{
+					point->conflict = 1;
+					linked->conflict = 1;
+					changed = 1;
+				}
+			}
+		} while (changed);
+	}
+	for (edge_start = 0; edge_start < count; edge_start++)
+		if (gl_proposals[edge_start].count)
+		{
+			if (gl_proposals[edge_start].conflict)
+				gl_repair_conflicts++;
+			else
+				gl_repair_consistent++;
+		}
+	for (edge_start = 0; edge_start < pair_count; edge_start++)
+	{
+		PGXP_diag_gl_proposal* point =
+			&gl_proposals[gl_pairs[edge_start].point];
+		PGXP_diag_gl_proposal* linked =
+			&gl_proposals[gl_pairs[edge_start].linked];
+		if (!point->conflict && !linked->conflict)
+		{
+			point->apply = 1;
+			linked->apply = 1;
+			gl_repair_atomic_pairs++;
+		}
+	}
+	for (edge_start = 0; edge_start < count; edge_start++)
+		if (gl_proposals[edge_start].apply)
+		{
+			float* position = pgxp_diag_gl_position(vertices, stride_bytes,
+				edge_start);
+			float scale = (float)(1u << gl_vertices[edge_start].upscale_shift);
+			float movement = hypotf(gl_proposals[edge_start].x - position[0],
+				gl_proposals[edge_start].y - position[1]) / scale;
+			position[0] = gl_proposals[edge_start].x;
+			position[1] = gl_proposals[edge_start].y;
+			if (movement > 1.0e-6f)
+			{
+				gl_repair_moved++;
+				gl_repair_move_bins[pgxp_diag_edge_delta_bin(movement)]++;
+				gl_repair_move_sum += movement;
+				if (movement > gl_repair_move_max)
+					gl_repair_move_max = movement;
+			}
+		}
+
+	pgxp_diag_gl_reset_stream();
 }
 
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits)
@@ -4657,6 +5225,111 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)submit_raster_bbox_pixels,
 		(unsigned long long)submit_raster_bbox_skips,
 		(unsigned long long)submit_raster_degenerate, submit_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gl_repair] f=%llu buffers=%llu vertices=%llu "
+		"metadata=mismatch/overflow/inactive=%llu/%llu/%llu "
+		"triangles=%llu edges=%llu lattice=%llu long=%llu "
+		"interior_points=%llu matches=%llu topology=%llu/%llu/%llu "
+		"candidates=%llu gate=invalid_w/movement/pair_overflow=%llu/%llu/%llu "
+		"proposals=%llu consistent=%llu conflicts=%llu "
+		"atomic_pairs=%llu moved=%llu mean=%.6f max=%.6f\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)gl_repair_buffers,
+		(unsigned long long)gl_repair_vertices,
+		(unsigned long long)gl_repair_metadata_mismatch,
+		(unsigned long long)gl_repair_metadata_overflow,
+		(unsigned long long)gl_repair_inactive,
+		(unsigned long long)gl_repair_triangles,
+		(unsigned long long)gl_repair_edges,
+		(unsigned long long)gl_repair_lattice_edges,
+		(unsigned long long)gl_repair_long_edges,
+		(unsigned long long)gl_repair_interior_points,
+		(unsigned long long)gl_repair_matches,
+		(unsigned long long)gl_repair_topology[0],
+		(unsigned long long)gl_repair_topology[1],
+		(unsigned long long)gl_repair_topology[2],
+		(unsigned long long)gl_repair_candidates,
+		(unsigned long long)gl_repair_gate_invalid_w,
+		(unsigned long long)gl_repair_gate_movement,
+		(unsigned long long)gl_repair_pair_overflow,
+		(unsigned long long)gl_repair_proposals,
+		(unsigned long long)gl_repair_consistent,
+		(unsigned long long)gl_repair_conflicts,
+		(unsigned long long)gl_repair_atomic_pairs,
+		(unsigned long long)gl_repair_moved,
+		gl_repair_moved ? gl_repair_move_sum /
+			(double)gl_repair_moved : 0.0,
+		gl_repair_move_max);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gl_repair_context] f=%llu "
+		"y=%llu/%llu/%llu/%llu gouraud=%llu/%llu/%llu/%llu "
+		"packet=%llu/%llu/%llu/%llu/%llu/%llu "
+		"move=%llu/%llu/%llu/%llu/%llu/%llu/%llu samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)gl_repair_y[0],
+		(unsigned long long)gl_repair_y[1],
+		(unsigned long long)gl_repair_y[2],
+		(unsigned long long)gl_repair_y[3],
+		(unsigned long long)gl_repair_gouraud[0],
+		(unsigned long long)gl_repair_gouraud[1],
+		(unsigned long long)gl_repair_gouraud[2],
+		(unsigned long long)gl_repair_gouraud[3],
+		(unsigned long long)gl_repair_packet[0],
+		(unsigned long long)gl_repair_packet[1],
+		(unsigned long long)gl_repair_packet[2],
+		(unsigned long long)gl_repair_packet[3],
+		(unsigned long long)gl_repair_packet[4],
+		(unsigned long long)gl_repair_packet[5],
+		(unsigned long long)gl_repair_move_bins[0],
+		(unsigned long long)gl_repair_move_bins[1],
+		(unsigned long long)gl_repair_move_bins[2],
+		(unsigned long long)gl_repair_move_bins[3],
+		(unsigned long long)gl_repair_move_bins[4],
+		(unsigned long long)gl_repair_move_bins[5],
+		(unsigned long long)gl_repair_move_bins[6],
+		gl_repair_samples);
+	{
+		uint8_t selected_edge[4];
+		uint8_t selected_point[4];
+		unsigned rank;
+		memset(selected_edge, 0xff, sizeof(selected_edge));
+		memset(selected_point, 0xff, sizeof(selected_point));
+		for (rank = 0; rank < 4; rank++)
+		{
+			uint64_t best = 0;
+			unsigned best_edge = 0;
+			unsigned best_point = 0;
+			unsigned edge_opcode;
+			unsigned point_opcode;
+			for (edge_opcode = 0; edge_opcode < 32; edge_opcode++)
+				for (point_opcode = 0; point_opcode < 32; point_opcode++)
+				{
+					unsigned previous;
+					int used = 0;
+					for (previous = 0; previous < rank; previous++)
+						if (selected_edge[previous] == edge_opcode &&
+						    selected_point[previous] == point_opcode)
+							used = 1;
+					if (!used &&
+					    gl_repair_opcode[edge_opcode][point_opcode] > best)
+					{
+						best = gl_repair_opcode[edge_opcode][point_opcode];
+						best_edge = edge_opcode;
+						best_point = point_opcode;
+					}
+				}
+			if (!best)
+				break;
+			selected_edge[rank] = (uint8_t)best_edge;
+			selected_point[rank] = (uint8_t)best_point;
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_gl_repair_opcode] f=%llu rank=%u "
+				"edge=%02x point=%02x count=%llu\n",
+				(unsigned long long)frame_number, rank + 1,
+				0x20u | best_edge, 0x20u | best_point,
+				(unsigned long long)best);
+		}
+	}
 	{
 		uint8_t selected_edge[8];
 		uint8_t selected_point[8];
@@ -5109,6 +5782,7 @@ void PGXP_DiagFrame(int backend)
 	submit_raster_bbox_skips = 0;
 	submit_raster_degenerate = 0;
 	submit_window_samples = 0;
+	pgxp_diag_gl_reset_window();
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
