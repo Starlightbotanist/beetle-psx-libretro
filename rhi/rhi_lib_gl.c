@@ -1015,8 +1015,15 @@ struct gl_renderer {
    uint64_t pgxp_coverage_capped;
    uint64_t pgxp_coverage_remainder;
    uint64_t pgxp_conservative_batches;
+   uint64_t pgxp_probe_opaque_textured;
+   uint64_t pgxp_probe_semitrans_textured;
+   uint64_t pgxp_probe_untextured;
+   uint64_t pgxp_probe_mixed;
    double pgxp_coverage_move_sum;
    float pgxp_coverage_move_max;
+   double pgxp_coverage_edge_sum;
+   float pgxp_coverage_edge_min;
+   float pgxp_coverage_edge_max;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -1087,10 +1094,48 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE:
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO:
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4:
          return 2.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
+         return 3.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR:
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
+         return 4.0f;
       default:
          return 0.0f;
    }
+}
+
+static float gl_pgxp_coverage_vertex_cap(unsigned mode)
+{
+   switch (mode)
+   {
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4:
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
+         return 4.0f;
+      default:
+         return gl_pgxp_coverage_subpixel_units(mode) > 0.0f ? 8.0f : 0.0f;
+   }
+}
+
+static unsigned gl_pgxp_texture_probe(unsigned mode)
+{
+   if (mode == PGXP_DIAG_GL_TEST_TEXTURE_SOLID_OPAQUE)
+      return 1u;
+   if (mode == PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER)
+      return 2u;
+   return 0u;
+}
+
+static const char *gl_pgxp_texture_probe_name(unsigned mode)
+{
+   if (mode == PGXP_DIAG_GL_TEST_TEXTURE_SOLID_OPAQUE)
+      return "solid_opaque_textured";
+   if (mode == PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER)
+      return "transparent_texel_marker";
+   return "off";
 }
 
 static GLenum gl_pgxp_conservative_raster_token(void)
@@ -1117,21 +1162,83 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_coverage_capped = 0;
    renderer->pgxp_coverage_remainder = 0;
    renderer->pgxp_conservative_batches = 0;
+   renderer->pgxp_probe_opaque_textured = 0;
+   renderer->pgxp_probe_semitrans_textured = 0;
+   renderer->pgxp_probe_untextured = 0;
+   renderer->pgxp_probe_mixed = 0;
    renderer->pgxp_coverage_move_sum = 0.0;
    renderer->pgxp_coverage_move_max = 0.0f;
+   renderer->pgxp_coverage_edge_sum = 0.0;
+   renderer->pgxp_coverage_edge_min = 0.0f;
+   renderer->pgxp_coverage_edge_max = 0.0f;
+}
+
+static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
+{
+   const gl_command_vertex *vertices;
+   size_t bi;
+
+   if (!renderer || !renderer->command_buffer->map ||
+       !gl_pgxp_geometry_active())
+      return;
+
+   vertices = (const gl_command_vertex *)renderer->command_buffer->map;
+   for (bi = 0; bi < renderer->batches.count; bi++)
+   {
+      const struct gl_primitive_batch *batch = &renderer->batches.items[bi];
+      unsigned end;
+      unsigned i;
+
+      /* The opaque pass contains every ordinary opaque primitive and the
+       * first pass of textured semi-transparent primitives.  Looking at the
+       * flat per-vertex flag separates those classes without double-counting
+       * the later blended pass. */
+      if (batch->draw_mode != GL_TRIANGLES || !batch->opaque)
+         continue;
+      if (batch->first > renderer->command_buffer->map_index ||
+          batch->count > renderer->command_buffer->map_index - batch->first)
+         continue;
+
+      end = batch->first + batch->count;
+      if (batch->count % 3u)
+         renderer->pgxp_coverage_remainder += batch->count % 3u;
+      for (i = batch->first; i + 2u < end; i += 3u)
+      {
+         const gl_command_vertex *v = &vertices[i];
+         if (v[0].texture_blend_mode != v[1].texture_blend_mode ||
+             v[0].texture_blend_mode != v[2].texture_blend_mode ||
+             v[0].semi_transparent != v[1].semi_transparent ||
+             v[0].semi_transparent != v[2].semi_transparent)
+         {
+            renderer->pgxp_probe_mixed++;
+            continue;
+         }
+         if (!v[0].texture_blend_mode)
+            renderer->pgxp_probe_untextured++;
+         else if (v[0].semi_transparent)
+            renderer->pgxp_probe_semitrans_textured++;
+         else
+         {
+            renderer->pgxp_probe_opaque_textured++;
+            renderer->pgxp_coverage_candidates++;
+         }
+      }
+   }
 }
 
 /* Expand each final OpenGL triangle by a small, renderer-subpixel-sized
  * amount.  Scaling about the incenter offsets all three infinite edge lines
  * equally; unlike the native-coordinate controls this never selects one side
- * of a shared edge or changes PGXP provenance.  An 8-epsilon vertex-motion
+ * of a shared edge or changes PGXP provenance.  The selected vertex-motion
  * cap keeps acute/sliver triangles from growing long spikes. */
-static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon)
+static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
+      float vertex_cap)
 {
    gl_command_vertex *vertices;
    size_t bi;
 
    if (!renderer || !renderer->command_buffer->map || epsilon <= 0.0f ||
+       vertex_cap <= 0.0f ||
        !gl_pgxp_geometry_active())
       return;
 
@@ -1169,6 +1276,7 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon)
          float scale_delta;
          float max_radius = 0.0f;
          float max_move;
+         float achieved_epsilon;
          unsigned j;
 
          if (!v[0].texture_blend_mode || !v[1].texture_blend_mode ||
@@ -1220,11 +1328,19 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon)
             renderer->pgxp_coverage_nonfinite++;
             continue;
          }
-         if (max_move > 8.0f * epsilon)
+         if (max_move > vertex_cap * epsilon)
          {
-            scale_delta *= (8.0f * epsilon) / max_move;
+            scale_delta *= (vertex_cap * epsilon) / max_move;
             renderer->pgxp_coverage_capped++;
          }
+
+         achieved_epsilon = inradius * scale_delta;
+         if (!renderer->pgxp_coverage_expanded ||
+             achieved_epsilon < renderer->pgxp_coverage_edge_min)
+            renderer->pgxp_coverage_edge_min = achieved_epsilon;
+         if (achieved_epsilon > renderer->pgxp_coverage_edge_max)
+            renderer->pgxp_coverage_edge_max = achieved_epsilon;
+         renderer->pgxp_coverage_edge_sum += (double)achieved_epsilon;
 
          for (j = 0; j < 3u; j++)
          {
@@ -3057,7 +3173,9 @@ static void gl_renderer_draw(gl_renderer *renderer)
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
       /* HD replacement texture lives on unit 1 */
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "hd_texture"), 1);
-      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "coverage_probe"), 0u);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "coverage_probe"),
+            gl_pgxp_geometry_active() ?
+               gl_pgxp_texture_probe(raster_requested) : 0u);
    }
 
    /* Bind the out framebuffer */
@@ -3168,10 +3286,15 @@ static void gl_renderer_draw(gl_renderer *renderer)
          (unsigned)sizeof(gl_command_vertex));
 
    {
+      unsigned texture_probe =
+         gl_pgxp_texture_probe(raster_requested);
       float subpixel_units =
          gl_pgxp_coverage_subpixel_units(raster_requested);
+      if (texture_probe)
+         gl_pgxp_count_texture_probe(renderer);
       if (subpixel_units > 0.0f)
-         gl_pgxp_expand_coverage(renderer, subpixel_units / raster_grid);
+         gl_pgxp_expand_coverage(renderer, subpixel_units / raster_grid,
+               gl_pgxp_coverage_vertex_cap(raster_requested));
    }
 
    /* Bind and unmap the command buffer */
@@ -6583,19 +6706,26 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             (float)(UINT32_C(1) << gl_caps.subpixel_bits);
          float units =
             gl_pgxp_coverage_subpixel_units(renderer->pgxp_coverage_mode);
+         float cap =
+            gl_pgxp_coverage_vertex_cap(renderer->pgxp_coverage_mode);
          if (grid < 1.0f)
             grid = 1.0f;
          log_cb(RETRO_LOG_INFO,
                "[pgxp_gl_coverage] frames=%u mode=%u active=%u "
-               "subpixel_bits=%u scale=%u units=%.2f epsilon=%.9g "
+               "texture_probe=%s subpixel_bits=%u scale=%u "
+               "units=%.2f epsilon=%.9g vertex_cap=%.1f "
                "candidates=%llu expanded=%llu degenerate=%llu "
                "nonfinite=%llu capped=%llu remainder=%llu "
-               "conservative_batches=%llu move_mean=%.9g move_max=%.9g\n",
+               "conservative_batches=%llu probe_triangles=ot/st/ut/mixed:"
+               "%llu/%llu/%llu/%llu move_mean=%.9g move_max=%.9g "
+               "edge_mean=%.9g edge_min=%.9g edge_max=%.9g\n",
                renderer->submission_frames,
                renderer->pgxp_coverage_mode,
                gl_pgxp_geometry_active() ? 1u : 0u,
+               gl_pgxp_texture_probe_name(renderer->pgxp_coverage_mode),
                gl_caps.subpixel_bits, renderer->internal_upscaling,
                (double)units, units > 0.0f ? (double)(units / grid) : 0.0,
+               (double)cap,
                (unsigned long long)renderer->pgxp_coverage_candidates,
                (unsigned long long)renderer->pgxp_coverage_expanded,
                (unsigned long long)renderer->pgxp_coverage_degenerate,
@@ -6603,10 +6733,19 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                (unsigned long long)renderer->pgxp_coverage_capped,
                (unsigned long long)renderer->pgxp_coverage_remainder,
                (unsigned long long)renderer->pgxp_conservative_batches,
+               (unsigned long long)renderer->pgxp_probe_opaque_textured,
+               (unsigned long long)renderer->pgxp_probe_semitrans_textured,
+               (unsigned long long)renderer->pgxp_probe_untextured,
+               (unsigned long long)renderer->pgxp_probe_mixed,
                renderer->pgxp_coverage_expanded ?
                   renderer->pgxp_coverage_move_sum /
                      (double)(renderer->pgxp_coverage_expanded * 3u) : 0.0,
-               (double)renderer->pgxp_coverage_move_max);
+               (double)renderer->pgxp_coverage_move_max,
+               renderer->pgxp_coverage_expanded ?
+                  renderer->pgxp_coverage_edge_sum /
+                     (double)renderer->pgxp_coverage_expanded : 0.0,
+               (double)renderer->pgxp_coverage_edge_min,
+               (double)renderer->pgxp_coverage_edge_max);
          gl_pgxp_coverage_reset(renderer, renderer->pgxp_coverage_mode);
       }
       renderer->submission_flushes = 0;

@@ -89,6 +89,17 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_HALF,
 	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE,
 	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO,
+	/* Fragment-stage controls that distinguish absent raster coverage from
+	 * fragments discarded after sampling a transparent PS1 texel. */
+	PGXP_DIAG_GL_TEST_TEXTURE_SOLID_OPAQUE,
+	PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER,
+	/* Larger coverage probes retain the original 8-epsilon cap first, then
+	 * repeat 2/3/4 subpixels with a tighter 4-epsilon acute-vertex cap. */
+	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE,
+	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR,
+	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4,
+	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4,
+	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

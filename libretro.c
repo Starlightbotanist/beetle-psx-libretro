@@ -4863,6 +4863,20 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE;
          else if (strcmp(var.value, "coverage expand two") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO;
+         else if (strcmp(var.value, "texture solid opaque") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_TEXTURE_SOLID_OPAQUE;
+         else if (strcmp(var.value, "texture transparent marker") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER;
+         else if (strcmp(var.value, "coverage expand three") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE;
+         else if (strcmp(var.value, "coverage expand four") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR;
+         else if (strcmp(var.value, "coverage expand two cap4") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4;
+         else if (strcmp(var.value, "coverage expand three cap4") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4;
+         else if (strcmp(var.value, "coverage expand four cap4") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

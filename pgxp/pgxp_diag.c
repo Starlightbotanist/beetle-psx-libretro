@@ -813,7 +813,11 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"ot_y_native_x_blend_50", "ot_y_native_x_blend_75",
 		"ot_y_native_x_gt_half", "conservative_raster",
 		"coverage_expand_quarter", "coverage_expand_half",
-		"coverage_expand_one", "coverage_expand_two"
+		"coverage_expand_one", "coverage_expand_two",
+		"texture_solid_opaque", "texture_transparent_marker",
+		"coverage_expand_three", "coverage_expand_four",
+		"coverage_expand_two_cap4", "coverage_expand_three_cap4",
+		"coverage_expand_four_cap4"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

@@ -43,8 +43,8 @@ uniform uint pgxp_fog;
 // equation MAX against zero restores the hardware floor).
 uniform uint force_zero;
 
-// Diagnostic gate used to retain and compile-check the normal fragment path
-// while a selected primitive class is highlighted.
+// Fragment diagnostic: 0 normal, 1 solid opaque-textured coverage,
+// 2 mark opaque-textured fragments that would discard a transparent texel.
 uniform uint coverage_probe;
 
 // 0: Only draw opaque pixels, 1: only draw semi-transparent pixels
@@ -1027,18 +1027,19 @@ vec4 get_texel_jinc2(out float opacity)
 #endif
 STRINGIZE(
 void main() {
-   // Focused follow-up to the class highlight: keep the scene and all
-   // fixed-function state normal, but remove opaque untextured fragments.
-   // If the R4 defects close, this class was overwriting valid textured
-   // coverage; if their silhouettes remain, it was only visible underneath.
-   if (coverage_probe != 0U &&
-         frag_texture_blend_mode == BLEND_MODE_NO_TEXTURE &&
-         frag_semi_transparent == 0U) {
-      discard;
-   }
-
    if (force_zero != 0u) {
       frag_color = vec4(0.);
+      return;
+   }
+
+   // This returns before texture sampling, filtering, or transparency tests.
+   // A contrasting void that remains in mode 1 is therefore a location where
+   // this opaque textured primitive did not generate a fragment (or failed an
+   // earlier fixed-function depth/stencil/scissor test), not a 0x0000 texel.
+   if (coverage_probe == 1U &&
+         frag_texture_blend_mode != BLEND_MODE_NO_TEXTURE &&
+         frag_semi_transparent == 0U) {
+      frag_color = vec4(1.0, 0.0, 1.0, float(force_mask_bit));
       return;
    }
 
@@ -1112,12 +1113,19 @@ STRINGIZE(
             }
          }
 
-	 // texel color 0x0000 is always fully transparent (even for opaque
+         // texel color 0x0000 is always fully transparent (even for opaque
          // draw commands)
-      //   if (is_transparent(texel0)) {
-		  if(opacity < 0.5) {
-	   // Fully transparent texel, discard
-	   discard;
+         // if (is_transparent(texel0)) {
+         if (opacity < 0.5) {
+            // Mode 2 marks the exact opaque-textured fragments the normal
+            // path would discard.  It does not color absent raster coverage.
+            if (coverage_probe == 2U && frag_semi_transparent == 0U) {
+               frag_color = vec4(1.0, 0.0, 1.0,
+                     float(force_mask_bit));
+               return;
+            }
+            // Fully transparent texel, discard
+            discard;
          }
 
          // Bit 15 (stored in the alpha) is used as a flag for

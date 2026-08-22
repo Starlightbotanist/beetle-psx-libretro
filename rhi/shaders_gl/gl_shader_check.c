@@ -1,8 +1,8 @@
-/* Compiles and links every generated analog GL program plus the command
- * program in a real GL 3.3 core context (EGL surfaceless; llvmpipe is fine -
- * this checks the compiler, not the pixels), then reports whether each
+/* Compiles and links every generated analog GL program plus all six command
+ * filter programs in a real GL 3.3 core context (EGL surfaceless; llvmpipe is
+ * fine - this checks the compiler, not the pixels), then reports whether each
  * declared uniform actually survived linking. Building with HAVE_OPENGLES3
- * instead checks the command program in a GLES 3 context.
+ * instead checks all command programs in a GLES 3 context.
  *
  * A uniform that the linker drops is not necessarily a bug - GLSL removes
  * uniforms with no effect on the output - but a *program* that fails to
@@ -39,6 +39,22 @@
 #endif
 #include "command_vertex.glsl.h"
 #include "command_fragment.glsl.h"
+#define FILTER_XBR
+#include "command_fragment.glsl.h"
+#include "command_vertex.glsl.h"
+#undef FILTER_XBR
+#define FILTER_SABR
+#include "command_fragment.glsl.h"
+#undef FILTER_SABR
+#define FILTER_BILINEAR
+#include "command_fragment.glsl.h"
+#undef FILTER_BILINEAR
+#define FILTER_3POINT
+#include "command_fragment.glsl.h"
+#undef FILTER_3POINT
+#define FILTER_JINC2
+#include "command_fragment.glsl.h"
+#undef FILTER_JINC2
 
 typedef unsigned int GLenum_, GLuint_;
 typedef int GLint_, GLsizei_;
@@ -265,9 +281,20 @@ int main(int argc, char **argv)
                                       "reg_paper_white_nits", "reg_peak_nits",
                                       "reg_expand_gamut", "reg_shoulder", "reg_src_primaries" };
 #endif
-      static const char *u_cmd[]  = { "offset", "pgxp_raster_mode", "pgxp_raster_grid" };
+      static const char *u_cmd[]  = { "offset", "pgxp_raster_mode",
+                                      "pgxp_raster_grid", "coverage_probe" };
 
-      check_pair("command", command_vertex, command_fragment, u_cmd, 3);
+      check_pair("command", command_vertex, command_fragment, u_cmd, 4);
+      check_pair("command_xbr", command_vertex_xbr,
+                 command_fragment_xbr, u_cmd, 4);
+      check_pair("command_sabr", command_vertex_xbr,
+                 command_fragment_sabr, u_cmd, 4);
+      check_pair("command_bilinear", command_vertex,
+                 command_fragment_bilinear, u_cmd, 4);
+      check_pair("command_3point", command_vertex,
+                 command_fragment_3point, u_cmd, 4);
+      check_pair("command_jinc2", command_vertex,
+                 command_fragment_jinc2, u_cmd, 4);
 
 #ifndef HAVE_OPENGLES3
       check("downsample",   analog_downsample_glsl,   u_down, 3);

@@ -331,6 +331,23 @@ static void test_runtime_mode_matrix(void)
 		stream[3].position[1], 19.25f);
 	expect_near("Vulkan clip math leaves CPU link",
 		stream[4].position[1], 19.25f);
+	for (mode = PGXP_DIAG_GL_TEST_CONSERVATIVE_RASTER;
+	     mode < PGXP_DIAG_GL_TEST_COUNT; mode++)
+	{
+		run_endpoint_mode(mode, 19.25f, 19.25f, stream);
+		snprintf(label, sizeof(label),
+			"renderer mode %u leaves CPU point", mode);
+		expect_near(label, stream[3].position[1], 19.25f);
+		snprintf(label, sizeof(label),
+			"renderer mode %u leaves CPU link", mode);
+		expect_near(label, stream[4].position[1], 19.25f);
+		if (PGXP_DiagGLGetMode() != mode)
+		{
+			printf("  FAIL renderer mode getter: got %u expected %u\n",
+				PGXP_DiagGLGetMode(), mode);
+			failures++;
+		}
+	}
 
 	puts("[R5] native opaque-textured modes partition the positive control");
 	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_ALL,
