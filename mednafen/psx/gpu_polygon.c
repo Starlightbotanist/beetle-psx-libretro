@@ -16,6 +16,41 @@ extern int psx_pgxp_fog;
 static float gpu_precise_rgb_buf[12];
 static float gpu_precise_fog_buf[16];
 
+#if PGXP_DIAG
+/* Capture the geometry at the last point where the decoder still owns both
+ * representations.  Calls are placed immediately beside the RHI hand-off,
+ * after quad assembly, oversize rejection, tolerance fallback and UV
+ * adjustment.  The diagnostic therefore sees exactly the triangles that the
+ * OpenGL renderer expands into its glDrawArrays stream, while retaining the
+ * native X/Y that the RHI API normally discards. */
+static void gpu_pgxp_diag_submit(const tri_vertex* vertices, unsigned count,
+      int invalid_w, unsigned upscale_shift)
+{
+   PGXP_diag_primitive_vertex submitted[4];
+   unsigned i;
+
+   if (rhi_intf_is_type() != RHI_OPENGL || count < 3 || count > 4)
+      return;
+   memset(submitted, 0, sizeof(submitted));
+   for (i = 0; i < count; i++)
+   {
+      submitted[i].native_x = vertices[i].x;
+      submitted[i].native_y = vertices[i].y;
+      submitted[i].precise_before_x = vertices[i].precise[0];
+      submitted[i].precise_before_y = vertices[i].precise[1];
+      submitted[i].precise_before_w = vertices[i].precise[2];
+      submitted[i].precise_after_x = vertices[i].precise[0];
+      submitted[i].precise_after_y = vertices[i].precise[1];
+      submitted[i].precise_after_w = vertices[i].precise[2];
+      submitted[i].u = (uint16_t)vertices[i].u;
+      submitted[i].v = (uint16_t)vertices[i].v;
+   }
+   PGXP_DiagSubmitPrimitive(submitted, count, invalid_w, upscale_shift);
+}
+#else
+#define gpu_pgxp_diag_submit(vertices, count, invalid_w, upscale_shift) ((void)0)
+#endif
+
 static INLINE const float *gpu_precise_tri_fog(const tri_vertex *v)
 {
    int i;
@@ -1944,6 +1979,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                Finalise_UVLimits(gpu); \
                hw_vertices[0] = *first; \
                memcpy(&hw_vertices[1], vertices, 3 * sizeof(tri_vertex)); \
+               gpu_pgxp_diag_submit(hw_vertices, 4, invalidW, \
+                  gpu->upscale_shift); \
                rhi_intf_push_quad(hw_vertices[0].precise[0], \
                   hw_vertices[0].precise[1], hw_vertices[0].precise[2], \
                   hw_vertices[1].precise[0], hw_vertices[1].precise[1], \
@@ -1989,6 +2026,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
             Finalise_UVLimits(gpu); \
             memcpy(hw_vertices, verts, 3 * sizeof(tri_vertex)); \
             /* Push a single triangle */ \
+            gpu_pgxp_diag_submit(hw_vertices, 3, invalidW, \
+               gpu->upscale_shift); \
             rhi_intf_push_triangle(hw_vertices[0].precise[0], \
                hw_vertices[0].precise[1], hw_vertices[0].precise[2], \
                hw_vertices[1].precise[0], hw_vertices[1].precise[1], \

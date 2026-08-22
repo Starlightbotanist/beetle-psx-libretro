@@ -80,6 +80,11 @@ void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 		unsigned tex_mode, int mask_eval);
 void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		int invalid_w, int tolerance, unsigned upscale_shift);
+void PGXP_DiagSubmitPrimitive(const PGXP_diag_primitive_vertex* vertices,
+		unsigned count, int invalid_w, unsigned upscale_shift);
+void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
+		unsigned stride_bytes);
+void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned quad_part, int invalid_w, unsigned upscale_shift);
 void PGXP_DiagLineHack(int32_t average_y, int rejected_w,
@@ -140,6 +145,9 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagCBWrite(slot, fifo_pos) ((void)0)
 #define PGXP_DiagPacket(opcode, words, abr, tex_mode, mask_eval) ((void)0)
 #define PGXP_DiagPrimitive(vertices, invalid_w, tolerance, upscale_shift) ((void)0)
+#define PGXP_DiagSubmitPrimitive(vertices, count, invalid_w, upscale_shift) ((void)0)
+#define PGXP_DiagGLPrimitive(vertices, count, stride_bytes) ((void)0)
+#define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagLineHack(average_y, rejected_w, w0, w1, w2) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, native_x, native_y, valid_w, valid_xy, value_match) ((void)0)

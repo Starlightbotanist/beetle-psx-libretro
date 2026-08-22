@@ -47,6 +47,12 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_TJ_TOPOLOGIES 3u
 #define PGXP_DIAG_TJ_SAMPLES 2048u
 #define PGXP_DIAG_TJ_WINDOW_SAMPLES 8u
+#define PGXP_DIAG_SUBMIT_TRIANGLES 32768u
+#define PGXP_DIAG_SUBMIT_HASH_BUCKETS 65536u
+#define PGXP_DIAG_SUBMIT_MODELS 5u
+#define PGXP_DIAG_SUBMIT_SAMPLES 4096u
+#define PGXP_DIAG_SUBMIT_WINDOW_SAMPLES 16u
+#define PGXP_DIAG_SUBMIT_MAX_BBOX_PIXELS 65536u
 
 enum PGXP_trace_event_type
 {
@@ -237,6 +243,36 @@ typedef struct
 	uint8_t invalid_w;
 	uint8_t stage[2];
 } PGXP_diag_tj_edge;
+
+/* Lossless frame-local copy of the triangles handed to OpenGL.  Native X/Y
+ * is intentionally kept in PS1 pixels while precise X/Y remains in the
+ * actual upscaled RHI coordinate system.  That makes native topology exact
+ * and lets the coverage model reproduce the active internal resolution
+ * without round-tripping the float input. */
+typedef struct
+{
+	int32_t native_x[3];
+	int32_t native_y[3];
+	float precise_x[3];
+	float precise_y[3];
+	float precise_w[3];
+	uint64_t packet;
+	uint16_t u[3];
+	uint16_t v[3];
+	uint8_t opcode;
+	uint8_t upscale_shift;
+	uint8_t textured;
+	uint8_t gouraud;
+	uint8_t invalid_w;
+	uint8_t semi_transparent;
+} PGXP_diag_submit_triangle;
+
+typedef struct
+{
+	uint32_t triangle;
+	uint32_t next;
+	uint8_t vertex;
+} PGXP_diag_submit_node;
 
 typedef struct
 {
@@ -503,6 +539,45 @@ static uint64_t tj_edge_overflow;
 static uint64_t tj_observation_evictions;
 static uint32_t tj_samples;
 static uint32_t tj_window_samples;
+static PGXP_diag_submit_triangle submit_triangles[PGXP_DIAG_SUBMIT_TRIANGLES];
+static PGXP_diag_submit_node submit_nodes[PGXP_DIAG_SUBMIT_TRIANGLES * 3u];
+static uint32_t submit_heads[PGXP_DIAG_SUBMIT_HASH_BUCKETS];
+static uint32_t submit_table_frame = ~UINT32_C(0);
+static uint32_t submit_triangle_count;
+static uint32_t submit_pending_triangle;
+static uint8_t submit_pending_vertices;
+static uint8_t submit_pending_valid;
+static unsigned submit_gl_subpixel_bits;
+static uint64_t submit_primitives;
+static uint64_t submit_quads;
+static uint64_t submit_triangle_overflow;
+static uint64_t submit_transport_calls;
+static uint64_t submit_transport_vertices;
+static uint64_t submit_transport_mismatch_calls;
+static uint64_t submit_transport_mismatch_vertices;
+static uint64_t submit_transport_orphans;
+static uint64_t submit_edges;
+static uint64_t submit_lattice_edges;
+static uint64_t submit_long_edges;
+static uint64_t submit_interior_points;
+static uint64_t submit_matches;
+static uint64_t submit_topology[PGXP_DIAG_TJ_TOPOLOGIES];
+static uint64_t submit_risk;
+static uint64_t submit_risk_y[4];
+static uint64_t submit_risk_packet[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_risk_gouraud[4];
+static uint64_t submit_risk_opcode[32][32];
+static uint64_t submit_raster_pairs;
+static uint64_t submit_raster_native_pixels;
+static uint64_t submit_raster_hole_pairs[PGXP_DIAG_SUBMIT_MODELS];
+static uint64_t submit_raster_hole_pixels[PGXP_DIAG_SUBMIT_MODELS];
+static uint64_t submit_raster_snap_improved;
+static uint64_t submit_raster_snap_closed;
+static uint64_t submit_raster_bbox_pixels;
+static uint64_t submit_raster_bbox_skips;
+static uint64_t submit_raster_degenerate;
+static uint32_t submit_samples;
+static uint32_t submit_window_samples;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -845,6 +920,41 @@ void PGXP_DiagInit(void)
 	tj_observation_evictions = 0;
 	tj_samples = 0;
 	tj_window_samples = 0;
+	submit_table_frame = ~UINT32_C(0);
+	submit_triangle_count = 0;
+	submit_pending_triangle = 0;
+	submit_pending_vertices = 0;
+	submit_pending_valid = 0;
+	submit_primitives = 0;
+	submit_quads = 0;
+	submit_triangle_overflow = 0;
+	submit_transport_calls = 0;
+	submit_transport_vertices = 0;
+	submit_transport_mismatch_calls = 0;
+	submit_transport_mismatch_vertices = 0;
+	submit_transport_orphans = 0;
+	submit_edges = 0;
+	submit_lattice_edges = 0;
+	submit_long_edges = 0;
+	submit_interior_points = 0;
+	submit_matches = 0;
+	memset(submit_topology, 0, sizeof(submit_topology));
+	submit_risk = 0;
+	memset(submit_risk_y, 0, sizeof(submit_risk_y));
+	memset(submit_risk_packet, 0, sizeof(submit_risk_packet));
+	memset(submit_risk_gouraud, 0, sizeof(submit_risk_gouraud));
+	memset(submit_risk_opcode, 0, sizeof(submit_risk_opcode));
+	submit_raster_pairs = 0;
+	submit_raster_native_pixels = 0;
+	memset(submit_raster_hole_pairs, 0, sizeof(submit_raster_hole_pairs));
+	memset(submit_raster_hole_pixels, 0, sizeof(submit_raster_hole_pixels));
+	submit_raster_snap_improved = 0;
+	submit_raster_snap_closed = 0;
+	submit_raster_bbox_pixels = 0;
+	submit_raster_bbox_skips = 0;
+	submit_raster_degenerate = 0;
+	submit_samples = 0;
+	submit_window_samples = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
@@ -2108,6 +2218,640 @@ static void pgxp_diag_tj_observe(
 	}
 }
 
+static uint32_t pgxp_diag_submit_hash(int32_t x, int32_t y)
+{
+	uint32_t hash = UINT32_C(2166136261);
+	hash = (hash ^ (uint32_t)x) * UINT32_C(16777619);
+	hash = (hash ^ (uint32_t)y) * UINT32_C(16777619);
+	return hash & (PGXP_DIAG_SUBMIT_HASH_BUCKETS - 1u);
+}
+
+static double pgxp_diag_submit_quantize(double value, unsigned bits,
+		int round_nearest)
+{
+	double units;
+	if (bits > 16u)
+		bits = 16u;
+	units = (double)(UINT32_C(1) << bits);
+	return round_nearest ? floor(value * units + 0.5) / units :
+		floor(value * units) / units;
+}
+
+static double pgxp_diag_submit_cross(const double a[2], const double b[2],
+		double x, double y)
+{
+	return (b[0] - a[0]) * (y - a[1]) -
+		(b[1] - a[1]) * (x - a[0]);
+}
+
+static int pgxp_diag_submit_point_in_triangle(const double triangle[3][2],
+		double x, double y)
+{
+	double area = pgxp_diag_submit_cross(triangle[0], triangle[1],
+		triangle[2][0], triangle[2][1]);
+	double c0 = pgxp_diag_submit_cross(triangle[0], triangle[1], x, y);
+	double c1 = pgxp_diag_submit_cross(triangle[1], triangle[2], x, y);
+	double c2 = pgxp_diag_submit_cross(triangle[2], triangle[0], x, y);
+	int negative = c0 < 0.0 || c1 < 0.0 || c2 < 0.0;
+	int positive = c0 > 0.0 || c1 > 0.0 || c2 > 0.0;
+	if (area == 0.0)
+		return 0;
+	return !(negative && positive);
+}
+
+/* Compare the two sides of one submitted T-junction at actual framebuffer
+ * pixel centres.  The five models are:
+ *   0 raw floating-point PGXP geometry;
+ *   1 nearest fixed-point conversion at GL_SUBPIXEL_BITS;
+ *   2 floor conversion at GL_SUBPIXEL_BITS (the other plausible phase);
+ *   3 nearest conversion at eight subpixel bits;
+ *   4 model 1 after projecting the short edge's two boundary vertices onto
+ *     the long recovered edge.
+ *
+ * Model 0 separates a geometric crack from raster quantisation.  Models 1--3
+ * test whether backend precision creates/removes a visible sample.  Model 4
+ * tests the narrow repair we would actually want, without modifying output. */
+static int pgxp_diag_submit_raster(
+		const PGXP_diag_submit_triangle* edge_triangle,
+		unsigned edge_first, unsigned edge_second,
+		const PGXP_diag_submit_triangle* point_triangle,
+		unsigned point_vertex, unsigned linked_vertex,
+		uint64_t holes[PGXP_DIAG_SUBMIT_MODELS], uint64_t* native_pixels,
+		uint64_t* bbox_pixels)
+{
+	double native_edge[3][2];
+	double native_point[3][2];
+	double model_edge[PGXP_DIAG_SUBMIT_MODELS][3][2];
+	double model_point[PGXP_DIAG_SUBMIT_MODELS][3][2];
+	double edge_native_dx;
+	double edge_native_dy;
+	double edge_native_len2;
+	double point_t;
+	double linked_t;
+	double projected_point[2];
+	double projected_linked[2];
+	double min_x;
+	double min_y;
+	double max_x;
+	double max_y;
+	unsigned gl_bits = submit_gl_subpixel_bits ? submit_gl_subpixel_bits : 4u;
+	unsigned scale;
+	unsigned model;
+	unsigned i;
+	int x0;
+	int y0;
+	int x1;
+	int y1;
+	int x;
+	int y;
+	uint64_t area;
+
+	memset(holes, 0, sizeof(uint64_t) * PGXP_DIAG_SUBMIT_MODELS);
+	*native_pixels = 0;
+	*bbox_pixels = 0;
+	if (edge_triangle->upscale_shift != point_triangle->upscale_shift)
+		return 0;
+	scale = 1u << edge_triangle->upscale_shift;
+
+	for (i = 0; i < 3; i++)
+	{
+		native_edge[i][0] = (double)edge_triangle->native_x[i] * scale;
+		native_edge[i][1] = (double)edge_triangle->native_y[i] * scale;
+		native_point[i][0] = (double)point_triangle->native_x[i] * scale;
+		native_point[i][1] = (double)point_triangle->native_y[i] * scale;
+		for (model = 0; model < PGXP_DIAG_SUBMIT_MODELS; model++)
+		{
+			model_edge[model][i][0] = edge_triangle->precise_x[i];
+			model_edge[model][i][1] = edge_triangle->precise_y[i];
+			model_point[model][i][0] = point_triangle->precise_x[i];
+			model_point[model][i][1] = point_triangle->precise_y[i];
+		}
+	}
+
+	edge_native_dx = (double)edge_triangle->native_x[edge_second] -
+		edge_triangle->native_x[edge_first];
+	edge_native_dy = (double)edge_triangle->native_y[edge_second] -
+		edge_triangle->native_y[edge_first];
+	edge_native_len2 = edge_native_dx * edge_native_dx +
+		edge_native_dy * edge_native_dy;
+	if (edge_native_len2 <= 0.0)
+		return 0;
+	point_t = (((double)point_triangle->native_x[point_vertex] -
+		edge_triangle->native_x[edge_first]) * edge_native_dx +
+		((double)point_triangle->native_y[point_vertex] -
+		edge_triangle->native_y[edge_first]) * edge_native_dy) /
+		edge_native_len2;
+	linked_t = (((double)point_triangle->native_x[linked_vertex] -
+		edge_triangle->native_x[edge_first]) * edge_native_dx +
+		((double)point_triangle->native_y[linked_vertex] -
+		edge_triangle->native_y[edge_first]) * edge_native_dy) /
+		edge_native_len2;
+	projected_point[0] = edge_triangle->precise_x[edge_first] + point_t *
+		(edge_triangle->precise_x[edge_second] -
+		edge_triangle->precise_x[edge_first]);
+	projected_point[1] = edge_triangle->precise_y[edge_first] + point_t *
+		(edge_triangle->precise_y[edge_second] -
+		edge_triangle->precise_y[edge_first]);
+	projected_linked[0] = edge_triangle->precise_x[edge_first] + linked_t *
+		(edge_triangle->precise_x[edge_second] -
+		edge_triangle->precise_x[edge_first]);
+	projected_linked[1] = edge_triangle->precise_y[edge_first] + linked_t *
+		(edge_triangle->precise_y[edge_second] -
+		edge_triangle->precise_y[edge_first]);
+	model_point[4][point_vertex][0] = projected_point[0];
+	model_point[4][point_vertex][1] = projected_point[1];
+	model_point[4][linked_vertex][0] = projected_linked[0];
+	model_point[4][linked_vertex][1] = projected_linked[1];
+
+	for (model = 1; model < PGXP_DIAG_SUBMIT_MODELS; model++)
+	{
+		unsigned bits = model == 3 ? 8u : gl_bits;
+		int nearest = model != 2;
+		for (i = 0; i < 3; i++)
+		{
+			model_edge[model][i][0] = pgxp_diag_submit_quantize(
+				model_edge[model][i][0], bits, nearest);
+			model_edge[model][i][1] = pgxp_diag_submit_quantize(
+				model_edge[model][i][1], bits, nearest);
+			model_point[model][i][0] = pgxp_diag_submit_quantize(
+				model_point[model][i][0], bits, nearest);
+			model_point[model][i][1] = pgxp_diag_submit_quantize(
+				model_point[model][i][1], bits, nearest);
+		}
+	}
+
+	min_x = max_x = projected_point[0];
+	min_y = max_y = projected_point[1];
+#define PGXP_SUBMIT_BBOX_POINT(px, py) do { \
+	double _x = (px); double _y = (py); \
+	if (_x < min_x) { min_x = _x; } \
+	if (_x > max_x) { max_x = _x; } \
+	if (_y < min_y) { min_y = _y; } \
+	if (_y > max_y) { max_y = _y; } \
+} while (0)
+	PGXP_SUBMIT_BBOX_POINT(projected_linked[0], projected_linked[1]);
+	PGXP_SUBMIT_BBOX_POINT(point_triangle->precise_x[point_vertex],
+		point_triangle->precise_y[point_vertex]);
+	PGXP_SUBMIT_BBOX_POINT(point_triangle->precise_x[linked_vertex],
+		point_triangle->precise_y[linked_vertex]);
+	PGXP_SUBMIT_BBOX_POINT(native_point[point_vertex][0],
+		native_point[point_vertex][1]);
+	PGXP_SUBMIT_BBOX_POINT(native_point[linked_vertex][0],
+		native_point[linked_vertex][1]);
+#undef PGXP_SUBMIT_BBOX_POINT
+	x0 = (int)floor(min_x) - 1;
+	y0 = (int)floor(min_y) - 1;
+	x1 = (int)ceil(max_x) + 1;
+	y1 = (int)ceil(max_y) + 1;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > (int)(1024u * scale)) x1 = (int)(1024u * scale);
+	if (y1 > (int)(512u * scale)) y1 = (int)(512u * scale);
+	if (x1 <= x0 || y1 <= y0)
+		return 0;
+	area = (uint64_t)(x1 - x0) * (uint64_t)(y1 - y0);
+	*bbox_pixels = area;
+	if (area > PGXP_DIAG_SUBMIT_MAX_BBOX_PIXELS)
+		return -1;
+
+	for (y = y0; y < y1; y++)
+	{
+		double sample_y = (double)y + 0.5;
+		for (x = x0; x < x1; x++)
+		{
+			double sample_x = (double)x + 0.5;
+			int native_covered =
+				pgxp_diag_submit_point_in_triangle(native_edge,
+					sample_x, sample_y) ||
+				pgxp_diag_submit_point_in_triangle(native_point,
+					sample_x, sample_y);
+			if (!native_covered)
+				continue;
+			(*native_pixels)++;
+			for (model = 0; model < PGXP_DIAG_SUBMIT_MODELS; model++)
+			{
+				int precise_covered =
+					pgxp_diag_submit_point_in_triangle(model_edge[model],
+						sample_x, sample_y) ||
+					pgxp_diag_submit_point_in_triangle(model_point[model],
+						sample_x, sample_y);
+				if (!precise_covered)
+					holes[model]++;
+			}
+		}
+	}
+	return 1;
+}
+
+static void pgxp_diag_submit_sample(
+		const PGXP_diag_submit_triangle* edge_triangle,
+		unsigned edge_first, unsigned edge_second,
+		const PGXP_diag_submit_triangle* point_triangle,
+		unsigned point_vertex, unsigned linked_vertex,
+		float perpendicular, uint64_t gap,
+		const uint64_t holes[PGXP_DIAG_SUBMIT_MODELS],
+		uint64_t native_pixels, uint64_t bbox_pixels)
+{
+	if (!log_cb || submit_samples >= PGXP_DIAG_SUBMIT_SAMPLES ||
+	    submit_window_samples >= PGXP_DIAG_SUBMIT_WINDOW_SAMPLES ||
+	    (!holes[0] && !holes[1] && !holes[2] && !holes[3]))
+		return;
+	submit_samples++;
+	submit_window_samples++;
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_submit_gap] n=%u mf=%u edge=%llu/%02x point=%llu/%02x "
+		"native=%d/%d-%d/%d point=%d/%d linked=%d/%d "
+		"edge_xy=%.4f/%.4f-%.4f/%.4f point_xy=%.4f/%.4f "
+		"linked_xy=%.4f/%.4f perp=%.6f gap=%llu "
+		"holes=raw/glnear/glfloor/high8/snap=%llu/%llu/%llu/%llu/%llu "
+		"native_pixels=%llu bbox=%llu subpixel=%u invalid_w=%u/%u "
+		"g=%u/%u uv=%u/%u-%u/%u@%u/%u\n",
+		submit_samples, mode_frame,
+		(unsigned long long)edge_triangle->packet, edge_triangle->opcode,
+		(unsigned long long)point_triangle->packet, point_triangle->opcode,
+		edge_triangle->native_x[edge_first],
+		edge_triangle->native_y[edge_first],
+		edge_triangle->native_x[edge_second],
+		edge_triangle->native_y[edge_second],
+		point_triangle->native_x[point_vertex],
+		point_triangle->native_y[point_vertex],
+		point_triangle->native_x[linked_vertex],
+		point_triangle->native_y[linked_vertex],
+		edge_triangle->precise_x[edge_first],
+		edge_triangle->precise_y[edge_first],
+		edge_triangle->precise_x[edge_second],
+		edge_triangle->precise_y[edge_second],
+		point_triangle->precise_x[point_vertex],
+		point_triangle->precise_y[point_vertex],
+		point_triangle->precise_x[linked_vertex],
+		point_triangle->precise_y[linked_vertex],
+		perpendicular, (unsigned long long)gap,
+		(unsigned long long)holes[0], (unsigned long long)holes[1],
+		(unsigned long long)holes[2], (unsigned long long)holes[3],
+		(unsigned long long)holes[4],
+		(unsigned long long)native_pixels,
+		(unsigned long long)bbox_pixels, submit_gl_subpixel_bits,
+		edge_triangle->invalid_w, point_triangle->invalid_w,
+		edge_triangle->gouraud, point_triangle->gouraud,
+		edge_triangle->u[edge_first], edge_triangle->v[edge_first],
+		edge_triangle->u[edge_second], edge_triangle->v[edge_second],
+		point_triangle->u[point_vertex], point_triangle->v[point_vertex]);
+}
+
+static void pgxp_diag_submit_reset_frame(uint32_t frame)
+{
+	if (submit_pending_valid)
+		submit_transport_orphans++;
+	submit_pending_valid = 0;
+	submit_triangle_count = 0;
+	submit_table_frame = frame;
+}
+
+static void pgxp_diag_submit_finish_frame(void)
+{
+	uint32_t triangle_index;
+	uint32_t node_count;
+
+	if (submit_table_frame == ~UINT32_C(0))
+		return;
+	if (submit_pending_valid)
+	{
+		submit_transport_orphans++;
+		submit_pending_valid = 0;
+	}
+	memset(submit_heads, 0xff, sizeof(submit_heads));
+	node_count = submit_triangle_count * 3u;
+	for (triangle_index = 0; triangle_index < submit_triangle_count;
+	     triangle_index++)
+	{
+		const PGXP_diag_submit_triangle* triangle =
+			&submit_triangles[triangle_index];
+		unsigned vertex;
+		for (vertex = 0; vertex < 3; vertex++)
+		{
+			uint32_t node_index = triangle_index * 3u + vertex;
+			uint32_t bucket = pgxp_diag_submit_hash(
+				triangle->native_x[vertex], triangle->native_y[vertex]);
+			PGXP_diag_submit_node* node = &submit_nodes[node_index];
+			node->triangle = triangle_index;
+			node->vertex = (uint8_t)vertex;
+			node->next = submit_heads[bucket];
+			submit_heads[bucket] = node_index;
+		}
+	}
+
+	for (triangle_index = 0; triangle_index < submit_triangle_count;
+	     triangle_index++)
+	{
+		static const uint8_t edge_vertices[3][3] = {
+			{ 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }
+		};
+		const PGXP_diag_submit_triangle* edge_triangle =
+			&submit_triangles[triangle_index];
+		unsigned edge_index;
+
+		for (edge_index = 0; edge_index < 3; edge_index++)
+		{
+			unsigned first = edge_vertices[edge_index][0];
+			unsigned second = edge_vertices[edge_index][1];
+			unsigned third = edge_vertices[edge_index][2];
+			int32_t x0 = edge_triangle->native_x[first];
+			int32_t y0 = edge_triangle->native_y[first];
+			int32_t x1 = edge_triangle->native_x[second];
+			int32_t y1 = edge_triangle->native_y[second];
+			int32_t dx = x1 - x0;
+			int32_t dy = y1 - y0;
+			unsigned abs_dx = (unsigned)(dx < 0 ? -dx : dx);
+			unsigned abs_dy = (unsigned)(dy < 0 ? -dy : dy);
+			unsigned steps = pgxp_diag_tj_gcd(abs_dx, abs_dy);
+			unsigned step;
+
+			submit_edges++;
+			if (steps <= 1)
+				continue;
+			submit_lattice_edges++;
+			submit_interior_points += steps - 1;
+			if (steps > PGXP_DIAG_TJ_MAX_STEPS)
+			{
+				submit_long_edges++;
+				continue;
+			}
+
+			for (step = 1; step < steps; step++)
+			{
+				int32_t point_x = x0 +
+					(int32_t)(((int64_t)dx * step) / steps);
+				int32_t point_y = y0 +
+					(int32_t)(((int64_t)dy * step) / steps);
+				uint32_t node_index = submit_heads[
+					pgxp_diag_submit_hash(point_x, point_y)];
+
+				while (node_index != UINT32_MAX && node_index < node_count)
+				{
+					const PGXP_diag_submit_node* node =
+						&submit_nodes[node_index];
+					const PGXP_diag_submit_triangle* point_triangle =
+						&submit_triangles[node->triangle];
+					unsigned point_vertex = node->vertex;
+					unsigned linked_vertex = 3u;
+					int64_t edge_side;
+					int64_t point_side = 0;
+					int mixed_side = 0;
+					unsigned topology = 0;
+					unsigned neighbor;
+					float edge_dx;
+					float edge_dy;
+					float length_squared;
+					float signed_perpendicular;
+					float perpendicular;
+					unsigned offset_side = 0;
+					uint64_t gap;
+
+					node_index = node->next;
+					if (node->triangle == triangle_index ||
+					    point_triangle->packet == edge_triangle->packet ||
+					    point_triangle->native_x[point_vertex] != point_x ||
+					    point_triangle->native_y[point_vertex] != point_y ||
+					    point_triangle->upscale_shift !=
+						    edge_triangle->upscale_shift)
+						continue;
+					submit_matches++;
+					edge_side = pgxp_diag_tj_native_cross(x0, y0, x1, y1,
+						edge_triangle->native_x[third],
+						edge_triangle->native_y[third]);
+					for (neighbor = 0; neighbor < 3; neighbor++)
+					{
+						int64_t side;
+						if (neighbor == point_vertex)
+							continue;
+						if (pgxp_diag_tj_point_on_segment(x0, y0, x1, y1,
+							point_triangle->native_x[neighbor],
+							point_triangle->native_y[neighbor]))
+						{
+							if (linked_vertex == 3u)
+								linked_vertex = neighbor;
+							continue;
+						}
+						side = pgxp_diag_tj_native_cross(x0, y0, x1, y1,
+							point_triangle->native_x[neighbor],
+							point_triangle->native_y[neighbor]);
+						if (!side)
+							continue;
+						if (!point_side)
+							point_side = side;
+						else if ((point_side < 0) != (side < 0))
+							mixed_side = 1;
+					}
+					if (linked_vertex != 3u)
+						topology = !mixed_side && edge_side && point_side &&
+							((edge_side < 0) != (point_side < 0)) ? 2u : 1u;
+					submit_topology[topology]++;
+
+					edge_dx = (edge_triangle->precise_x[second] -
+						edge_triangle->precise_x[first]) /
+						(float)(1u << edge_triangle->upscale_shift);
+					edge_dy = (edge_triangle->precise_y[second] -
+						edge_triangle->precise_y[first]) /
+						(float)(1u << edge_triangle->upscale_shift);
+					length_squared = edge_dx * edge_dx + edge_dy * edge_dy;
+					if (length_squared <= 1.0e-12f)
+					{
+						submit_raster_degenerate++;
+						continue;
+					}
+					signed_perpendicular = (edge_dx *
+						((point_triangle->precise_y[point_vertex] -
+						 edge_triangle->precise_y[first]) /
+						 (float)(1u << edge_triangle->upscale_shift)) -
+						edge_dy *
+						((point_triangle->precise_x[point_vertex] -
+						 edge_triangle->precise_x[first]) /
+						 (float)(1u << edge_triangle->upscale_shift))) /
+						sqrtf(length_squared);
+					perpendicular = fabsf(signed_perpendicular);
+					if (topology == 2u && perpendicular > 1.0e-6f)
+						offset_side = ((signed_perpendicular < 0) ==
+							(edge_side < 0)) ? 1u : 2u;
+
+					if (topology == 2u && offset_side == 2u &&
+					    edge_triangle->textured && point_triangle->textured &&
+					    !edge_triangle->semi_transparent &&
+					    !point_triangle->semi_transparent &&
+					    perpendicular > (1.0f / 64.0f) &&
+					    perpendicular <= 4.0f)
+					{
+						uint64_t holes[PGXP_DIAG_SUBMIT_MODELS];
+						uint64_t native_pixels;
+						uint64_t bbox_pixels;
+						int raster_result;
+						unsigned context;
+						unsigned y_band = point_y < 64 ? 0u :
+							point_y < 128 ? 1u : point_y < 192 ? 2u : 3u;
+						unsigned model;
+						gap = edge_triangle->packet > point_triangle->packet ?
+							edge_triangle->packet - point_triangle->packet :
+							point_triangle->packet - edge_triangle->packet;
+						submit_risk++;
+						submit_risk_y[y_band]++;
+						submit_risk_packet[pgxp_diag_edge_packet_bin(gap)]++;
+						context = (edge_triangle->gouraud ? 2u : 0u) |
+							(point_triangle->gouraud ? 1u : 0u);
+						submit_risk_gouraud[context]++;
+						submit_risk_opcode[edge_triangle->opcode & 0x1fu]
+							[point_triangle->opcode & 0x1fu]++;
+						raster_result = pgxp_diag_submit_raster(edge_triangle,
+							first, second, point_triangle, point_vertex,
+							linked_vertex, holes, &native_pixels, &bbox_pixels);
+						if (raster_result < 0)
+						{
+							submit_raster_bbox_skips++;
+							continue;
+						}
+						if (!raster_result)
+							continue;
+						submit_raster_pairs++;
+						submit_raster_native_pixels += native_pixels;
+						submit_raster_bbox_pixels += bbox_pixels;
+						for (model = 0; model < PGXP_DIAG_SUBMIT_MODELS; model++)
+						{
+							submit_raster_hole_pixels[model] += holes[model];
+							if (holes[model])
+								submit_raster_hole_pairs[model]++;
+						}
+						if (holes[1] > holes[4])
+							submit_raster_snap_improved++;
+						if (holes[1] && !holes[4])
+							submit_raster_snap_closed++;
+						pgxp_diag_submit_sample(edge_triangle, first, second,
+							point_triangle, point_vertex, linked_vertex,
+							perpendicular, gap, holes, native_pixels, bbox_pixels);
+					}
+				}
+			}
+		}
+	}
+
+	submit_triangle_count = 0;
+	submit_table_frame = ~UINT32_C(0);
+}
+
+void PGXP_DiagSubmitPrimitive(const PGXP_diag_primitive_vertex* vertices,
+		unsigned count, int invalid_w, unsigned upscale_shift)
+{
+	static const uint8_t triangle_vertices[2][3] = {
+		{ 0, 1, 2 }, { 3, 2, 1 }
+	};
+	unsigned triangle_count = count == 4 ? 2u : count == 3 ? 1u : 0u;
+	unsigned triangle;
+	unsigned scale;
+
+	if (!triangle_count || upscale_shift > 4u)
+		return;
+	if (submit_table_frame != mode_frame)
+		pgxp_diag_submit_reset_frame(mode_frame);
+	if (submit_pending_valid)
+		submit_transport_orphans++;
+	submit_pending_triangle = submit_triangle_count;
+	submit_pending_vertices = (uint8_t)(triangle_count * 3u);
+	submit_pending_valid = 1;
+	submit_primitives++;
+	if (count == 4)
+		submit_quads++;
+	scale = 1u << upscale_shift;
+	for (triangle = 0; triangle < triangle_count; triangle++)
+	{
+		PGXP_diag_submit_triangle* output;
+		unsigned i;
+		if (submit_triangle_count >= PGXP_DIAG_SUBMIT_TRIANGLES)
+		{
+			submit_triangle_overflow++;
+			submit_pending_valid = 0;
+			continue;
+		}
+		output = &submit_triangles[submit_triangle_count++];
+		memset(output, 0, sizeof(*output));
+		for (i = 0; i < 3; i++)
+		{
+			unsigned source = triangle_vertices[triangle][i];
+			output->native_x[i] = vertices[source].native_x / (int32_t)scale;
+			output->native_y[i] = vertices[source].native_y / (int32_t)scale;
+			output->precise_x[i] = vertices[source].precise_after_x;
+			output->precise_y[i] = vertices[source].precise_after_y;
+			output->precise_w[i] = vertices[source].precise_after_w;
+			output->u[i] = vertices[source].u;
+			output->v[i] = vertices[source].v;
+		}
+		output->packet = current_packet;
+		output->opcode = current_opcode;
+		output->upscale_shift = (uint8_t)upscale_shift;
+		output->textured = !!(current_opcode & 0x04);
+		output->gouraud = !!(current_opcode & 0x10);
+		output->invalid_w = invalid_w != 0;
+		output->semi_transparent = !!(current_opcode & 0x02);
+	}
+}
+
+void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
+		unsigned stride_bytes)
+{
+	const uint8_t* bytes = (const uint8_t*)vertices;
+	uint64_t mismatches = 0;
+	unsigned i;
+
+	/* Sprites and non-PGXP callers share the same RHI entry points.  They do
+	 * not install a pending polygon record and are intentionally invisible to
+	 * this transport check. */
+	if (!submit_pending_valid)
+		return;
+	submit_transport_calls++;
+	submit_transport_vertices += count;
+	if (!vertices || stride_bytes < 4u * sizeof(float) ||
+	    count != submit_pending_vertices)
+	{
+		submit_transport_mismatch_calls++;
+		if (log_cb && submit_transport_mismatch_calls <= 8)
+			log_cb(RETRO_LOG_ERROR,
+				"[pgxp_submit_transport_error] mf=%u pending=%u "
+				"expected=%u actual=%u stride=%u\n", mode_frame,
+				submit_pending_valid, submit_pending_vertices, count,
+				stride_bytes);
+		submit_pending_valid = 0;
+		return;
+	}
+	for (i = 0; i < count; i++)
+	{
+		const float* actual = (const float*)(bytes + i * stride_bytes);
+		const PGXP_diag_submit_triangle* expected =
+			&submit_triangles[submit_pending_triangle + i / 3u];
+		unsigned vertex = i % 3u;
+		if (actual[0] != expected->precise_x[vertex] ||
+		    actual[1] != expected->precise_y[vertex] ||
+		    actual[3] != expected->precise_w[vertex])
+		{
+			mismatches++;
+			if (log_cb && submit_transport_mismatch_calls < 8 &&
+			    mismatches <= 3)
+				log_cb(RETRO_LOG_ERROR,
+					"[pgxp_submit_transport_vertex] mf=%u i=%u "
+					"expected=%.9g/%.9g/%.9g actual=%.9g/%.9g/%.9g\n",
+					mode_frame, i, expected->precise_x[vertex],
+					expected->precise_y[vertex], expected->precise_w[vertex],
+					actual[0], actual[1], actual[3]);
+		}
+	}
+	if (mismatches)
+	{
+		submit_transport_mismatch_calls++;
+		submit_transport_mismatch_vertices += mismatches;
+	}
+	submit_pending_valid = 0;
+}
+
+void PGXP_DiagGLRasterCaps(unsigned subpixel_bits)
+{
+	submit_gl_subpixel_bits = subpixel_bits > 16u ? 16u : subpixel_bits;
+}
+
 static PGXP_diag_edge* pgxp_diag_find_edge(int32_t x0, int32_t y0,
 		int32_t x1, int32_t y1)
 {
@@ -3199,6 +3943,7 @@ void PGXP_DiagFrame(int backend)
 	/* Primitive observation is frame-local.  Complete the prior frame before
 	 * advancing mode_frame so packet ages and the 60-frame aggregate align. */
 	pgxp_diag_tj_finish_frame();
+	pgxp_diag_submit_finish_frame();
 	frame_number++;
 	if (backend != last_backend || mode != last_mode)
 	{
@@ -3842,6 +4587,116 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)tj_risk_y[1],
 		(unsigned long long)tj_risk_y[2],
 		(unsigned long long)tj_risk_y[3]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_submit_summary] f=%llu primitives=%llu quads=%llu "
+		"triangles=%llu overflow=%llu "
+		"transport=calls/vertices/mismatch_calls/mismatch_vertices/orphans="
+		"%llu/%llu/%llu/%llu/%llu "
+		"edges=%llu lattice=%llu long=%llu "
+		"interior_points=%llu matches=%llu topology=%llu/%llu/%llu "
+		"risk=%llu subpixel=%u handoff=final_gl_draw_arrays\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)submit_primitives,
+		(unsigned long long)submit_quads,
+		(unsigned long long)(submit_primitives + submit_quads),
+		(unsigned long long)submit_triangle_overflow,
+		(unsigned long long)submit_transport_calls,
+		(unsigned long long)submit_transport_vertices,
+		(unsigned long long)submit_transport_mismatch_calls,
+		(unsigned long long)submit_transport_mismatch_vertices,
+		(unsigned long long)submit_transport_orphans,
+		(unsigned long long)submit_edges,
+		(unsigned long long)submit_lattice_edges,
+		(unsigned long long)submit_long_edges,
+		(unsigned long long)submit_interior_points,
+		(unsigned long long)submit_matches,
+		(unsigned long long)submit_topology[0],
+		(unsigned long long)submit_topology[1],
+		(unsigned long long)submit_topology[2],
+		(unsigned long long)submit_risk, submit_gl_subpixel_bits);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_submit_risk] f=%llu y=%llu/%llu/%llu/%llu "
+		"gouraud=%llu/%llu/%llu/%llu "
+		"packet=%llu/%llu/%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)submit_risk_y[0],
+		(unsigned long long)submit_risk_y[1],
+		(unsigned long long)submit_risk_y[2],
+		(unsigned long long)submit_risk_y[3],
+		(unsigned long long)submit_risk_gouraud[0],
+		(unsigned long long)submit_risk_gouraud[1],
+		(unsigned long long)submit_risk_gouraud[2],
+		(unsigned long long)submit_risk_gouraud[3],
+		(unsigned long long)submit_risk_packet[0],
+		(unsigned long long)submit_risk_packet[1],
+		(unsigned long long)submit_risk_packet[2],
+		(unsigned long long)submit_risk_packet[3],
+		(unsigned long long)submit_risk_packet[4],
+		(unsigned long long)submit_risk_packet[5]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_submit_raster] f=%llu tested_pairs=%llu native_pixels=%llu "
+		"hole_pairs=raw/glnear/glfloor/high8/snap=%llu/%llu/%llu/%llu/%llu "
+		"hole_pixels=raw/glnear/glfloor/high8/snap=%llu/%llu/%llu/%llu/%llu "
+		"snap_improved=%llu snap_closed=%llu bbox_pixels=%llu skips=%llu "
+		"degenerate=%llu samples=%u\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)submit_raster_pairs,
+		(unsigned long long)submit_raster_native_pixels,
+		(unsigned long long)submit_raster_hole_pairs[0],
+		(unsigned long long)submit_raster_hole_pairs[1],
+		(unsigned long long)submit_raster_hole_pairs[2],
+		(unsigned long long)submit_raster_hole_pairs[3],
+		(unsigned long long)submit_raster_hole_pairs[4],
+		(unsigned long long)submit_raster_hole_pixels[0],
+		(unsigned long long)submit_raster_hole_pixels[1],
+		(unsigned long long)submit_raster_hole_pixels[2],
+		(unsigned long long)submit_raster_hole_pixels[3],
+		(unsigned long long)submit_raster_hole_pixels[4],
+		(unsigned long long)submit_raster_snap_improved,
+		(unsigned long long)submit_raster_snap_closed,
+		(unsigned long long)submit_raster_bbox_pixels,
+		(unsigned long long)submit_raster_bbox_skips,
+		(unsigned long long)submit_raster_degenerate, submit_samples);
+	{
+		uint8_t selected_edge[8];
+		uint8_t selected_point[8];
+		unsigned rank;
+		memset(selected_edge, 0xff, sizeof(selected_edge));
+		memset(selected_point, 0xff, sizeof(selected_point));
+		for (rank = 0; rank < 8; rank++)
+		{
+			uint64_t best = 0;
+			unsigned best_edge = 0;
+			unsigned best_point = 0;
+			unsigned edge_opcode;
+			unsigned point_opcode;
+			for (edge_opcode = 0; edge_opcode < 32; edge_opcode++)
+				for (point_opcode = 0; point_opcode < 32; point_opcode++)
+				{
+					unsigned previous;
+					int used = 0;
+					for (previous = 0; previous < rank; previous++)
+						if (selected_edge[previous] == edge_opcode &&
+						    selected_point[previous] == point_opcode)
+							used = 1;
+					if (!used && submit_risk_opcode[edge_opcode][point_opcode] > best)
+					{
+						best = submit_risk_opcode[edge_opcode][point_opcode];
+						best_edge = edge_opcode;
+						best_point = point_opcode;
+					}
+				}
+			if (!best)
+				break;
+			selected_edge[rank] = (uint8_t)best_edge;
+			selected_point[rank] = (uint8_t)best_point;
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_submit_opcode] f=%llu rank=%u edge=%02x point=%02x "
+				"count=%llu\n", (unsigned long long)frame_number, rank + 1,
+				0x20u | best_edge, 0x20u | best_point,
+				(unsigned long long)best);
+		}
+	}
 	{
 		static const char* const edge_kind_name[PGXP_DIAG_EDGE_KINDS] = {
 			"uu", "ut", "tt"
@@ -4225,6 +5080,35 @@ void PGXP_DiagFrame(int backend)
 	tj_edge_overflow = 0;
 	tj_observation_evictions = 0;
 	tj_window_samples = 0;
+	submit_primitives = 0;
+	submit_quads = 0;
+	submit_triangle_overflow = 0;
+	submit_transport_calls = 0;
+	submit_transport_vertices = 0;
+	submit_transport_mismatch_calls = 0;
+	submit_transport_mismatch_vertices = 0;
+	submit_transport_orphans = 0;
+	submit_edges = 0;
+	submit_lattice_edges = 0;
+	submit_long_edges = 0;
+	submit_interior_points = 0;
+	submit_matches = 0;
+	memset(submit_topology, 0, sizeof(submit_topology));
+	submit_risk = 0;
+	memset(submit_risk_y, 0, sizeof(submit_risk_y));
+	memset(submit_risk_packet, 0, sizeof(submit_risk_packet));
+	memset(submit_risk_gouraud, 0, sizeof(submit_risk_gouraud));
+	memset(submit_risk_opcode, 0, sizeof(submit_risk_opcode));
+	submit_raster_pairs = 0;
+	submit_raster_native_pixels = 0;
+	memset(submit_raster_hole_pairs, 0, sizeof(submit_raster_hole_pairs));
+	memset(submit_raster_hole_pixels, 0, sizeof(submit_raster_hole_pixels));
+	submit_raster_snap_improved = 0;
+	submit_raster_snap_closed = 0;
+	submit_raster_bbox_pixels = 0;
+	submit_raster_bbox_skips = 0;
+	submit_raster_degenerate = 0;
+	submit_window_samples = 0;
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));

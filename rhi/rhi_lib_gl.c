@@ -22,6 +22,7 @@
 #include "rhi_defer.h"
 #include "tt_trace.h"
 #include "beetle_psx_globals.h"
+#include "pgxp/pgxp_diag.h"
 
 /* HDR output state, owned by libretro.c (same contract as the Vulkan
  * renderer's extern block). psx_color_format records the *requested*
@@ -5399,6 +5400,7 @@ static void gl_caps_init(void)
    gl_vendor_str   = glGetString(GL_VENDOR);
    gl_renderer_str = glGetString(GL_RENDERER);
    glGetIntegerv(GL_SUBPIXEL_BITS, &subpixel_bits);
+   PGXP_DiagGLRasterCaps(subpixel_bits > 0 ? (unsigned)subpixel_bits : 0u);
 
    gl_caps.version_string = gl_version_str  ? (const char *)gl_version_str  : "(unknown)";
    gl_caps.vendor         = gl_vendor_str   ? (const char *)gl_vendor_str   : "(unknown)";
@@ -5477,7 +5479,7 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_w_probe] homogeneous_w=forced_one fragment=normal "
+         "[pgxp_gl_w_probe] homogeneous_w=position_w fragment=normal "
          "requires_pct=off depth=enabled stencil=enabled scissor=enabled blend=normal "
          "submission=draw_arrays/expanded_quads "
          "subpixel_bits=%d\n",
@@ -6715,6 +6717,7 @@ void rhi_gl_push_triangle(
            for (_fc = 0; _fc < 4; _fc++)
               v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
 
+      PGXP_DiagGLPrimitive(v, 3, (unsigned)sizeof(v[0]));
       gl_vram_sync_primitive(renderer, v, 3);
       push_primitive(renderer, v, 3, GL_TRIANGLES,
             semi_transparency_mode, mask_test, set_mask);
@@ -6869,6 +6872,8 @@ void rhi_gl_push_quad(
          expanded[3] = v[3];
          expanded[4] = v[2];
          expanded[5] = v[1];
+         PGXP_DiagGLPrimitive(expanded, 6,
+               (unsigned)sizeof(expanded[0]));
          renderer->submission_quads++;
          push_primitive(renderer, expanded, 6, GL_TRIANGLES,
                semi_transparency_mode, mask_test, set_mask);
