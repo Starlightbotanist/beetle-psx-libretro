@@ -79,7 +79,7 @@ void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos);
 void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 		unsigned tex_mode, int mask_eval);
 void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
-		int invalid_w, int tolerance);
+		int invalid_w, int tolerance, unsigned upscale_shift);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned quad_part, int invalid_w, unsigned upscale_shift);
 void PGXP_DiagLineHack(int32_t average_y, int rejected_w,
@@ -139,7 +139,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagFIFOWrite(pos, addr, value, shadow) ((void)0)
 #define PGXP_DiagCBWrite(slot, fifo_pos) ((void)0)
 #define PGXP_DiagPacket(opcode, words, abr, tex_mode, mask_eval) ((void)0)
-#define PGXP_DiagPrimitive(vertices, invalid_w, tolerance) ((void)0)
+#define PGXP_DiagPrimitive(vertices, invalid_w, tolerance, upscale_shift) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagLineHack(average_y, rejected_w, w0, w1, w2) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, native_x, native_y, valid_w, valid_xy, value_match) ((void)0)

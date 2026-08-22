@@ -83,6 +83,22 @@ static INLINE const float *gpu_precise_quad_rgb(const tri_vertex *first,
    return gpu_precise_rgb_buf;
 }
 
+/* Focused R4 coverage diagnostic.  PGXP-off renders the tunnel correctly,
+ * while the opaque-untextured colour probe showed that normal Gouraud
+ * geometry is visible through every hole.  Preserve all PGXP bookkeeping and
+ * only substitute the original PSX X/Y at the final OpenGL hand-off for
+ * opaque textured polygons.  If the holes close, the missing coverage belongs
+ * to the precise textured surface; if they do not, that surface was never the
+ * source.  Vulkan and every non-textured or semi-transparent draw are left
+ * untouched. */
+static INLINE float gpu_hw_probe_position(const tri_vertex *vertex,
+      unsigned axis, bool native_xy)
+{
+   if (native_xy)
+      return axis ? (float)vertex->y : (float)vertex->x;
+   return vertex->precise[axis];
+}
+
 /* Defined later in the same translation unit (gpu.c includes this
  * file before the dither_table definition).  Forward-declared here so
  * the non-textured SSE2/NEON span helper below can read it; the later
@@ -1652,7 +1668,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
       PGXP_DIAG_PRIMITIVE_AFTER(pgxp_diag_vertices, v, vertices[v]); \
    if (PGXP_LIT) \
    { \
-      PGXP_DiagPrimitive(pgxp_diag_vertices, invalidW, psx_pgxp_2d_tol); \
+      PGXP_DiagPrimitive(pgxp_diag_vertices, invalidW, psx_pgxp_2d_tol, \
+         gpu->upscale_shift); \
       PGXP_DiagGPUPrimitive(pgxp_diag_vertices, \
          NV_LIT == 4 ? (gpu->InCmd == INCMD_QUAD ? 2 : 1) : 0, \
          invalidW, gpu->upscale_shift); \
@@ -1724,6 +1741,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    do \
    { \
       enum blending_modes blend_mode = BLEND_MODE_AVERAGE; \
+      bool gl_native_textured_probe; \
       if (TEXTURED_LIT) \
       { \
          if (TM_LIT) \
@@ -1731,6 +1749,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          else \
             blend_mode = BLEND_MODE_ADD; \
       } \
+      gl_native_textured_probe = (PGXP_LIT) && (TEXTURED_LIT) && \
+         ((BM_VAL) < 0) && rhi_intf_is_type() == RHI_OPENGL; \
       /* Line Renderer: Detect triangles that would resolve as lines at x1 scale and create second triangle to make quad */ \
       if ((line_render_mode != 0) && (!lineFound) && (NV_LIT == 3) && (TEXTURED_LIT)) \
       { \
@@ -1755,17 +1775,24 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                Extend_UVLimits(gpu, first, 1); \
                Extend_UVLimits(gpu, vertices, 3); \
                Finalise_UVLimits(gpu); \
-               rhi_intf_push_quad(first->precise[0], \
-                  first->precise[1], \
+               rhi_intf_push_quad(gpu_hw_probe_position(first, 0, \
+                     gl_native_textured_probe), \
+                  gpu_hw_probe_position(first, 1, gl_native_textured_probe), \
                   first->precise[2], \
-                  vertices[0].precise[0], \
-                  vertices[0].precise[1], \
+                  gpu_hw_probe_position(&vertices[0], 0, \
+                     gl_native_textured_probe), \
+                  gpu_hw_probe_position(&vertices[0], 1, \
+                     gl_native_textured_probe), \
                   vertices[0].precise[2], \
-                  vertices[1].precise[0], \
-                  vertices[1].precise[1], \
+                  gpu_hw_probe_position(&vertices[1], 0, \
+                     gl_native_textured_probe), \
+                  gpu_hw_probe_position(&vertices[1], 1, \
+                     gl_native_textured_probe), \
                   vertices[1].precise[2], \
-                  vertices[2].precise[0], \
-                  vertices[2].precise[1], \
+                  gpu_hw_probe_position(&vertices[2], 0, \
+                     gl_native_textured_probe), \
+                  gpu_hw_probe_position(&vertices[2], 1, \
+                     gl_native_textured_probe), \
                   vertices[2].precise[2], \
                   ((uint32_t)first->r) | ((uint32_t)first->g << 8) | ((uint32_t)first->b << 16), \
                   ((uint32_t)vertices[0].r) | ((uint32_t)vertices[0].g << 8) | ((uint32_t)vertices[0].b << 16), \
@@ -1802,14 +1829,20 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
             Extend_UVLimits(gpu, verts, 3); \
             Finalise_UVLimits(gpu); \
             /* Push a single triangle */ \
-            rhi_intf_push_triangle(verts[0].precise[0], \
-               verts[0].precise[1], \
+            rhi_intf_push_triangle(gpu_hw_probe_position(&verts[0], 0, \
+                  gl_native_textured_probe), \
+               gpu_hw_probe_position(&verts[0], 1, \
+                  gl_native_textured_probe), \
                verts[0].precise[2], \
-               verts[1].precise[0], \
-               verts[1].precise[1], \
+               gpu_hw_probe_position(&verts[1], 0, \
+                  gl_native_textured_probe), \
+               gpu_hw_probe_position(&verts[1], 1, \
+                  gl_native_textured_probe), \
                verts[1].precise[2], \
-               verts[2].precise[0], \
-               verts[2].precise[1], \
+               gpu_hw_probe_position(&verts[2], 0, \
+                  gl_native_textured_probe), \
+               gpu_hw_probe_position(&verts[2], 1, \
+                  gl_native_textured_probe), \
                verts[2].precise[2], \
                ((uint32_t)verts[0].r) | ((uint32_t)verts[0].g << 8) | ((uint32_t)verts[0].b << 16), \
                ((uint32_t)verts[1].r) | ((uint32_t)verts[1].g << 8) | ((uint32_t)verts[1].b << 16), \

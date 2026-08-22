@@ -35,6 +35,11 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_WRITER_WIDTHS 4u
 #define PGXP_DIAG_COHERENCE_BUCKETS 16384u
 #define PGXP_DIAG_COHERENCE_WAYS 4u
+#define PGXP_DIAG_EDGE_SLOTS 16384u
+#define PGXP_DIAG_EDGE_KINDS 3u
+#define PGXP_DIAG_EDGE_DELTA_BINS 7u
+#define PGXP_DIAG_EDGE_PACKET_BINS 6u
+#define PGXP_DIAG_EDGE_SAMPLES 96u
 
 enum PGXP_trace_event_type
 {
@@ -157,6 +162,25 @@ typedef struct
 	uint8_t stage;
 	uint8_t valid;
 } PGXP_diag_coherence_vertex;
+
+/* One frame-local record for a native PSX edge.  Keeping the most recent
+ * textured and untextured observation lets us ask two distinct questions:
+ * whether adjacent primitives in the same material class recover different
+ * PGXP endpoints, and whether the textured surface and the untextured layer
+ * exposed by the R4 coverage probe disagree at an otherwise identical native
+ * edge. */
+typedef struct
+{
+	int32_t native_x[2];
+	int32_t native_y[2];
+	float precise_x[2][2];
+	float precise_y[2][2];
+	uint64_t packet[2];
+	uint8_t opcode[2];
+	uint8_t gouraud[2];
+	uint8_t invalid_w[2];
+	uint8_t valid[2];
+} PGXP_diag_edge;
 
 typedef struct
 {
@@ -373,6 +397,21 @@ static uint64_t primitive_native_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
 	[PGXP_TRACE_REASON_COUNT];
 static uint64_t primitive_native_sra5_reason[PGXP_DIAG_PRIMITIVE_BUCKETS]
 	[PGXP_TRACE_REASON_COUNT];
+static PGXP_diag_edge edge_table[PGXP_DIAG_EDGE_SLOTS];
+static uint32_t edge_table_frame = ~UINT32_C(0);
+static uint64_t edge_observations[2];
+static uint64_t edge_compares[PGXP_DIAG_EDGE_KINDS];
+static uint64_t edge_delta_bins[PGXP_DIAG_EDGE_KINDS]
+	[PGXP_DIAG_EDGE_DELTA_BINS];
+static uint64_t edge_near_delta_bins[PGXP_DIAG_EDGE_KINDS]
+	[PGXP_DIAG_EDGE_DELTA_BINS];
+static uint64_t edge_packet_bins[PGXP_DIAG_EDGE_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t edge_mismatch_y[PGXP_DIAG_EDGE_KINDS][4];
+static double edge_delta_sum[PGXP_DIAG_EDGE_KINDS];
+static float edge_delta_max[PGXP_DIAG_EDGE_KINDS];
+static uint64_t edge_table_overflow;
+static uint32_t edge_samples;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -672,6 +711,18 @@ void PGXP_DiagInit(void)
 	memset(primitive_native_reason, 0, sizeof(primitive_native_reason));
 	memset(primitive_native_sra5_reason, 0,
 		sizeof(primitive_native_sra5_reason));
+	memset(edge_table, 0, sizeof(edge_table));
+	edge_table_frame = ~UINT32_C(0);
+	memset(edge_observations, 0, sizeof(edge_observations));
+	memset(edge_compares, 0, sizeof(edge_compares));
+	memset(edge_delta_bins, 0, sizeof(edge_delta_bins));
+	memset(edge_near_delta_bins, 0, sizeof(edge_near_delta_bins));
+	memset(edge_packet_bins, 0, sizeof(edge_packet_bins));
+	memset(edge_mismatch_y, 0, sizeof(edge_mismatch_y));
+	memset(edge_delta_sum, 0, sizeof(edge_delta_sum));
+	memset(edge_delta_max, 0, sizeof(edge_delta_max));
+	edge_table_overflow = 0;
+	edge_samples = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
@@ -1476,8 +1527,225 @@ void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 	packet_vertex_count = 0;
 }
 
+static unsigned pgxp_diag_edge_delta_bin(float delta)
+{
+	if (delta <= 1.0e-6f)
+		return 0;
+	if (delta <= (1.0f / 64.0f))
+		return 1;
+	if (delta <= (1.0f / 8.0f))
+		return 2;
+	if (delta <= 0.25f)
+		return 3;
+	if (delta <= 0.5f)
+		return 4;
+	if (delta <= 1.0f)
+		return 5;
+	return 6;
+}
+
+static unsigned pgxp_diag_edge_packet_bin(uint64_t gap)
+{
+	if (gap <= 1)
+		return 0;
+	if (gap <= 4)
+		return 1;
+	if (gap <= 16)
+		return 2;
+	if (gap <= 64)
+		return 3;
+	if (gap <= 256)
+		return 4;
+	return 5;
+}
+
+static PGXP_diag_edge* pgxp_diag_find_edge(int32_t x0, int32_t y0,
+		int32_t x1, int32_t y1)
+{
+	uint32_t hash = UINT32_C(2166136261);
+	unsigned probe;
+
+#define PGXP_EDGE_HASH_VALUE(value) do { \
+	hash = (hash ^ (uint32_t)(value)) * UINT32_C(16777619); \
+} while (0)
+	PGXP_EDGE_HASH_VALUE(x0);
+	PGXP_EDGE_HASH_VALUE(y0);
+	PGXP_EDGE_HASH_VALUE(x1);
+	PGXP_EDGE_HASH_VALUE(y1);
+#undef PGXP_EDGE_HASH_VALUE
+
+	for (probe = 0; probe < PGXP_DIAG_EDGE_SLOTS; probe++)
+	{
+		PGXP_diag_edge* edge = &edge_table[
+			(hash + probe) & (PGXP_DIAG_EDGE_SLOTS - 1)];
+		if (!edge->valid[0] && !edge->valid[1])
+		{
+			edge->native_x[0] = x0;
+			edge->native_y[0] = y0;
+			edge->native_x[1] = x1;
+			edge->native_y[1] = y1;
+			return edge;
+		}
+		if (edge->native_x[0] == x0 && edge->native_y[0] == y0 &&
+		    edge->native_x[1] == x1 && edge->native_y[1] == y1)
+			return edge;
+	}
+
+	edge_table_overflow++;
+	return NULL;
+}
+
+static void pgxp_diag_compare_edge(const PGXP_diag_edge* edge,
+		unsigned previous_class, unsigned current_class,
+		float current_x0, float current_y0,
+		float current_x1, float current_y1,
+		uint64_t current_packet, uint8_t current_opcode,
+		int current_gouraud, int current_invalid_w,
+		unsigned upscale_shift)
+{
+	static const char* const kind_name[PGXP_DIAG_EDGE_KINDS] = {
+		"uu", "ut", "tt"
+	};
+	unsigned kind;
+	unsigned delta_bin;
+	unsigned packet_bin;
+	unsigned y_band;
+	float scale = (float)(1u << upscale_shift);
+	float inv_scale = 1.0f / scale;
+	float delta[4];
+	float max_delta;
+	float average_y;
+	uint64_t gap;
+
+	if (edge->packet[previous_class] == current_packet)
+		return;
+
+	kind = previous_class == current_class ?
+		(current_class ? 2u : 0u) : 1u;
+	delta[0] = fabsf(edge->precise_x[previous_class][0] - current_x0) *
+		inv_scale;
+	delta[1] = fabsf(edge->precise_y[previous_class][0] - current_y0) *
+		inv_scale;
+	delta[2] = fabsf(edge->precise_x[previous_class][1] - current_x1) *
+		inv_scale;
+	delta[3] = fabsf(edge->precise_y[previous_class][1] - current_y1) *
+		inv_scale;
+	max_delta = delta[0];
+	if (delta[1] > max_delta) max_delta = delta[1];
+	if (delta[2] > max_delta) max_delta = delta[2];
+	if (delta[3] > max_delta) max_delta = delta[3];
+	delta_bin = pgxp_diag_edge_delta_bin(max_delta);
+	gap = edge->packet[previous_class] > current_packet ?
+		edge->packet[previous_class] - current_packet :
+		current_packet - edge->packet[previous_class];
+	packet_bin = pgxp_diag_edge_packet_bin(gap);
+	average_y = ((float)edge->native_y[0] +
+		(float)edge->native_y[1]) * 0.5f * inv_scale;
+	y_band = average_y < 64.0f ? 0u : average_y < 128.0f ? 1u :
+		average_y < 192.0f ? 2u : 3u;
+
+	edge_compares[kind]++;
+	edge_delta_bins[kind][delta_bin]++;
+	if (gap <= 64)
+		edge_near_delta_bins[kind][delta_bin]++;
+	edge_packet_bins[kind][packet_bin]++;
+	edge_delta_sum[kind] += max_delta;
+	if (max_delta > edge_delta_max[kind])
+		edge_delta_max[kind] = max_delta;
+	if (delta_bin >= 2)
+		edge_mismatch_y[kind][y_band]++;
+
+	if (delta_bin < 2 || !log_cb || edge_samples >= PGXP_DIAG_EDGE_SAMPLES)
+		return;
+	edge_samples++;
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_edge_mismatch] n=%u mf=%u kind=%s "
+		"prev=%llu/%02x curr=%llu/%02x native=%d/%d-%d/%d scale=%u "
+		"prev_xy=%.4f/%.4f-%.4f/%.4f "
+		"curr_xy=%.4f/%.4f-%.4f/%.4f delta=%.6f gap=%llu "
+		"g=%u/%u invalid_w=%u/%u\n",
+		edge_samples, mode_frame, kind_name[kind],
+		(unsigned long long)edge->packet[previous_class],
+		edge->opcode[previous_class],
+		(unsigned long long)current_packet, current_opcode,
+		edge->native_x[0], edge->native_y[0],
+		edge->native_x[1], edge->native_y[1], 1u << upscale_shift,
+		edge->precise_x[previous_class][0] * inv_scale,
+		edge->precise_y[previous_class][0] * inv_scale,
+		edge->precise_x[previous_class][1] * inv_scale,
+		edge->precise_y[previous_class][1] * inv_scale,
+		current_x0 * inv_scale, current_y0 * inv_scale,
+		current_x1 * inv_scale, current_y1 * inv_scale,
+		max_delta, (unsigned long long)gap,
+		edge->gouraud[previous_class], current_gouraud != 0,
+		edge->invalid_w[previous_class], current_invalid_w != 0);
+}
+
+static void pgxp_diag_observe_edges(
+		const PGXP_diag_primitive_vertex vertices[3],
+		int textured, int gouraud, int invalid_w, unsigned upscale_shift)
+{
+	unsigned i;
+	unsigned current_class = textured != 0;
+
+	if (edge_table_frame != mode_frame)
+	{
+		memset(edge_table, 0, sizeof(edge_table));
+		edge_table_frame = mode_frame;
+	}
+
+	for (i = 0; i < 3; i++)
+	{
+		unsigned j = (i + 1) % 3;
+		int32_t x0 = vertices[i].native_x;
+		int32_t y0 = vertices[i].native_y;
+		int32_t x1 = vertices[j].native_x;
+		int32_t y1 = vertices[j].native_y;
+		float px0 = vertices[i].precise_after_x;
+		float py0 = vertices[i].precise_after_y;
+		float px1 = vertices[j].precise_after_x;
+		float py1 = vertices[j].precise_after_y;
+		PGXP_diag_edge* edge;
+
+		if (x0 == x1 && y0 == y1)
+			continue;
+		if (x1 < x0 || (x1 == x0 && y1 < y0))
+		{
+			int32_t temp_i;
+			float temp_f;
+			temp_i = x0; x0 = x1; x1 = temp_i;
+			temp_i = y0; y0 = y1; y1 = temp_i;
+			temp_f = px0; px0 = px1; px1 = temp_f;
+			temp_f = py0; py0 = py1; py1 = temp_f;
+		}
+
+		edge_observations[current_class]++;
+		edge = pgxp_diag_find_edge(x0, y0, x1, y1);
+		if (!edge)
+			continue;
+		if (edge->valid[current_class])
+			pgxp_diag_compare_edge(edge, current_class, current_class,
+				px0, py0, px1, py1, current_packet, current_opcode,
+				gouraud, invalid_w, upscale_shift);
+		if (edge->valid[!current_class])
+			pgxp_diag_compare_edge(edge, !current_class, current_class,
+				px0, py0, px1, py1, current_packet, current_opcode,
+				gouraud, invalid_w, upscale_shift);
+
+		edge->precise_x[current_class][0] = px0;
+		edge->precise_y[current_class][0] = py0;
+		edge->precise_x[current_class][1] = px1;
+		edge->precise_y[current_class][1] = py1;
+		edge->packet[current_class] = current_packet;
+		edge->opcode[current_class] = current_opcode;
+		edge->gouraud[current_class] = gouraud != 0;
+		edge->invalid_w[current_class] = invalid_w != 0;
+		edge->valid[current_class] = 1;
+	}
+}
+
 void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
-		int invalid_w, int tolerance)
+		int invalid_w, int tolerance, unsigned upscale_shift)
 {
 	int textured = !!(current_opcode & 0x04);
 	int gouraud = !!(current_opcode & 0x10);
@@ -1495,6 +1763,8 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	primitive_total++;
 	primitive_class[textured][gouraud][invalid_w != 0]++;
 	primitive_y_band[y_band]++;
+	pgxp_diag_observe_edges(vertices, textured, gouraud, invalid_w,
+		upscale_shift);
 	for (i = 0; i < 3; i++)
 	{
 		if (i < packet_vertex_count &&
@@ -2948,6 +3218,60 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)primitive_sra_vertices,
 		(unsigned long long)primitive_tolerance_reverts);
 	log_cb(RETRO_LOG_INFO,
+		"[pgxp_edge_summary] f=%llu observed=%llu/%llu "
+		"compared_uu_ut_tt=%llu/%llu/%llu overflow=%llu samples=%u "
+		"probe=gl_opaque_textured_native\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)edge_observations[0],
+		(unsigned long long)edge_observations[1],
+		(unsigned long long)edge_compares[0],
+		(unsigned long long)edge_compares[1],
+		(unsigned long long)edge_compares[2],
+		(unsigned long long)edge_table_overflow, edge_samples);
+	{
+		static const char* const edge_kind_name[PGXP_DIAG_EDGE_KINDS] = {
+			"uu", "ut", "tt"
+		};
+		unsigned kind;
+		for (kind = 0; kind < PGXP_DIAG_EDGE_KINDS; kind++)
+		{
+			double mean = edge_compares[kind] ?
+				edge_delta_sum[kind] / (double)edge_compares[kind] : 0.0;
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_edge_kind] f=%llu kind=%s "
+				"delta=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"near_delta=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"packet=%llu/%llu/%llu/%llu/%llu/%llu "
+				"mismatch_y=%llu/%llu/%llu/%llu mean=%.6f max=%.6f\n",
+				(unsigned long long)frame_number, edge_kind_name[kind],
+				(unsigned long long)edge_delta_bins[kind][0],
+				(unsigned long long)edge_delta_bins[kind][1],
+				(unsigned long long)edge_delta_bins[kind][2],
+				(unsigned long long)edge_delta_bins[kind][3],
+				(unsigned long long)edge_delta_bins[kind][4],
+				(unsigned long long)edge_delta_bins[kind][5],
+				(unsigned long long)edge_delta_bins[kind][6],
+				(unsigned long long)edge_near_delta_bins[kind][0],
+				(unsigned long long)edge_near_delta_bins[kind][1],
+				(unsigned long long)edge_near_delta_bins[kind][2],
+				(unsigned long long)edge_near_delta_bins[kind][3],
+				(unsigned long long)edge_near_delta_bins[kind][4],
+				(unsigned long long)edge_near_delta_bins[kind][5],
+				(unsigned long long)edge_near_delta_bins[kind][6],
+				(unsigned long long)edge_packet_bins[kind][0],
+				(unsigned long long)edge_packet_bins[kind][1],
+				(unsigned long long)edge_packet_bins[kind][2],
+				(unsigned long long)edge_packet_bins[kind][3],
+				(unsigned long long)edge_packet_bins[kind][4],
+				(unsigned long long)edge_packet_bins[kind][5],
+				(unsigned long long)edge_mismatch_y[kind][0],
+				(unsigned long long)edge_mismatch_y[kind][1],
+				(unsigned long long)edge_mismatch_y[kind][2],
+				(unsigned long long)edge_mismatch_y[kind][3],
+				mean, edge_delta_max[kind]);
+		}
+	}
+	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
 		"age=%llu/%llu/%llu/%llu/%llu ambiguous=%llu used=%llu "
 		"misses=%llu "
@@ -3204,6 +3528,15 @@ void PGXP_DiagFrame(int backend)
 	memset(primitive_native_reason, 0, sizeof(primitive_native_reason));
 	memset(primitive_native_sra5_reason, 0,
 		sizeof(primitive_native_sra5_reason));
+	memset(edge_observations, 0, sizeof(edge_observations));
+	memset(edge_compares, 0, sizeof(edge_compares));
+	memset(edge_delta_bins, 0, sizeof(edge_delta_bins));
+	memset(edge_near_delta_bins, 0, sizeof(edge_near_delta_bins));
+	memset(edge_packet_bins, 0, sizeof(edge_packet_bins));
+	memset(edge_mismatch_y, 0, sizeof(edge_mismatch_y));
+	memset(edge_delta_sum, 0, sizeof(edge_delta_sum));
+	memset(edge_delta_max, 0, sizeof(edge_delta_max));
+	edge_table_overflow = 0;
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
