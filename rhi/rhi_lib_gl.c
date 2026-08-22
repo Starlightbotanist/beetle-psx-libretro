@@ -971,6 +971,9 @@ struct gl_renderer {
    uint64_t submission_vertices;
    uint64_t submission_quads;
    uint64_t submission_invariant_failures;
+   uint64_t submission_w_samples;
+   float submission_w_min;
+   float submission_w_max;
    uint32_t submission_max_vertices;
    unsigned submission_frames;
    /* gl_texture window mask/OR values */
@@ -2818,7 +2821,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
       /* HD replacement texture lives on unit 1 */
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "hd_texture"), 1);
-      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "coverage_probe"), 1u);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "coverage_probe"), 0u);
    }
 
    /* Bind the out framebuffer */
@@ -5082,6 +5085,17 @@ static void vertex_preprocessing(
 
       for (i = 0; i < count; i++)
       {
+         float input_w = v[i].position[3];
+         if (!renderer->submission_w_samples)
+            renderer->submission_w_min = renderer->submission_w_max = input_w;
+         else
+         {
+            if (input_w < renderer->submission_w_min)
+               renderer->submission_w_min = input_w;
+            if (input_w > renderer->submission_w_max)
+               renderer->submission_w_max = input_w;
+         }
+         renderer->submission_w_samples++;
          v[i].position[2] = z;
          v[i].texture_window[0] = renderer->tex_x_mask;
          v[i].texture_window[1] = renderer->tex_x_or;
@@ -5463,8 +5477,8 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_coverage_probe] opaque_untextured=discarded all_other=normal "
-         "depth=enabled stencil=enabled scissor=enabled blend=normal "
+         "[pgxp_gl_w_probe] homogeneous_w=forced_one fragment=normal "
+         "requires_pct=off depth=enabled stencil=enabled scissor=enabled blend=normal "
          "submission=draw_arrays/expanded_quads "
          "subpixel_bits=%d\n",
          (int)subpixel_bits);
@@ -6142,19 +6156,26 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
       log_cb(RETRO_LOG_INFO,
             "[pgxp_gl_submission] frames=%u draw=arrays quads=expanded "
             "flushes=%llu batches=%llu vertices=%llu quads=%llu "
-            "max_vertices=%u invariant_failures=%llu\n",
+            "max_vertices=%u invariant_failures=%llu "
+            "input_w=%llu/%.9g/%.9g\n",
             renderer->submission_frames,
             (unsigned long long)renderer->submission_flushes,
             (unsigned long long)renderer->submission_batches,
             (unsigned long long)renderer->submission_vertices,
             (unsigned long long)renderer->submission_quads,
             renderer->submission_max_vertices,
-            (unsigned long long)renderer->submission_invariant_failures);
+            (unsigned long long)renderer->submission_invariant_failures,
+            (unsigned long long)renderer->submission_w_samples,
+            (double)renderer->submission_w_min,
+            (double)renderer->submission_w_max);
       renderer->submission_flushes = 0;
       renderer->submission_batches = 0;
       renderer->submission_vertices = 0;
       renderer->submission_quads = 0;
       renderer->submission_invariant_failures = 0;
+      renderer->submission_w_samples = 0;
+      renderer->submission_w_min = 0.0f;
+      renderer->submission_w_max = 0.0f;
       renderer->submission_max_vertices = 0;
       renderer->submission_frames = 0;
    }

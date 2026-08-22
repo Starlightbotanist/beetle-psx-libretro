@@ -58,7 +58,10 @@ void main() {
 
    // Convert VRAM coordinates (0;1023, 0;511) into OpenGL coordinates
    // (-1;1, -1;1)
-   float wpos = position.w;
+   // Diagnostic for PCT-off rendering: all valid PGXP vertices carry the
+   // same neutral homogeneous scale, so W=1 preserves NDC and affine
+   // interpolation while avoiding tiny clip-space coordinates in OpenGL.
+   float wpos = 1.0;
    float xpos = (pos.x / 512.) - 1.0;
    float ypos = (pos.y / 256.) - 1.0;
 
