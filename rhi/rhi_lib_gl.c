@@ -2851,7 +2851,11 @@ static void gl_renderer_draw(gl_renderer *renderer)
    glClear(GL_DEPTH_BUFFER_BIT);
 
    glStencilMask(1);
-   glEnable(GL_STENCIL_TEST);
+   /* Diagnostic: remove the mask-bit stencil buffer from both rejection and
+    * update. If the R4 roof returns, its PGXP geometry is reaching GL and a
+    * stale/over-wide mask footprint is suppressing it before the fragment
+    * shader. */
+   glDisable(GL_STENCIL_TEST);
 
    /* Bind and unmap the command buffer */
    glBindBuffer(GL_ARRAY_BUFFER, renderer->command_buffer->id);
@@ -5424,7 +5428,7 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_transparent_probe] zero_texel=magenta depth_test=enabled "
+         "[pgxp_gl_stencil_test] forced=disabled transparent_discard=enabled "
          "subpixel_bits=%d\n",
          (int)subpixel_bits);
 
