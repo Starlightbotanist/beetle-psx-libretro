@@ -2818,6 +2818,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
       /* HD replacement texture lives on unit 1 */
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "hd_texture"), 1);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "coverage_probe"), 1u);
    }
 
    /* Bind the out framebuffer */
@@ -2838,8 +2839,12 @@ static void gl_renderer_draw(gl_renderer *renderer)
 
    glClear(GL_DEPTH_BUFFER_BIT);
 
+   /* Maximum-coverage diagnostic: no fixed-function rejection may hide a
+    * primitive from the class-color fragment probe. */
+   glDisable(GL_DEPTH_TEST);
+   glDisable(GL_SCISSOR_TEST);
    glStencilMask(1);
-   glEnable(GL_STENCIL_TEST);
+   glDisable(GL_STENCIL_TEST);
 
    renderer->submission_flushes++;
    renderer->submission_batches += renderer->batches.count;
@@ -3021,6 +3026,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
          }
          else if (um)
             glUniform1ui(gl_uniform_map_get(um, "hd_enabled"), 0u);
+
+      /* Maximum-coverage diagnostic: make every class color an overwrite,
+       * including batches normally submitted through a blend pass. */
+      glDisable(GL_BLEND);
 
       /* Drawing */
       if (!gl_draw_buffer_is_empty(renderer->command_buffer))
@@ -5460,8 +5469,9 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_coverage_probe] opaque_textured=cyan depth_test=enabled "
-         "stencil_test=enabled submission=draw_arrays/expanded_quads "
+         "[pgxp_gl_coverage_probe] classes=OT:cyan/OU:magenta/ST:yellow/SU:green "
+         "depth=disabled stencil=disabled scissor=disabled blend=disabled "
+         "submission=draw_arrays/expanded_quads "
          "subpixel_bits=%d\n",
          (int)subpixel_bits);
 

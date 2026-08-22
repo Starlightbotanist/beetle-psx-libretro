@@ -43,6 +43,10 @@ uniform uint pgxp_fog;
 // equation MAX against zero restores the hardware floor).
 uniform uint force_zero;
 
+// Diagnostic gate used to retain and compile-check the normal fragment path
+// while the maximum-coverage test returns primitive-class colors.
+uniform uint coverage_probe;
+
 // 0: Only draw opaque pixels, 1: only draw semi-transparent pixels
 uniform uint draw_semi_transparent;
 
@@ -1023,18 +1027,29 @@ vec4 get_texel_jinc2(out float opacity)
 #endif
 STRINGIZE(
 void main() {
-   if (force_zero != 0u) {
-      frag_color = vec4(0.);
+   // Maximum-coverage diagnostic. Every command-fragment invocation returns
+   // a solid class color before texture sampling, transparency/discard,
+   // shading, or the subtractive zero-floor branch. Fixed-function blending
+   // is disabled by the caller, so the final pixel names the last primitive
+   // class that actually covered it:
+   //   opaque textured       = cyan
+   //   opaque untextured     = magenta
+   //   semi-transparent tex  = yellow
+   //   semi-transparent raw  = green
+   if (coverage_probe != 0U) {
+      bool diagnostic_textured =
+         frag_texture_blend_mode != BLEND_MODE_NO_TEXTURE;
+      if (frag_semi_transparent != 0U)
+         frag_color = diagnostic_textured
+            ? vec4(1., 1., 0., 1.) : vec4(0., 1., 0., 1.);
+      else
+         frag_color = diagnostic_textured
+            ? vec4(0., 1., 1., 1.) : vec4(1., 0., 1., 1.);
       return;
    }
 
-   // Diagnostic: bypass texture fetches, transparency tests, modulation, and
-   // filtering for opaque textured primitives. If a missing R4 tunnel-roof
-   // region is covered by submitted geometry, it must appear cyan; a hole in
-   // the cyan silhouette therefore originates before fragment shading.
-   if (frag_texture_blend_mode != BLEND_MODE_NO_TEXTURE &&
-         frag_semi_transparent == 0U) {
-      frag_color = vec4(0., 1., 1., 1.);
+   if (force_zero != 0u) {
+      frag_color = vec4(0.);
       return;
    }
 
