@@ -984,12 +984,7 @@ struct gl_renderer {
    bool fb_out_fp16;
    /* Counter for preserving primitive draw order in the z-buffer
     * since we draw semi-transparent primitives out-of-order. */
-   uint32_t primitive_ordering;
-   /* Vulkan-parity primitive-depth field-test counters. */
-   uint64_t depth_primitives;
-   uint64_t depth_flushes;
-   uint32_t depth_max_batch;
-   unsigned depth_diag_frames;
+   int16_t primitive_ordering;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -2824,13 +2819,6 @@ static void gl_renderer_draw(gl_renderer *renderer)
       return;
    }
 
-   if (renderer->primitive_ordering)
-   {
-      renderer->depth_flushes++;
-      if (renderer->primitive_ordering > renderer->depth_max_batch)
-         renderer->depth_max_batch = renderer->primitive_ordering;
-   }
-
    x = renderer->config.draw_offset[0];
    y = renderer->config.draw_offset[1];
 
@@ -3017,8 +3005,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
           * shader forced to emit vec4(0): max(dst, 0) after a contiguous
           * subtractive run is algebraically identical to hardware's
           * per-primitive floor (once the running value would clamp,
-          * every further subtraction keeps both forms at zero). Disable
-          * depth for this immediate redraw, matching Vulkan's floor pass;
+          * every further subtraction keeps both forms at zero). Depth is
+          * LEQUAL so the redraw passes against its own depth writes;
           * alpha (the mask bit) is preserved via ZERO/ONE ADD; stencil
           * writes are masked off so set_mask state cannot double-apply. */
          if (renderer->fb_out_fp16 && !it->opaque &&
@@ -3029,10 +3017,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
             glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
             glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
             glStencilMask(0);
-            glDisable(GL_DEPTH_TEST);
             glDrawElements(it->draw_mode, it->count, GL_UNSIGNED_SHORT,
                            (GLvoid*)(it->first * sizeof(GLushort)));
-            glEnable(GL_DEPTH_TEST);
             glStencilMask(1);
             glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "force_zero"), 0u);
          }
@@ -5051,12 +5037,9 @@ static void vertex_preprocessing(
    }
 
    {
-      float z;
+      int16_t z = renderer->primitive_ordering;
       unsigned i;
       renderer->primitive_ordering += 1;
-      renderer->depth_primitives += 1;
-      z = 1.0f - (float)renderer->primitive_ordering *
-         (4.0f / 16777215.0f);
 
       for (i = 0; i < count; i++)
       {
@@ -5354,6 +5337,7 @@ static void gl_caps_init(void)
    const GLubyte *gl_version_str;
    const GLubyte *gl_vendor_str;
    const GLubyte *gl_renderer_str;
+   GLint subpixel_bits = 0;
 
    memset(&gl_caps, 0, sizeof(gl_caps));
 
@@ -5361,6 +5345,7 @@ static void gl_caps_init(void)
    gl_version_str  = glGetString(GL_VERSION);
    gl_vendor_str   = glGetString(GL_VENDOR);
    gl_renderer_str = glGetString(GL_RENDERER);
+   glGetIntegerv(GL_SUBPIXEL_BITS, &subpixel_bits);
 
    gl_caps.version_string = gl_version_str  ? (const char *)gl_version_str  : "(unknown)";
    gl_caps.vendor         = gl_vendor_str   ? (const char *)gl_vendor_str   : "(unknown)";
@@ -5438,6 +5423,9 @@ static void gl_caps_init(void)
    log_cb(RETRO_LOG_INFO,
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
+   log_cb(RETRO_LOG_INFO,
+         "[pgxp_gl_raster_bias] ndc_y=-0.000010 subpixel_bits=%d\n",
+         (int)subpixel_bits);
 
    /* Floor check.  Beetle's GL renderer needs VAOs (3.0+ core),
     * separate read/draw FBO bindings (3.0+), glMapBufferRange
@@ -6018,7 +6006,7 @@ void rhi_gl_prepare_frame(void)
    glLineWidth((GLfloat)renderer->internal_upscaling);
    glEnable(GL_SCISSOR_TEST);
    glEnable(GL_DEPTH_TEST);
-   glDepthFunc(GL_LESS);
+   glDepthFunc(GL_LEQUAL);
    /* Used for PSX GPU command blending */
    glBlendColor(0.25, 0.25, 0.25, 0.5);
 
@@ -6106,21 +6094,6 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    /* Draw pending commands */
    if (!gl_draw_buffer_is_empty(renderer->command_buffer))
       gl_renderer_draw(renderer);
-
-   if (++renderer->depth_diag_frames >= 60)
-   {
-      log_cb(RETRO_LOG_INFO,
-            "[pgxp_gl_depth_order] frames=%u primitives=%llu flushes=%llu "
-            "max_batch=%u compare=LESS step=4/ffffff\n",
-            renderer->depth_diag_frames,
-            (unsigned long long)renderer->depth_primitives,
-            (unsigned long long)renderer->depth_flushes,
-            renderer->depth_max_batch);
-      renderer->depth_primitives = 0;
-      renderer->depth_flushes = 0;
-      renderer->depth_max_batch = 0;
-      renderer->depth_diag_frames = 0;
-   }
 
    /* Shared HD texture tracker frame boundary: process decoded IO
     * responses, rebuild dirty fused pages, run the LRU budgets and the

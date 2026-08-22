@@ -60,12 +60,17 @@ void main() {
    // (-1;1, -1;1)
    float wpos = position.w;
    float xpos = (pos.x / 512.) - 1.0;
-   float ypos = (pos.y / 256.) - 1.0;
+   /* SwanStation offsets OpenGL Y very slightly to compensate for the
+    * lower-left-origin rasterisation mismatch. Its clip-space Y is the
+    * inverse of ours, so the equivalent bias here has the opposite sign. */
+   float ypos = (pos.y / 256.) - 1.0 - 0.00001;
 
-   // position.z is allocated in Vulkan's [0,1] depth scale. OpenGL NDC is
-   // [-1,1], so remap it here to produce the same window-depth value.
-   float zpos = position.z * 2.0 - 1.0;
+   // position.z increases as the primitives near the camera so we
+   // reverse the order to match the common GL convention
+   float zpos = 1.0 - (position.z / 32768.);
+
    gl_Position.xyzw = vec4(xpos * wpos, ypos * wpos, zpos * wpos, wpos);
+   //gl_Position.xyzw = vec4(xpos, ypos, zpos, 1.);
 
    // Glium doesn't support 'normalized' for now
    /* Already in 0..1+ scale (1.0 == 0xFF). May exceed 1.0 when the PGXP
