@@ -261,26 +261,6 @@ static void gl_normalize_inherited_state(void)
 #include "libretro.h"
 #include "libretro_options.h"
 
-/* Quad triangulation order.
- *
- * A PSX quad is rendered as two triangles sharing one diagonal.
- * The choice of which diagonal-vertex pair to duplicate produced
- * visible seams along the shared edge on Apple desktop GL and
- * some GLES3 drivers when "{0,1,2,1,2,3}" was used; "{0,1,2,2,1,3}"
- * was reported to fix it.  Backface culling is disabled for the
- * PSX renderer so the winding direction does not affect
- * visibility, only rasteriser fill convention along the diagonal.
- *
- * This is unrelated to the runtime gl_caps detection introduced
- * below; it stays a build-time choice because the difference is
- * driver-rasteriser-specific and not safe to consolidate without
- * cross-platform visual testing. */
-#if defined(__APPLE__) || defined(HAVE_OPENGLES3)
-static const GLushort indices[6] = {0, 1, 2, 2, 1, 3};
-#else
-static const GLushort indices[6] = {0, 1, 2, 1, 2, 3};
-#endif
-
 /* === GL capability bookkeeping ============================
  *
  * Populated once at context_reset by gl_caps_init().  Call sites
@@ -985,6 +965,14 @@ struct gl_renderer {
    /* Counter for preserving primitive draw order in the z-buffer
     * since we draw semi-transparent primitives out-of-order. */
    int16_t primitive_ordering;
+   /* Diagnostic counters for the linear, draw-arrays submission probe. */
+   uint64_t submission_flushes;
+   uint64_t submission_batches;
+   uint64_t submission_vertices;
+   uint64_t submission_quads;
+   uint64_t submission_invariant_failures;
+   uint32_t submission_max_vertices;
+   unsigned submission_frames;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -2853,12 +2841,46 @@ static void gl_renderer_draw(gl_renderer *renderer)
    glStencilMask(1);
    glEnable(GL_STENCIL_TEST);
 
+   renderer->submission_flushes++;
+   renderer->submission_batches += renderer->batches.count;
+   renderer->submission_vertices += renderer->command_buffer->map_index;
+   if (renderer->command_buffer->map_index > renderer->submission_max_vertices)
+      renderer->submission_max_vertices = (uint32_t)renderer->command_buffer->map_index;
+   if (renderer->vertex_index_pos != renderer->command_buffer->map_index)
+   {
+      renderer->submission_invariant_failures++;
+      if (renderer->submission_invariant_failures <= 8)
+         log_cb(RETRO_LOG_ERROR,
+               "[pgxp_gl_submission_error] indices=%u vertices=%u map_start=%u\n",
+               (unsigned)renderer->vertex_index_pos,
+               (unsigned)renderer->command_buffer->map_index,
+               (unsigned)renderer->command_buffer->map_start);
+   }
+   else
+   {
+      size_t si;
+      for (si = 0; si < renderer->vertex_index_pos; si++)
+      {
+         GLushort expected = (GLushort)(renderer->command_buffer->map_start + si);
+         if (renderer->vertex_indices[si] != expected)
+         {
+            renderer->submission_invariant_failures++;
+            if (renderer->submission_invariant_failures <= 8)
+               log_cb(RETRO_LOG_ERROR,
+                     "[pgxp_gl_submission_error] stream=%u actual=%u expected=%u\n",
+                     (unsigned)si,
+                     (unsigned)renderer->vertex_indices[si],
+                     (unsigned)expected);
+            break;
+         }
+      }
+   }
+
    /* Bind and unmap the command buffer */
    glBindBuffer(GL_ARRAY_BUFFER, renderer->command_buffer->id);
    glUnmapBuffer(GL_ARRAY_BUFFER);
 
-   /* The VAO needs to be bound here or the glDrawElements calls
-    * will error out on some systems */
+   /* Bind the VAO containing the command-buffer vertex layout. */
    glBindVertexArray(renderer->command_buffer->vao);
 
    renderer->command_buffer->map = NULL;
@@ -2869,12 +2891,24 @@ static void gl_renderer_draw(gl_renderer *renderer)
       last->count = renderer->vertex_index_pos - last->first;
    }
 
-   /* Upload index data to EBO (required for core profile - client-side
-    * index pointers are not allowed) */
-   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, renderer->index_buffer);
-   glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0,
-                   renderer->vertex_index_pos * sizeof(GLushort),
-                   renderer->vertex_indices);
+   {
+      size_t bi;
+      for (bi = 0; bi < renderer->batches.count; bi++)
+      {
+         const struct gl_primitive_batch *batch = &renderer->batches.items[bi];
+         if (batch->first > renderer->command_buffer->map_index ||
+             batch->count > renderer->command_buffer->map_index - batch->first)
+         {
+            renderer->submission_invariant_failures++;
+            if (renderer->submission_invariant_failures <= 8)
+               log_cb(RETRO_LOG_ERROR,
+                     "[pgxp_gl_submission_error] batch=%u first=%u count=%u vertices=%u\n",
+                     (unsigned)bi, (unsigned)batch->first,
+                     (unsigned)batch->count,
+                     (unsigned)renderer->command_buffer->map_index);
+         }
+      }
+   }
 
    {
       size_t bi;
@@ -2995,8 +3029,9 @@ static void gl_renderer_draw(gl_renderer *renderer)
           * must be handled by the caller. This is because this command
           * can be called several times on the same buffer (i.e. multiple
           * draw calls between the prepare/finalize) */
-         glDrawElements(it->draw_mode, it->count, GL_UNSIGNED_SHORT,
-                        (GLvoid*)(it->first * sizeof(GLushort)));
+         glDrawArrays(it->draw_mode,
+               (GLint)(renderer->command_buffer->map_start + it->first),
+               (GLsizei)it->count);
 
          /* Zero-floor pass for subtractive blending on the fp16 target.
           * GL_FUNC_REVERSE_SUBTRACT clamps at zero on a UNORM attachment
@@ -3017,8 +3052,9 @@ static void gl_renderer_draw(gl_renderer *renderer)
             glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
             glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
             glStencilMask(0);
-            glDrawElements(it->draw_mode, it->count, GL_UNSIGNED_SHORT,
-                           (GLvoid*)(it->first * sizeof(GLushort)));
+            glDrawArrays(it->draw_mode,
+                  (GLint)(renderer->command_buffer->map_start + it->first),
+                  (GLsizei)it->count);
             glStencilMask(1);
             glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "force_zero"), 0u);
          }
@@ -5425,7 +5461,8 @@ static void gl_caps_init(void)
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
          "[pgxp_gl_coverage_probe] opaque_textured=cyan depth_test=enabled "
-         "stencil_test=enabled subpixel_bits=%d\n",
+         "stencil_test=enabled submission=draw_arrays/expanded_quads "
+         "subpixel_bits=%d\n",
          (int)subpixel_bits);
 
    /* Floor check.  Beetle's GL renderer needs VAOs (3.0+ core),
@@ -6096,6 +6133,28 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    if (!gl_draw_buffer_is_empty(renderer->command_buffer))
       gl_renderer_draw(renderer);
 
+   if (++renderer->submission_frames >= 60)
+   {
+      log_cb(RETRO_LOG_INFO,
+            "[pgxp_gl_submission] frames=%u draw=arrays quads=expanded "
+            "flushes=%llu batches=%llu vertices=%llu quads=%llu "
+            "max_vertices=%u invariant_failures=%llu\n",
+            renderer->submission_frames,
+            (unsigned long long)renderer->submission_flushes,
+            (unsigned long long)renderer->submission_batches,
+            (unsigned long long)renderer->submission_vertices,
+            (unsigned long long)renderer->submission_quads,
+            renderer->submission_max_vertices,
+            (unsigned long long)renderer->submission_invariant_failures);
+      renderer->submission_flushes = 0;
+      renderer->submission_batches = 0;
+      renderer->submission_vertices = 0;
+      renderer->submission_quads = 0;
+      renderer->submission_invariant_failures = 0;
+      renderer->submission_max_vertices = 0;
+      renderer->submission_frames = 0;
+   }
+
    /* Shared HD texture tracker frame boundary: process decoded IO
     * responses, rebuild dirty fused pages, run the LRU budgets and the
     * debug hotkeys. Runs after the final flush so every handle handed
@@ -6665,11 +6724,6 @@ void rhi_gl_push_quad(
    gl_renderer *renderer;
    gl_semi_transparency_mode semi_transparency_mode = SEMI_TRANSPARENCY_MODE_ADD;
    bool semi_transparent     = false;
-   bool is_semi_transparent;
-   bool is_textured;
-   unsigned index;
-   unsigned index_pos;
-   unsigned i;
 
    if (static_renderer.state == GL_STATE_INVALID)
       return;
@@ -6779,28 +6833,21 @@ void rhi_gl_push_quad(
               v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
 
       gl_vram_sync_primitive(renderer, v, 4);
-      is_semi_transparent = v[0].semi_transparent == 1;
-      is_textured         = v[0].texture_blend_mode != 0;
-
       {
-         /* Per-primitive HD replacement query (see push_primitive). */
-         HdTextureHandle hd = gl_tt_query_hd(renderer, v);
-         vertex_preprocessing(renderer, v, 4,
-               GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask, hd);
+         /* Match Vulkan's quad submission exactly: two independent triangles
+          * in 0,1,2 / 3,2,1 order. Together with glDrawArrays this removes
+          * the GL-only shared-index reconstruction from the coverage test. */
+         gl_command_vertex expanded[6];
+         expanded[0] = v[0];
+         expanded[1] = v[1];
+         expanded[2] = v[2];
+         expanded[3] = v[3];
+         expanded[4] = v[2];
+         expanded[5] = v[1];
+         renderer->submission_quads++;
+         push_primitive(renderer, expanded, 6, GL_TRIANGLES,
+               semi_transparency_mode, mask_test, set_mask);
       }
-
-      index     = gl_draw_buffer_next_index(renderer->command_buffer);
-      index_pos = renderer->vertex_index_pos;
-
-      for (i = 0; i < 6; i++)
-         renderer->vertex_indices[renderer->vertex_index_pos++] = index + indices[i];
-
-      /* Add transparent pass if needed */
-      if (is_semi_transparent && is_textured)
-         vertex_add_blended_pass(renderer, index_pos);
-
-      gl_draw_buffer_push_slice(renderer->command_buffer, v, 4,
-            sizeof(gl_command_vertex));
    }
 }
 
