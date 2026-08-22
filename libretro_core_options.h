@@ -865,7 +865,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP OpenGL Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Change one mode at a time while the same scene remains visible. 'Off' records data without changing geometry. Native Boundary and Broad Replay are positive/unsafe controls; the coverage-gated modes change only candidates whose local GL pixel model improves or closes completely.",
+      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Modes 1-14 are the completed geometry-repair matrix. Modes 15-22 test concrete OpenGL/Vulkan raster differences without changing the submitted mesh: SwanStation's Y epsilon, explicit quantisation to the driver's reported subpixel grid, a half-subpixel Y phase, and upper-left clip-origin parity when supported.",
       NULL,
       "pgxp",
       {
@@ -884,6 +884,14 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "perp point closed",      "12: Perpendicular Closed - Junction Only" },
          { "perp improved material", "13: Perpendicular Improved - Same Material" },
          { "perp closed material",   "14: Perpendicular Closed - Same Material" },
+         { "swan y +1e-5",          "15: SwanStation Y Epsilon (+1e-5 NDC)" },
+         { "swan y -1e-5",          "16: Reverse Y Epsilon (-1e-5 NDC)" },
+         { "subpixel nearest",       "17: Reported Subpixel Grid - Nearest" },
+         { "subpixel floor",         "18: Reported Subpixel Grid - Floor" },
+         { "subpixel y phase",       "19: Half-Subpixel Y Phase" },
+         { "upper-left parity",      "20: Upper-Left Clip-Origin Parity" },
+         { "upper-left swan",        "21: Upper-Left Parity + Swan Epsilon" },
+         { "upper-left nearest",     "22: Upper-Left Parity + Grid Nearest" },
          { NULL, NULL },
       },
       "off"

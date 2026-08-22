@@ -226,6 +226,8 @@ static void run_interior_mode(unsigned mode, test_vertex stream[6])
 static void test_runtime_mode_matrix(void)
 {
 	test_vertex stream[6];
+	unsigned mode;
+	char label[96];
 
 	puts("[R4] runtime seam-test modes obey coverage and link-kind gates");
 	run_endpoint_mode(PGXP_DIAG_GL_TEST_OFF, 19.25f, 19.25f, stream);
@@ -283,6 +285,23 @@ static void test_runtime_mode_matrix(void)
 	expect_near("native-t endpoint rejects interior", stream[3].position[1], 19.25f);
 	run_interior_mode(PGXP_DIAG_GL_TEST_PERP_CLOSED_INTERIOR, stream);
 	expect_near("perpendicular interior accepts interior", stream[3].position[1], 20.0f);
+	for (mode = PGXP_DIAG_GL_TEST_SWAN_Y_POS;
+	     mode < PGXP_DIAG_GL_TEST_COUNT; mode++)
+	{
+		run_endpoint_mode(mode, 19.25f, 19.25f, stream);
+		snprintf(label, sizeof(label),
+			"raster mode %u leaves CPU point", mode);
+		expect_near(label, stream[3].position[1], 19.25f);
+		snprintf(label, sizeof(label),
+			"raster mode %u leaves CPU link", mode);
+		expect_near(label, stream[4].position[1], 19.25f);
+		if (PGXP_DiagGLGetMode() != mode)
+		{
+			printf("  FAIL raster mode getter: got %u expected %u\n",
+				PGXP_DiagGLGetMode(), mode);
+			failures++;
+		}
+	}
 	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OFF);
 	PGXP_DiagFrame(0);
 }

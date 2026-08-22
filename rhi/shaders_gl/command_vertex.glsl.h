@@ -25,6 +25,10 @@ in uint framebuffer_feedback;
 
 // Drawing offset
 uniform ivec2 offset;
+// Diagnostic-only OpenGL raster parity transform. Mode zero is the exact
+// release path. raster_grid is internal-scale * 2^GL_SUBPIXEL_BITS.
+uniform uint pgxp_raster_mode;
+uniform float pgxp_raster_grid;
 
 out vec3 frag_shading_color;
 out vec4 frag_fog;
@@ -56,11 +60,34 @@ STRINGIZE(
 void main() {
    vec2 pos = position.xy + vec2(offset);
 
+   // Modes 17/18/22 explicitly choose how precise PGXP positions land on
+   // the fixed-point grid which OpenGL reports through GL_SUBPIXEL_BITS.
+   // Mode 19 moves the sample phase by half of one such unit without
+   // changing relative geometry.
+   if (pgxp_raster_mode == 17U || pgxp_raster_mode == 22U)
+      pos = floor(pos * pgxp_raster_grid + vec2(0.5)) / pgxp_raster_grid;
+   else if (pgxp_raster_mode == 18U)
+      pos = floor(pos * pgxp_raster_grid) / pgxp_raster_grid;
+   else if (pgxp_raster_mode == 19U)
+      pos.y += 0.5 / pgxp_raster_grid;
+
    // Convert VRAM coordinates (0;1023, 0;511) into OpenGL coordinates
    // (-1;1, -1;1)
    float wpos = position.w;
    float xpos = (pos.x / 512.) - 1.0;
    float ypos = (pos.y / 256.) - 1.0;
+
+   // SwanStation carries a small OpenGL Y epsilon for driver raster parity.
+   // The upper-left modes negate clip-space Y while glClipControl changes
+   // the origin, leaving the physical framebuffer position unchanged but
+   // selecting the API's upper-left edge convention.
+   if (pgxp_raster_mode == 20U || pgxp_raster_mode == 21U ||
+       pgxp_raster_mode == 22U)
+      ypos = -ypos;
+   if (pgxp_raster_mode == 15U || pgxp_raster_mode == 21U)
+      ypos += 0.00001;
+   else if (pgxp_raster_mode == 16U)
+      ypos -= 0.00001;
 
    // position.z increases as the primitives near the camera so we
    // reverse the order to match the common GL convention

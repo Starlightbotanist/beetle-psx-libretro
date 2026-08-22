@@ -1,7 +1,8 @@
-/* Compiles and links every generated analog GL program in a real GL 3.3 core
- * context (EGL surfaceless; llvmpipe is fine - this checks the compiler, not
- * the pixels), then reports whether each declared uniform actually survived
- * linking.
+/* Compiles and links every generated analog GL program plus the command
+ * program in a real GL 3.3 core context (EGL surfaceless; llvmpipe is fine -
+ * this checks the compiler, not the pixels), then reports whether each
+ * declared uniform actually survived linking. Building with HAVE_OPENGLES3
+ * instead checks the command program in a GLES 3 context.
  *
  * A uniform that the linker drops is not necessarily a bug - GLSL removes
  * uniforms with no effect on the output - but a *program* that fails to
@@ -18,6 +19,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#ifndef HAVE_OPENGLES3
 #include "analog_vertex.glsl.h"
 #include "analog_downsample.glsl.h"
 #include "analog_encode.glsl.h"
@@ -34,6 +36,9 @@
 #include "analog_yc_pal.glsl.h"
 #include "analog_notch.glsl.h"
 #include "analog_notch_pal.glsl.h"
+#endif
+#include "command_vertex.glsl.h"
+#include "command_fragment.glsl.h"
 
 typedef unsigned int GLenum_, GLuint_;
 typedef int GLint_, GLsizei_;
@@ -81,13 +86,14 @@ static GLuint_ compile(const char *src, GLenum_ type, const char *label)
    return sh;
 }
 
-static void check(const char *name, const char *fs, const char **uniforms, int nu)
+static void check_pair(const char *name, const char *vs, const char *fs,
+                       const char **uniforms, int nu)
 {
    GLuint_ v, f, prog;
    GLint_ ok = 0, active = 0;
    int i, missing = 0;
 
-   v = compile(analog_vertex_glsl, GL_VERTEX_SHADER_, "analog.vert");
+   v = compile(vs, GL_VERTEX_SHADER_, name);
    f = compile(fs, GL_FRAGMENT_SHADER_, name);
    if (!v || !f)
       return;
@@ -125,6 +131,12 @@ static void check(const char *name, const char *fs, const char **uniforms, int n
    p_glDeleteShader(v);
    p_glDeleteShader(f);
    p_glDeleteProgram(prog);
+}
+
+#ifndef HAVE_OPENGLES3
+static void check(const char *name, const char *fs, const char **uniforms, int nu)
+{
+   check_pair(name, analog_vertex_glsl, fs, uniforms, nu);
 }
 
 /* Compute stages: same check, but they need a 4.3 context, so a failure here
@@ -170,6 +182,7 @@ static void check_compute(const char *name, const char *cs,
    p_glDeleteShader(c);
    p_glDeleteProgram(prog);
 }
+#endif
 
 int main(int argc, char **argv)
 {
@@ -177,14 +190,26 @@ int main(int argc, char **argv)
    EGLContext ctx;
    EGLConfig cfg;
    EGLint n = 0;
+#ifdef HAVE_OPENGLES3
+   static const EGLint cfg_attr[] = {
+      EGL_SURFACE_TYPE, 0, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_NONE
+   };
+#else
    static const EGLint cfg_attr[] = {
       EGL_SURFACE_TYPE, 0, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE
    };
+#endif
    /* Version to request, default 4.3. Pass "3.3" to check that the fragment
     * stages still build at the renderer's practical floor; compute is skipped
     * below 4.3, which is the situation the analog_yc fallback exists for. */
    int want_major = (argc > 1) ? atoi(argv[1]) : 4;
    int want_minor = (argc > 2) ? atoi(argv[2]) : 3;
+#ifdef HAVE_OPENGLES3
+   EGLint ctx_attr[] = {
+      EGL_CONTEXT_CLIENT_VERSION, 3,
+      EGL_NONE
+   };
+#else
    EGLint ctx_attr[] = {
       EGL_CONTEXT_MAJOR_VERSION, 4, EGL_CONTEXT_MINOR_VERSION, 3,
       EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
@@ -192,12 +217,18 @@ int main(int argc, char **argv)
    };
    ctx_attr[1] = want_major;
    ctx_attr[3] = want_minor;
+#endif
    PFNEGLGETPLATFORMDISPLAYEXTPROC gpd =
       (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
 
    dpy = gpd ? gpd(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL)
              : eglGetDisplay(EGL_DEFAULT_DISPLAY);
-   if (!eglInitialize(dpy, NULL, NULL) || !eglBindAPI(EGL_OPENGL_API) ||
+   if (!eglInitialize(dpy, NULL, NULL) ||
+#ifdef HAVE_OPENGLES3
+       !eglBindAPI(EGL_OPENGL_ES_API) ||
+#else
+       !eglBindAPI(EGL_OPENGL_API) ||
+#endif
        !eglChooseConfig(dpy, cfg_attr, &cfg, 1, &n) || n < 1)
    {
       printf("EGL setup failed\n");
@@ -220,6 +251,7 @@ int main(int argc, char **argv)
    printf("GL: %s\n", (const char *)p_glGetString(0x1F02) /* GL_VERSION */);
 
    {
+#ifndef HAVE_OPENGLES3
       static const char *u_down[] = { "reg_src_size", "reg_native_size", "reg_sdr_eotf" };
       static const char *u_enc[]  = { "reg_src_size", "reg_div", "reg_x1", "reg_inv_ratio",
                                       "reg_line_adv", "reg_line_split", "reg_field_off",
@@ -232,7 +264,12 @@ int main(int argc, char **argv)
       static const char *u_res[]  = { "reg_sig_size", "reg_out_size", "reg_sdr_eotf",
                                       "reg_paper_white_nits", "reg_peak_nits",
                                       "reg_expand_gamut", "reg_shoulder", "reg_src_primaries" };
+#endif
+      static const char *u_cmd[]  = { "offset", "pgxp_raster_mode", "pgxp_raster_grid" };
 
+      check_pair("command", command_vertex, command_fragment, u_cmd, 3);
+
+#ifndef HAVE_OPENGLES3
       check("downsample",   analog_downsample_glsl,   u_down, 3);
       check("encode",       analog_encode_glsl,       u_enc,  9);
       check("encode_pal",   analog_encode_pal_glsl,   u_enc,  9);
@@ -263,6 +300,7 @@ int main(int argc, char **argv)
          else
             printf("  -- compute skipped (context below 4.3; analog_yc path) --\n");
       }
+#endif
    }
 
    printf("%s\n", failures ? "FAILURES" : "ALL PROGRAMS COMPILE AND LINK");

@@ -775,7 +775,9 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"perp_improved", "perp_closed",
 		"perp_closed_endpoint", "perp_closed_interior",
 		"perp_point_closed", "perp_improved_material",
-		"perp_closed_material"
+		"perp_closed_material", "swan_y_pos", "swan_y_neg",
+		"subpixel_nearest", "subpixel_floor", "subpixel_y_phase",
+		"upper_left", "upper_left_swan", "upper_left_nearest"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -791,6 +793,11 @@ void PGXP_DiagGLSetMode(unsigned mode)
 		log_cb(RETRO_LOG_INFO,
 			"[pgxp_gl_test_mode] mf=%u mode=%u name=%s\n",
 			mode_frame, mode, pgxp_diag_gl_mode_name(mode));
+}
+
+unsigned PGXP_DiagGLGetMode(void)
+{
+	return gl_repair_mode;
 }
 
 static int trace_metadata_valid(const PGXP_value* value)
@@ -3442,6 +3449,15 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		return;
 	}
 	gl_repair_mode_mask |= UINT32_C(1) << gl_repair_mode;
+	/* Modes after PERP_CLOSED_MATERIAL are renderer-state experiments.
+	 * Keep collecting the exact submitted stream, but never feed them into
+	 * the retired T-junction projector (whose default branch would otherwise
+	 * interpret an unknown mode as a broad native-t mutation). */
+	if (gl_repair_mode > PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL)
+	{
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
 
 	memset(gl_hash_heads, 0xff, sizeof(gl_hash_heads));
 	memset(gl_proposals, 0, count * sizeof(gl_proposals[0]));
@@ -5804,7 +5820,8 @@ void PGXP_DiagFrame(int backend)
 			(double)gl_repair_moved : 0.0,
 		gl_repair_move_max, gl_repair_mode,
 		pgxp_diag_gl_mode_name(gl_repair_mode), gl_repair_mode_mask,
-		gl_repair_mode != PGXP_DIAG_GL_TEST_OFF);
+		gl_repair_mode > PGXP_DIAG_GL_TEST_OFF &&
+		gl_repair_mode <= PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gl_repair_gate] f=%llu mode=%u "
 		"rejected=link/material/raster=%llu/%llu/%llu "

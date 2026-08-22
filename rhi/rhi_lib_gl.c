@@ -92,6 +92,14 @@ static bool gl_fp16_renderable(void)
 #define GL_MAP_INVALIDATE_BUFFER_BIT      0x0008
 #endif
 
+/* Clip-control tokens are kept local so GLES headers which expose the EXT
+ * entry point but not the unsuffixed GL 4.5 names can build the same probe. */
+#define BEETLE_GL_LOWER_LEFT               0x8CA1u
+#define BEETLE_GL_UPPER_LEFT               0x8CA2u
+#define BEETLE_GL_CLIP_ORIGIN              0x935Cu
+#define BEETLE_GL_CLIP_DEPTH_MODE          0x935Du
+#define BEETLE_GL_NEGATIVE_ONE_TO_ONE      0x935Eu
+
 /* Field diagnostics, enabled by setting BEETLE_GL_DIAG in the
  * environment. Zero-cost when unset (one getenv on first use). Exists
  * because a class of report - GL-only, NVIDIA-only, runahead-triggered
@@ -358,6 +366,9 @@ typedef void (BEETLE_GL_APIENTRYP PFN_BEETLE_GL_COPYIMAGESUBDATA)(
       GLint dstX, GLint dstY, GLint dstZ,
       GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
 
+typedef void (BEETLE_GL_APIENTRYP PFN_BEETLE_GL_CLIPCONTROL)(
+      GLenum origin, GLenum depth);
+
 typedef struct gl_caps
 {
    /* Identity */
@@ -380,6 +391,9 @@ typedef struct gl_caps
    /* Resolved entry points.  NULL when not available. */
    PFN_BEETLE_GL_BLITFRAMEBUFFER  fp_glBlitFramebuffer;
    PFN_BEETLE_GL_COPYIMAGESUBDATA fp_glCopyImageSubData;
+   PFN_BEETLE_GL_CLIPCONTROL      fp_glClipControl;
+   int has_clip_control;
+   unsigned subpixel_bits;
 
    /* Set to 1 when the detected version is below the floor
     * beetle's GL renderer needs to function (GL/GLES 3.0).
@@ -977,6 +991,9 @@ struct gl_renderer {
    float submission_w_max;
    uint32_t submission_max_vertices;
    unsigned submission_frames;
+   unsigned pgxp_raster_logged_requested;
+   unsigned pgxp_raster_logged_effective;
+   bool pgxp_raster_log_valid;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -2794,6 +2811,12 @@ static void gl_renderer_draw(gl_renderer *renderer)
    int16_t x;
    int16_t y;
    size_t bi;
+   unsigned raster_requested;
+   unsigned raster_effective;
+   bool raster_upper_left;
+   float raster_grid;
+   GLint raster_prior_origin = (GLint)BEETLE_GL_LOWER_LEFT;
+   GLint raster_prior_depth = (GLint)BEETLE_GL_NEGATIVE_ONE_TO_ONE;
 
    if (!renderer || static_renderer.state == GL_STATE_INVALID)
       return;
@@ -2814,11 +2837,27 @@ static void gl_renderer_draw(gl_renderer *renderer)
 
    x = renderer->config.draw_offset[0];
    y = renderer->config.draw_offset[1];
+   raster_requested = PGXP_DiagGLGetMode();
+   raster_effective = raster_requested;
+   raster_upper_left = raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT ||
+      raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT_SWAN ||
+      raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST;
+   if (raster_upper_left && !gl_caps.has_clip_control)
+   {
+      raster_effective = PGXP_DIAG_GL_TEST_OFF;
+      raster_upper_left = false;
+   }
+   raster_grid = (float)renderer->internal_upscaling *
+      (float)(UINT32_C(1) << gl_caps.subpixel_bits);
+   if (raster_grid < 1.0f)
+      raster_grid = 1.0f;
 
    if (renderer->command_buffer->program)
    {
       glUseProgram(renderer->command_buffer->program->id);
       glUniform2i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "offset"), (GLint)x, (GLint)y);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "pgxp_raster_mode"), raster_effective);
+      glUniform1f(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "pgxp_raster_grid"), raster_grid);
       /* We use texture unit 0 */
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
       /* HD replacement texture lives on unit 1 */
@@ -2848,6 +2887,32 @@ static void gl_renderer_draw(gl_renderer *renderer)
    glEnable(GL_SCISSOR_TEST);
    glStencilMask(1);
    glEnable(GL_STENCIL_TEST);
+
+   if (raster_upper_left)
+   {
+      glGetIntegerv((GLenum)BEETLE_GL_CLIP_ORIGIN, &raster_prior_origin);
+      glGetIntegerv((GLenum)BEETLE_GL_CLIP_DEPTH_MODE, &raster_prior_depth);
+      gl_caps.fp_glClipControl((GLenum)BEETLE_GL_UPPER_LEFT,
+            (GLenum)BEETLE_GL_NEGATIVE_ONE_TO_ONE);
+   }
+   if (!renderer->pgxp_raster_log_valid ||
+       renderer->pgxp_raster_logged_requested != raster_requested ||
+       renderer->pgxp_raster_logged_effective != raster_effective)
+   {
+      log_cb(RETRO_LOG_INFO,
+            "[pgxp_gl_raster_mode] requested=%u effective=%u "
+            "clip_control=%s upper_left=%u clip_prior=%04x/%04x "
+            "subpixel_bits=%u scale=%u grid=%.0f\n",
+            raster_requested, raster_effective,
+            gl_caps.has_clip_control ? "available" : "unavailable",
+            raster_upper_left ? 1u : 0u,
+            (unsigned)raster_prior_origin, (unsigned)raster_prior_depth,
+            gl_caps.subpixel_bits,
+            renderer->internal_upscaling, (double)raster_grid);
+      renderer->pgxp_raster_logged_requested = raster_requested;
+      renderer->pgxp_raster_logged_effective = raster_effective;
+      renderer->pgxp_raster_log_valid = true;
+   }
 
    renderer->submission_flushes++;
    renderer->submission_batches += renderer->batches.count;
@@ -3083,6 +3148,9 @@ static void gl_renderer_draw(gl_renderer *renderer)
    }
 
    glDisable(GL_STENCIL_TEST);
+   if (raster_upper_left)
+      gl_caps.fp_glClipControl((GLenum)raster_prior_origin,
+            (GLenum)raster_prior_depth);
 
    renderer->command_buffer->map_start += renderer->command_buffer->map_index;
    renderer->command_buffer->map_index  = 0;
@@ -5414,6 +5482,40 @@ static void gl_caps_parse_version(const char *version,
    *minor = mn;
 }
 
+static int gl_caps_has_extension(const char *wanted)
+{
+   GLint count = 0;
+   GLint i;
+
+   if (!wanted || !*wanted)
+      return 0;
+   if (glGetStringi)
+   {
+      glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+      for (i = 0; i < count; i++)
+      {
+         const char *ext = (const char *)glGetStringi(GL_EXTENSIONS,
+               (GLuint)i);
+         if (ext && strcmp(ext, wanted) == 0)
+            return 1;
+      }
+   }
+   else
+   {
+      const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
+      size_t wanted_len = strlen(wanted);
+      const char *p = extensions;
+      while (p && (p = strstr(p, wanted)) != NULL)
+      {
+         if ((p == extensions || p[-1] == ' ') &&
+             (p[wanted_len] == '\0' || p[wanted_len] == ' '))
+            return 1;
+         p += wanted_len;
+      }
+   }
+   return 0;
+}
+
 /* Initialise gl_caps once a real GL context is current.
  * Must be called after rglgen_resolve_symbols(...) so the
  * baseline GL function-pointer table is populated. */
@@ -5427,6 +5529,9 @@ static void gl_caps_init(void)
    };
    static const char *const blit_framebuffer_suffixes[] = {
       "EXT", "NV", "ANGLE", NULL
+   };
+   static const char *const clip_control_suffixes[] = {
+      "EXT", "ARB", NULL
    };
 
    retro_get_proc_address_t get_proc = NULL;
@@ -5442,7 +5547,10 @@ static void gl_caps_init(void)
    gl_vendor_str   = glGetString(GL_VENDOR);
    gl_renderer_str = glGetString(GL_RENDERER);
    glGetIntegerv(GL_SUBPIXEL_BITS, &subpixel_bits);
-   PGXP_DiagGLRasterCaps(subpixel_bits > 0 ? (unsigned)subpixel_bits : 0u);
+   gl_caps.subpixel_bits = subpixel_bits > 0 ? (unsigned)subpixel_bits : 0u;
+   if (gl_caps.subpixel_bits > 16u)
+      gl_caps.subpixel_bits = 16u;
+   PGXP_DiagGLRasterCaps(gl_caps.subpixel_bits);
 
    gl_caps.version_string = gl_version_str  ? (const char *)gl_version_str  : "(unknown)";
    gl_caps.vendor         = gl_vendor_str   ? (const char *)gl_vendor_str   : "(unknown)";
@@ -5500,7 +5608,16 @@ static void gl_caps_init(void)
       gl_caps.fp_glCopyImageSubData =
          (PFN_BEETLE_GL_COPYIMAGESUBDATA)gl_caps_resolve(
             get_proc, "glCopyImageSubData", copy_image_suffixes);
+
+      gl_caps.fp_glClipControl =
+         (PFN_BEETLE_GL_CLIPCONTROL)gl_caps_resolve(
+            get_proc, "glClipControl", clip_control_suffixes);
    }
+
+   gl_caps.has_clip_control = gl_caps.fp_glClipControl &&
+      ((gl_caps.api == GL_API_DESKTOP && gl_caps.version_packed >= 0x0405) ||
+       gl_caps_has_extension("GL_ARB_clip_control") ||
+       gl_caps_has_extension("GL_EXT_clip_control"));
 
    log_cb(RETRO_LOG_INFO,
          "[gl_caps] %s | %s | %s\n",
@@ -5520,6 +5637,10 @@ static void gl_caps_init(void)
    log_cb(RETRO_LOG_INFO,
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
+   log_cb(RETRO_LOG_INFO,
+         "[gl_caps] glClipControl:     %s (extension/core=%s)\n",
+         gl_caps.fp_glClipControl ? "resolved" : "NOT resolved",
+         gl_caps.has_clip_control ? "available" : "unavailable");
    log_cb(RETRO_LOG_INFO,
          "[pgxp_gl_w_probe] homogeneous_w=position_w fragment=normal "
          "requires_pct=off depth=enabled stencil=enabled scissor=enabled blend=normal "

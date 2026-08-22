@@ -4793,6 +4793,22 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_PERP_IMPROVED_MATERIAL;
          else if (strcmp(var.value, "perp closed material") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL;
+         else if (strcmp(var.value, "swan y +1e-5") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_SWAN_Y_POS;
+         else if (strcmp(var.value, "swan y -1e-5") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_SWAN_Y_NEG;
+         else if (strcmp(var.value, "subpixel nearest") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_SUBPIXEL_NEAREST;
+         else if (strcmp(var.value, "subpixel floor") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_SUBPIXEL_FLOOR;
+         else if (strcmp(var.value, "subpixel y phase") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_SUBPIXEL_Y_PHASE;
+         else if (strcmp(var.value, "upper-left parity") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_UPPER_LEFT;
+         else if (strcmp(var.value, "upper-left swan") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_UPPER_LEFT_SWAN;
+         else if (strcmp(var.value, "upper-left nearest") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

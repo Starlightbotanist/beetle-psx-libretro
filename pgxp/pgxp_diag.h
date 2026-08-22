@@ -42,6 +42,17 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_PERP_POINT_CLOSED,
 	PGXP_DIAG_GL_TEST_PERP_IMPROVED_MATERIAL,
 	PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL,
+	/* Backend-parity probes.  Unlike modes 1..14 these never alter the
+	 * submitted vertex stream; rhi_lib_gl.c applies the selected raster
+	 * transform uniformly in the vertex shader/fixed-function state. */
+	PGXP_DIAG_GL_TEST_SWAN_Y_POS,
+	PGXP_DIAG_GL_TEST_SWAN_Y_NEG,
+	PGXP_DIAG_GL_TEST_SUBPIXEL_NEAREST,
+	PGXP_DIAG_GL_TEST_SUBPIXEL_FLOOR,
+	PGXP_DIAG_GL_TEST_SUBPIXEL_Y_PHASE,
+	PGXP_DIAG_GL_TEST_UPPER_LEFT,
+	PGXP_DIAG_GL_TEST_UPPER_LEFT_SWAN,
+	PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
@@ -109,6 +120,7 @@ void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
 void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		unsigned stride_bytes);
 void PGXP_DiagGLSetMode(unsigned mode);
+unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned quad_part, int invalid_w, unsigned upscale_shift);
@@ -174,6 +186,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagGLPrimitive(vertices, count, stride_bytes, material_key) ((void)0)
 #define PGXP_DiagGLRepair(vertices, count, stride_bytes) ((void)0)
 #define PGXP_DiagGLSetMode(mode) ((void)0)
+#define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagLineHack(average_y, rejected_w, w0, w1, w2) ((void)0)
