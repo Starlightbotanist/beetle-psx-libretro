@@ -67,6 +67,21 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_LARGE,
 	PGXP_DIAG_GL_TEST_NATIVE_OT_VALID_W,
 	PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W,
+	/* Continuity-preserving follow-ups to the native-Y positive result.
+	 * VULKAN_CLIP_MATH is shader-only.  The remaining modes operate at the
+	 * final opaque-textured handoff, but make a deterministic per-vertex
+	 * decision so duplicate vertices cannot be split by primitive class. */
+	PGXP_DIAG_GL_TEST_VULKAN_CLIP_MATH,
+	PGXP_DIAG_GL_TEST_OT_Y_BLEND_50,
+	PGXP_DIAG_GL_TEST_OT_Y_BLEND_75,
+	PGXP_DIAG_GL_TEST_OT_Y_BLEND_875,
+	PGXP_DIAG_GL_TEST_OT_Y_GT_HALF,
+	PGXP_DIAG_GL_TEST_OT_Y_GT_QUARTER,
+	PGXP_DIAG_GL_TEST_OT_Y_LE_HALF,
+	PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_25,
+	PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_50,
+	PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_75,
+	PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

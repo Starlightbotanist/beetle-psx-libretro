@@ -807,7 +807,11 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"native_ot_gouraud_tri", "native_ot_gouraud_quad",
 		"native_ot_x", "native_ot_y", "native_ot_delta_small",
 		"native_ot_delta_large", "native_ot_valid_w",
-		"native_ot_invalid_w"
+		"native_ot_invalid_w", "vulkan_clip_math", "ot_y_blend_50",
+		"ot_y_blend_75", "ot_y_blend_875", "ot_y_gt_half",
+		"ot_y_gt_quarter", "ot_y_le_half", "ot_y_native_x_blend_25",
+		"ot_y_native_x_blend_50", "ot_y_native_x_blend_75",
+		"ot_y_native_x_gt_half"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -3366,8 +3370,10 @@ static int pgxp_diag_gl_mode_needs_material(unsigned mode)
 
 static int pgxp_diag_gl_mode_is_native_handoff(unsigned mode)
 {
-	return mode >= PGXP_DIAG_GL_TEST_NATIVE_OT_ALL &&
-		mode <= PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W;
+	return (mode >= PGXP_DIAG_GL_TEST_NATIVE_OT_ALL &&
+		mode <= PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W) ||
+		(mode >= PGXP_DIAG_GL_TEST_OT_Y_BLEND_50 &&
+		 mode <= PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF);
 }
 
 static int pgxp_diag_gl_native_select(unsigned mode, unsigned class_index,
@@ -3378,6 +3384,16 @@ static int pgxp_diag_gl_native_select(unsigned mode, unsigned class_index,
 		case PGXP_DIAG_GL_TEST_NATIVE_OT_ALL:
 		case PGXP_DIAG_GL_TEST_NATIVE_OT_X_ONLY:
 		case PGXP_DIAG_GL_TEST_NATIVE_OT_Y_ONLY:
+		case PGXP_DIAG_GL_TEST_OT_Y_BLEND_50:
+		case PGXP_DIAG_GL_TEST_OT_Y_BLEND_75:
+		case PGXP_DIAG_GL_TEST_OT_Y_BLEND_875:
+		case PGXP_DIAG_GL_TEST_OT_Y_GT_HALF:
+		case PGXP_DIAG_GL_TEST_OT_Y_GT_QUARTER:
+		case PGXP_DIAG_GL_TEST_OT_Y_LE_HALF:
+		case PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_25:
+		case PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_50:
+		case PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_75:
+		case PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF:
 			return 1;
 		case PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_TRI:
 			return class_index == 0u;
@@ -3400,6 +3416,65 @@ static int pgxp_diag_gl_native_select(unsigned mode, unsigned class_index,
 	}
 }
 
+static void pgxp_diag_gl_native_weights(unsigned mode,
+		float* x_weight, float* y_weight)
+{
+	*x_weight = 1.0f;
+	*y_weight = 1.0f;
+	switch (mode)
+	{
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_X_ONLY:
+			*y_weight = 0.0f;
+			break;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_Y_ONLY:
+		case PGXP_DIAG_GL_TEST_OT_Y_GT_HALF:
+		case PGXP_DIAG_GL_TEST_OT_Y_GT_QUARTER:
+		case PGXP_DIAG_GL_TEST_OT_Y_LE_HALF:
+			*x_weight = 0.0f;
+			break;
+		case PGXP_DIAG_GL_TEST_OT_Y_BLEND_50:
+			*x_weight = 0.0f;
+			*y_weight = 0.5f;
+			break;
+		case PGXP_DIAG_GL_TEST_OT_Y_BLEND_75:
+			*x_weight = 0.0f;
+			*y_weight = 0.75f;
+			break;
+		case PGXP_DIAG_GL_TEST_OT_Y_BLEND_875:
+			*x_weight = 0.0f;
+			*y_weight = 0.875f;
+			break;
+		case PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_25:
+			*x_weight = 0.25f;
+			break;
+		case PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_50:
+			*x_weight = 0.5f;
+			break;
+		case PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_75:
+			*x_weight = 0.75f;
+			break;
+		default:
+			break;
+	}
+}
+
+static int pgxp_diag_gl_native_axis_selected(unsigned mode,
+		int x_axis, float delta)
+{
+	if (!x_axis)
+	{
+		if (mode == PGXP_DIAG_GL_TEST_OT_Y_GT_HALF)
+			return delta > 0.5f;
+		if (mode == PGXP_DIAG_GL_TEST_OT_Y_GT_QUARTER)
+			return delta > 0.25f;
+		if (mode == PGXP_DIAG_GL_TEST_OT_Y_LE_HALF)
+			return delta <= 0.5f;
+	}
+	else if (mode == PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF)
+		return delta > 0.5f;
+	return 1;
+}
+
 /* Reproduce dd4f6ade's known-positive native coverage substitution at the
  * final mapped GL stream, where the sidecar proves that each native/precise
  * vertex still belongs to the same decoded polygon.  The runtime modes split
@@ -3410,8 +3485,9 @@ static void pgxp_diag_gl_native_handoff(void* vertices, unsigned count,
 		unsigned stride_bytes, unsigned mode)
 {
 	uint32_t start;
-	int apply_x = mode != PGXP_DIAG_GL_TEST_NATIVE_OT_Y_ONLY;
-	int apply_y = mode != PGXP_DIAG_GL_TEST_NATIVE_OT_X_ONLY;
+	float x_weight;
+	float y_weight;
+	pgxp_diag_gl_native_weights(mode, &x_weight, &y_weight);
 
 	for (start = 0; start < count; start++)
 	{
@@ -3492,8 +3568,13 @@ static void pgxp_diag_gl_native_handoff(void* vertices, unsigned count,
 				start + i);
 			float dx = (float)gl_vertices[start + i].native_x - position[0];
 			float dy = (float)gl_vertices[start + i].native_y - position[1];
-			float applied_delta = hypotf(apply_x ? dx : 0.0f,
-				apply_y ? dy : 0.0f);
+			int apply_x = x_weight > 0.0f &&
+				pgxp_diag_gl_native_axis_selected(mode, 1, fabsf(dx));
+			int apply_y = y_weight > 0.0f &&
+				pgxp_diag_gl_native_axis_selected(mode, 0, fabsf(dy));
+			float applied_x = apply_x ? dx * x_weight : 0.0f;
+			float applied_y = apply_y ? dy * y_weight : 0.0f;
+			float applied_delta = hypotf(applied_x, applied_y);
 			if (applied_delta > 1.0e-6f)
 			{
 				gl_native_moved++;
@@ -3508,9 +3589,9 @@ static void pgxp_diag_gl_native_handoff(void* vertices, unsigned count,
 					gl_native_move_max = applied_delta;
 			}
 			if (apply_x)
-				position[0] = (float)gl_vertices[start + i].native_x;
+				position[0] += applied_x;
 			if (apply_y)
-				position[1] = (float)gl_vertices[start + i].native_y;
+				position[1] += applied_y;
 		}
 	}
 }

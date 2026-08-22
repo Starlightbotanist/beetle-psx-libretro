@@ -74,8 +74,21 @@ void main() {
    // Convert VRAM coordinates (0;1023, 0;511) into OpenGL coordinates
    // (-1;1, -1;1)
    float wpos = position.w;
-   float xpos = (pos.x / 512.) - 1.0;
-   float ypos = (pos.y / 256.) - 1.0;
+   float xpos;
+   float ypos;
+   // Mode 34 duplicates Vulkan primitive.vert's operation order exactly.
+   // It is algebraically equivalent to the ordinary GL path, but keeps a
+   // final concrete shader/backend difference measurable on the live driver.
+   if (pgxp_raster_mode == 34U)
+   {
+      xpos = pos.x / 1024.0 * 2.0 - 1.0;
+      ypos = pos.y / 512.0 * 2.0 - 1.0;
+   }
+   else
+   {
+      xpos = (pos.x / 512.0) - 1.0;
+      ypos = (pos.y / 256.0) - 1.0;
+   }
 
    // SwanStation carries a small OpenGL Y epsilon for driver raster parity.
    // The upper-left modes negate clip-space Y while glClipControl changes

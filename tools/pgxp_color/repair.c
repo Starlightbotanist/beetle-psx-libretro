@@ -325,6 +325,12 @@ static void test_runtime_mode_matrix(void)
 			failures++;
 		}
 	}
+	run_endpoint_mode(PGXP_DIAG_GL_TEST_VULKAN_CLIP_MATH,
+		19.25f, 19.25f, stream);
+	expect_near("Vulkan clip math leaves CPU point",
+		stream[3].position[1], 19.25f);
+	expect_near("Vulkan clip math leaves CPU link",
+		stream[4].position[1], 19.25f);
 
 	puts("[R5] native opaque-textured modes partition the positive control");
 	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_ALL,
@@ -376,6 +382,58 @@ static void test_runtime_mode_matrix(void)
 	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W,
 		0x24, 1, 0.25f, -0.75f, stream);
 	expect_near("invalid W selected", stream[0].position[1], 20.0f);
+
+	puts("[R6] continuity-preserving native-axis modes blend or gate per vertex");
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_BLEND_50,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("Y blend 50 preserves X", stream[0].position[0], 10.25f);
+	expect_near("Y blend 50", stream[0].position[1], 19.625f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_BLEND_75,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("Y blend 75", stream[0].position[1], 19.8125f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_BLEND_875,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("Y blend 87.5", stream[0].position[1], 19.90625f);
+
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_GT_HALF,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("Y > 0.5 selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_GT_HALF,
+		0x24, 0, 0.25f, -0.25f, stream);
+	expect_near("Y > 0.5 rejects small", stream[0].position[1], 19.75f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_GT_QUARTER,
+		0x24, 0, 0.25f, -0.5f, stream);
+	expect_near("Y > 0.25 selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_GT_QUARTER,
+		0x24, 0, 0.25f, -0.25f, stream);
+	expect_near("Y > 0.25 strict boundary", stream[0].position[1], 19.75f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_LE_HALF,
+		0x24, 0, 0.25f, -0.5f, stream);
+	expect_near("Y <= 0.5 selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_LE_HALF,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("Y <= 0.5 rejects large", stream[0].position[1], 19.25f);
+
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_25,
+		0x24, 0, 0.8f, -0.75f, stream);
+	expect_near("native Y + X blend 25 X", stream[0].position[0], 10.6f);
+	expect_near("native Y + X blend 25 Y", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_50,
+		0x24, 0, 0.8f, -0.75f, stream);
+	expect_near("native Y + X blend 50 X", stream[0].position[0], 10.4f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_75,
+		0x24, 0, 0.8f, -0.75f, stream);
+	expect_near("native Y + X blend 75 X", stream[0].position[0], 10.2f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF,
+		0x24, 0, 0.8f, -0.75f, stream);
+	expect_near("native Y + X > 0.5 X", stream[0].position[0], 10.0f);
+	expect_near("native Y + X > 0.5 Y", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("native Y + X > 0.5 preserves small X",
+		stream[0].position[0], 10.25f);
+	expect_near("native Y + X > 0.5 still applies Y",
+		stream[0].position[1], 20.0f);
 	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OFF);
 	PGXP_DiagFrame(0);
 }

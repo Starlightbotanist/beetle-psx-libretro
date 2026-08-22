@@ -15308,6 +15308,19 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       vkGetPhysicalDeviceMemoryProperties(gpu, &self->mem_props);
 
       LOGI("Selected Vulkan GPU: %s\n", self->gpu_props.deviceName);
+#if PGXP_DIAG
+      /* Compare the correct Vulkan path's advertised raster precision with
+       * GL_SUBPIXEL_BITS from the failing OpenGL path on the same device. */
+      LOGI("[pgxp_vk_raster_caps] subpixel_bits=%u "
+            "interpolation_offset_bits=%u interpolation_offset=%.9g/%.9g "
+            "standard_sample_locations=%u strict_lines=%u\n",
+            self->gpu_props.limits.subPixelPrecisionBits,
+            self->gpu_props.limits.subPixelInterpolationOffsetBits,
+            (double)self->gpu_props.limits.minInterpolationOffset,
+            (double)self->gpu_props.limits.maxInterpolationOffset,
+            self->gpu_props.limits.standardSampleLocations,
+            self->gpu_props.limits.strictLines);
+#endif
 
       if (self->gpu_props.apiVersion >= VK_API_VERSION_1_1)
          LOGI("GPU supports Vulkan 1.1.\n");

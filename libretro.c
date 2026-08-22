@@ -4831,6 +4831,28 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_VALID_W;
          else if (strcmp(var.value, "native ot invalid w") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W;
+         else if (strcmp(var.value, "vulkan clip math") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_VULKAN_CLIP_MATH;
+         else if (strcmp(var.value, "ot y blend 50") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_BLEND_50;
+         else if (strcmp(var.value, "ot y blend 75") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_BLEND_75;
+         else if (strcmp(var.value, "ot y blend 875") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_BLEND_875;
+         else if (strcmp(var.value, "ot y gt half") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_GT_HALF;
+         else if (strcmp(var.value, "ot y gt quarter") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_GT_QUARTER;
+         else if (strcmp(var.value, "ot y le half") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_LE_HALF;
+         else if (strcmp(var.value, "ot y native x blend 25") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_25;
+         else if (strcmp(var.value, "ot y native x blend 50") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_50;
+         else if (strcmp(var.value, "ot y native x blend 75") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_75;
+         else if (strcmp(var.value, "ot y native x gt half") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }
