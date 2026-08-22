@@ -708,9 +708,6 @@ struct gl_command_vertex {
    /* The primitive samples VRAM content produced by GPU rendering rather
     * than only game-uploaded texture data. */
    uint8_t framebuffer_feedback;
-   /* Match Vulkan's default scaled UV policy: half-texel offset for 3D
-    * polygons, zero for sprites and likely-2D quads. */
-   uint8_t uv_offset;
    /* Depth-cue sidecar: far colour (1.0 == 0xFF) in [0..2], blend factor in
     * [3]. t == 0 makes the shader mix the identity, so vertices without a
     * recovered cue cost nothing. KEEP LAST -- positional initializers above
@@ -987,13 +984,12 @@ struct gl_renderer {
    bool fb_out_fp16;
    /* Counter for preserving primitive draw order in the z-buffer
     * since we draw semi-transparent primitives out-of-order. */
-   int16_t primitive_ordering;
-   /* Vulkan-parity UV-offset field-test counters. */
-   uint64_t uv_offset_triangles;
-   uint64_t uv_offset_quads;
-   uint64_t uv_no_offset_sprites;
-   uint64_t uv_no_offset_2d_quads;
-   unsigned uv_diag_frames;
+   uint32_t primitive_ordering;
+   /* Vulkan-parity primitive-depth field-test counters. */
+   uint64_t depth_primitives;
+   uint64_t depth_flushes;
+   uint32_t depth_max_batch;
+   unsigned depth_diag_frames;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -2828,6 +2824,13 @@ static void gl_renderer_draw(gl_renderer *renderer)
       return;
    }
 
+   if (renderer->primitive_ordering)
+   {
+      renderer->depth_flushes++;
+      if (renderer->primitive_ordering > renderer->depth_max_batch)
+         renderer->depth_max_batch = renderer->primitive_ordering;
+   }
+
    x = renderer->config.draw_offset[0];
    y = renderer->config.draw_offset[1];
 
@@ -3014,8 +3017,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
           * shader forced to emit vec4(0): max(dst, 0) after a contiguous
           * subtractive run is algebraically identical to hardware's
           * per-primitive floor (once the running value would clamp,
-          * every further subtraction keeps both forms at zero). Depth is
-          * LEQUAL so the redraw passes against its own depth writes;
+          * every further subtraction keeps both forms at zero). Disable
+          * depth for this immediate redraw, matching Vulkan's floor pass;
           * alpha (the mask bit) is preserved via ZERO/ONE ADD; stencil
           * writes are masked off so set_mask state cannot double-apply. */
          if (renderer->fb_out_fp16 && !it->opaque &&
@@ -3026,8 +3029,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
             glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
             glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
             glStencilMask(0);
+            glDisable(GL_DEPTH_TEST);
             glDrawElements(it->draw_mode, it->count, GL_UNSIGNED_SHORT,
                            (GLvoid*)(it->first * sizeof(GLushort)));
+            glEnable(GL_DEPTH_TEST);
             glStencilMask(1);
             glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "force_zero"), 0u);
          }
@@ -5046,9 +5051,12 @@ static void vertex_preprocessing(
    }
 
    {
-      int16_t z = renderer->primitive_ordering;
+      float z;
       unsigned i;
       renderer->primitive_ordering += 1;
+      renderer->depth_primitives += 1;
+      z = 1.0f - (float)renderer->primitive_ordering *
+         (4.0f / 16777215.0f);
 
       for (i = 0; i < count; i++)
       {
@@ -5187,7 +5195,6 @@ static const struct gl_attribute gl_command_vertex_attribs[] = {
    { "texture_window",     offsetof(gl_command_vertex, texture_window),     GL_UNSIGNED_BYTE,  4 },
    { "framebuffer_feedback",
       offsetof(gl_command_vertex, framebuffer_feedback), GL_UNSIGNED_BYTE, 1 },
-   { "uv_offset",          offsetof(gl_command_vertex, uv_offset),          GL_UNSIGNED_BYTE,  1 },
    { "texture_limits",     offsetof(gl_command_vertex, texture_limits),     GL_UNSIGNED_SHORT, 4 }
 };
 
@@ -6011,7 +6018,7 @@ void rhi_gl_prepare_frame(void)
    glLineWidth((GLfloat)renderer->internal_upscaling);
    glEnable(GL_SCISSOR_TEST);
    glEnable(GL_DEPTH_TEST);
-   glDepthFunc(GL_LEQUAL);
+   glDepthFunc(GL_LESS);
    /* Used for PSX GPU command blending */
    glBlendColor(0.25, 0.25, 0.25, 0.5);
 
@@ -6100,21 +6107,19 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    if (!gl_draw_buffer_is_empty(renderer->command_buffer))
       gl_renderer_draw(renderer);
 
-   if (++renderer->uv_diag_frames >= 60)
+   if (++renderer->depth_diag_frames >= 60)
    {
       log_cb(RETRO_LOG_INFO,
-            "[pgxp_gl_uv_offset] frames=%u applied=tri:%llu/quad3d:%llu "
-            "zero=sprite:%llu/quad2d:%llu offset=0.5\n",
-            renderer->uv_diag_frames,
-            (unsigned long long)renderer->uv_offset_triangles,
-            (unsigned long long)renderer->uv_offset_quads,
-            (unsigned long long)renderer->uv_no_offset_sprites,
-            (unsigned long long)renderer->uv_no_offset_2d_quads);
-      renderer->uv_offset_triangles = 0;
-      renderer->uv_offset_quads = 0;
-      renderer->uv_no_offset_sprites = 0;
-      renderer->uv_no_offset_2d_quads = 0;
-      renderer->uv_diag_frames = 0;
+            "[pgxp_gl_depth_order] frames=%u primitives=%llu flushes=%llu "
+            "max_batch=%u compare=LESS step=4/ffffff\n",
+            renderer->depth_diag_frames,
+            (unsigned long long)renderer->depth_primitives,
+            (unsigned long long)renderer->depth_flushes,
+            renderer->depth_max_batch);
+      renderer->depth_primitives = 0;
+      renderer->depth_flushes = 0;
+      renderer->depth_max_batch = 0;
+      renderer->depth_diag_frames = 0;
    }
 
    /* Shared HD texture tracker frame boundary: process decoded IO
@@ -6649,15 +6654,8 @@ void rhi_gl_push_triangle(
 
       { int _fi, _fc;
         for (_fi = 0; _fi < 3; _fi++)
-        {
-           v[_fi].uv_offset = 1;
            for (_fc = 0; _fc < 4; _fc++)
-              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f;
-        }
-      }
-
-      if (texture_blend_mode != 0)
-         renderer->uv_offset_triangles++;
+              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
 
       gl_vram_sync_primitive(renderer, v, 3);
       push_primitive(renderer, v, 3, GL_TRIANGLES,
@@ -6688,8 +6686,7 @@ void rhi_gl_push_quad(
       uint8_t depth_shift,
       bool dither,
       int blend_mode,
-      bool mask_test, bool set_mask,
-      bool is_sprite, bool may_be_2d)
+      bool mask_test, bool set_mask)
 {
    gl_renderer *renderer;
    gl_semi_transparency_mode semi_transparency_mode = SEMI_TRANSPARENCY_MODE_ADD;
@@ -6804,22 +6801,8 @@ void rhi_gl_push_quad(
 
       { int _fi, _fc;
         for (_fi = 0; _fi < 4; _fi++)
-        {
-           v[_fi].uv_offset = (!is_sprite && !may_be_2d) ? 1 : 0;
            for (_fc = 0; _fc < 4; _fc++)
-              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f;
-        }
-      }
-
-      if (texture_blend_mode != 0)
-      {
-         if (is_sprite)
-            renderer->uv_no_offset_sprites++;
-         else if (may_be_2d)
-            renderer->uv_no_offset_2d_quads++;
-         else
-            renderer->uv_offset_quads++;
-      }
+              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
 
       gl_vram_sync_primitive(renderer, v, 4);
       is_semi_transparent = v[0].semi_transparent == 1;

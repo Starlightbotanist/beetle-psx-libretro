@@ -82,8 +82,7 @@ void rhi_gl_push_quad(float p0x, float p0y, float p0w,
                       uint8_t depth_shift,
                       bool dither,
                       int blend_mode, //enum blending_modes
-                      bool mask_test, bool set_mask,
-                      bool is_sprite, bool may_be_2d);
+                      bool mask_test, bool set_mask);
 
 void rhi_gl_push_line(int16_t p0x, int16_t p0y,
                       int16_t p1x, int16_t p1y,

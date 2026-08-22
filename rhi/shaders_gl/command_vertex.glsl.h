@@ -22,7 +22,6 @@ in uint semi_transparent;
 in uvec4 texture_window;
 in uvec4 texture_limits;
 in uint framebuffer_feedback;
-in uint uv_offset;
 
 // Drawing offset
 uniform ivec2 offset;
@@ -63,12 +62,10 @@ void main() {
    float xpos = (pos.x / 512.) - 1.0;
    float ypos = (pos.y / 256.) - 1.0;
 
-   // position.z increases as the primitives near the camera so we
-   // reverse the order to match the common GL convention
-   float zpos = 1.0 - (position.z / 32768.);
-
+   // position.z is allocated in Vulkan's [0,1] depth scale. OpenGL NDC is
+   // [-1,1], so remap it here to produce the same window-depth value.
+   float zpos = position.z * 2.0 - 1.0;
    gl_Position.xyzw = vec4(xpos * wpos, ypos * wpos, zpos * wpos, wpos);
-   //gl_Position.xyzw = vec4(xpos, ypos, zpos, 1.);
 
    // Glium doesn't support 'normalized' for now
    /* Already in 0..1+ scale (1.0 == 0xFF). May exceed 1.0 when the PGXP
@@ -77,10 +74,7 @@ void main() {
    frag_fog = fog;
 
    // Let OpenGL interpolate the texel position
-   // Match Vulkan's default scaled path: true 3D polygons sample half a
-   // texel inward, while sprites and likely-2D quads retain exact UVs.
-   frag_texture_coord = vec2(texture_coord) +
-      (uv_offset != 0U ? vec2(0.5, 0.5) : vec2(0.0, 0.0));
+   frag_texture_coord = vec2(texture_coord) + vec2(0.001, 0.001);
 
    frag_texture_page = texture_page;
    frag_clut = clut;
