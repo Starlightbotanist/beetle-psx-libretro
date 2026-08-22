@@ -23,6 +23,19 @@ enum PGXP_diag_trace_stage
 	PGXP_TRACE_VERTEX
 };
 
+/* Outcomes from the conservative renderer-side shared-edge weld.  Keep this
+ * enum available in non-diagnostic builds too: gpu_polygon.c uses the names,
+ * while the no-op macros below compile the accounting away. */
+enum PGXP_diag_seam_result
+{
+	PGXP_DIAG_SEAM_EXACT = 0,
+	PGXP_DIAG_SEAM_ACCEPTED,
+	PGXP_DIAG_SEAM_STALE,
+	PGXP_DIAG_SEAM_UNANCHORED,
+	PGXP_DIAG_SEAM_FAR,
+	PGXP_DIAG_SEAM_RESULTS
+};
+
 typedef struct PGXP_diag_primitive_vertex_Tag
 {
 	int32_t native_x;
@@ -82,6 +95,10 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		int invalid_w, int tolerance, unsigned upscale_shift);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned quad_part, int invalid_w, unsigned upscale_shift);
+void PGXP_DiagSeamEdge(enum PGXP_diag_seam_result result,
+		float delta, uint64_t age);
+void PGXP_DiagSeamPrimitive(unsigned observed_edges,
+		unsigned moved_vertices, unsigned conflicts);
 void PGXP_DiagLineHack(int32_t average_y, int rejected_w,
 		float w0, float w1, float w2);
 void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
@@ -141,6 +158,8 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagPacket(opcode, words, abr, tex_mode, mask_eval) ((void)0)
 #define PGXP_DiagPrimitive(vertices, invalid_w, tolerance, upscale_shift) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
+#define PGXP_DiagSeamEdge(result, delta, age) ((void)0)
+#define PGXP_DiagSeamPrimitive(observed_edges, moved_vertices, conflicts) ((void)0)
 #define PGXP_DiagLineHack(average_y, rejected_w, w0, w1, w2) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, native_x, native_y, valid_w, valid_xy, value_match) ((void)0)
 #define PGXP_DiagNCLIP(native_value, precise_value, reference_value, applied_value) ((void)0)

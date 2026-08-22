@@ -412,6 +412,13 @@ static double edge_delta_sum[PGXP_DIAG_EDGE_KINDS];
 static float edge_delta_max[PGXP_DIAG_EDGE_KINDS];
 static uint64_t edge_table_overflow;
 static uint32_t edge_samples;
+static uint64_t seam_results[PGXP_DIAG_SEAM_RESULTS];
+static uint64_t seam_delta_bins[PGXP_DIAG_EDGE_DELTA_BINS];
+static uint64_t seam_age_bins[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t seam_primitives;
+static uint64_t seam_observed_edges;
+static uint64_t seam_moved_vertices;
+static uint64_t seam_conflicts;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -723,6 +730,13 @@ void PGXP_DiagInit(void)
 	memset(edge_delta_max, 0, sizeof(edge_delta_max));
 	edge_table_overflow = 0;
 	edge_samples = 0;
+	memset(seam_results, 0, sizeof(seam_results));
+	memset(seam_delta_bins, 0, sizeof(seam_delta_bins));
+	memset(seam_age_bins, 0, sizeof(seam_age_bins));
+	seam_primitives = 0;
+	seam_observed_edges = 0;
+	seam_moved_vertices = 0;
+	seam_conflicts = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
@@ -1557,6 +1571,25 @@ static unsigned pgxp_diag_edge_packet_bin(uint64_t gap)
 	if (gap <= 256)
 		return 4;
 	return 5;
+}
+
+void PGXP_DiagSeamEdge(enum PGXP_diag_seam_result result,
+		float delta, uint64_t age)
+{
+	if ((unsigned)result >= PGXP_DIAG_SEAM_RESULTS)
+		return;
+	seam_results[result]++;
+	seam_delta_bins[pgxp_diag_edge_delta_bin(delta)]++;
+	seam_age_bins[pgxp_diag_edge_packet_bin(age)]++;
+}
+
+void PGXP_DiagSeamPrimitive(unsigned observed_edges,
+		unsigned moved_vertices, unsigned conflicts)
+{
+	seam_primitives++;
+	seam_observed_edges += observed_edges;
+	seam_moved_vertices += moved_vertices;
+	seam_conflicts += conflicts;
 }
 
 static PGXP_diag_edge* pgxp_diag_find_edge(int32_t x0, int32_t y0,
@@ -3220,7 +3253,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_edge_summary] f=%llu observed=%llu/%llu "
 		"compared_uu_ut_tt=%llu/%llu/%llu overflow=%llu samples=%u "
-		"probe=gl_opaque_textured_native\n",
+		"handoff=gl_textured_edge_weld\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)edge_observations[0],
 		(unsigned long long)edge_observations[1],
@@ -3228,6 +3261,35 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)edge_compares[1],
 		(unsigned long long)edge_compares[2],
 		(unsigned long long)edge_table_overflow, edge_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_seam_summary] f=%llu primitives=%llu edges=%llu "
+		"exact=%llu accepted=%llu "
+		"stale=%llu unanchored=%llu far=%llu moved=%llu conflicts=%llu "
+		"delta=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"age=%llu/%llu/%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)seam_primitives,
+		(unsigned long long)seam_observed_edges,
+		(unsigned long long)seam_results[PGXP_DIAG_SEAM_EXACT],
+		(unsigned long long)seam_results[PGXP_DIAG_SEAM_ACCEPTED],
+		(unsigned long long)seam_results[PGXP_DIAG_SEAM_STALE],
+		(unsigned long long)seam_results[PGXP_DIAG_SEAM_UNANCHORED],
+		(unsigned long long)seam_results[PGXP_DIAG_SEAM_FAR],
+		(unsigned long long)seam_moved_vertices,
+		(unsigned long long)seam_conflicts,
+		(unsigned long long)seam_delta_bins[0],
+		(unsigned long long)seam_delta_bins[1],
+		(unsigned long long)seam_delta_bins[2],
+		(unsigned long long)seam_delta_bins[3],
+		(unsigned long long)seam_delta_bins[4],
+		(unsigned long long)seam_delta_bins[5],
+		(unsigned long long)seam_delta_bins[6],
+		(unsigned long long)seam_age_bins[0],
+		(unsigned long long)seam_age_bins[1],
+		(unsigned long long)seam_age_bins[2],
+		(unsigned long long)seam_age_bins[3],
+		(unsigned long long)seam_age_bins[4],
+		(unsigned long long)seam_age_bins[5]);
 	{
 		static const char* const edge_kind_name[PGXP_DIAG_EDGE_KINDS] = {
 			"uu", "ut", "tt"
@@ -3537,6 +3599,13 @@ void PGXP_DiagFrame(int backend)
 	memset(edge_delta_sum, 0, sizeof(edge_delta_sum));
 	memset(edge_delta_max, 0, sizeof(edge_delta_max));
 	edge_table_overflow = 0;
+	memset(seam_results, 0, sizeof(seam_results));
+	memset(seam_delta_bins, 0, sizeof(seam_delta_bins));
+	memset(seam_age_bins, 0, sizeof(seam_age_bins));
+	seam_primitives = 0;
+	seam_observed_edges = 0;
+	seam_moved_vertices = 0;
+	seam_conflicts = 0;
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));

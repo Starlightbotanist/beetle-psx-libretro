@@ -2495,6 +2495,7 @@ TheEnd:
 
 void GPU_StartFrame(EmulateSpecStruct *espec_arg)
 {
+   gpu_pgxp_seam_reset();
    GPU.sl_zero_reached = false;
    GPU.espec           = espec_arg;
    GPU.surface         = GPU.espec->surface;

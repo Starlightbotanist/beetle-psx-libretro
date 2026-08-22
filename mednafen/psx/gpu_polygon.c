@@ -83,20 +83,255 @@ static INLINE const float *gpu_precise_quad_rgb(const tri_vertex *first,
    return gpu_precise_rgb_buf;
 }
 
-/* Focused R4 coverage diagnostic.  PGXP-off renders the tunnel correctly,
- * while the opaque-untextured colour probe showed that normal Gouraud
- * geometry is visible through every hole.  Preserve all PGXP bookkeeping and
- * only substitute the original PSX X/Y at the final OpenGL hand-off for
- * opaque textured polygons.  If the holes close, the missing coverage belongs
- * to the precise textured surface; if they do not, that surface was never the
- * source.  Vulkan and every non-textured or semi-transparent draw are left
- * untouched. */
-static INLINE float gpu_hw_probe_position(const tri_vertex *vertex,
-      unsigned axis, bool native_xy)
+/* Conservative PGXP shared-edge weld for the OpenGL renderer.
+ *
+ * R4's tunnel probe established that opaque textured PGXP X/Y is the source
+ * of the holes: substituting native X/Y at the final hand-off closes 99% of
+ * them, but naturally restores native vertex wobble.  The accompanying edge
+ * trace identifies a much narrower invariant.  Adjacent Gouraud-textured
+ * packets repeatedly present the exact same native edge, with one precise
+ * endpoint bit-identical and the other split by roughly 0.25--1 native pixel.
+ * Those are wedge cracks, not independent surfaces.
+ *
+ * Preserve the recovered coordinates everywhere except that anchored case.
+ * A current edge may inherit the previous edge's precise endpoint only when:
+ *   - the complete native edge is identical;
+ *   - it was seen in the current frontend frame and <=64 polygon draws ago;
+ *   - at least one endpoint already agrees within 1/64 native pixel; and
+ *   - neither endpoint differs by more than 1.25 native pixels.
+ *
+ * The first endpoint is the proof of adjacency; the second is the seam being
+ * repaired.  Processing only valid-W PGXP Gouraud-textured OpenGL polygons
+ * leaves native fallback, 2D, untextured, and already-correct Vulkan geometry
+ * untouched.  Entries store the welded result, so a strip converges on one
+ * precise edge rather than alternating between two recovered variants. */
+#define GPU_PGXP_SEAM_SLOTS 16384u
+#define GPU_PGXP_SEAM_MAX_AGE 64u
+
+typedef struct gpu_pgxp_seam_edge_Tag
 {
-   if (native_xy)
-      return axis ? (float)vertex->y : (float)vertex->x;
-   return vertex->precise[axis];
+   int32_t native_x[2];
+   int32_t native_y[2];
+   float precise_x[2];
+   float precise_y[2];
+   uint64_t serial;
+   uint32_t generation;
+} gpu_pgxp_seam_edge;
+
+static gpu_pgxp_seam_edge gpu_pgxp_seam_edges[GPU_PGXP_SEAM_SLOTS];
+static uint64_t gpu_pgxp_seam_serial;
+static uint32_t gpu_pgxp_seam_generation = 1;
+
+static void gpu_pgxp_seam_reset(void)
+{
+   gpu_pgxp_seam_serial = 0;
+   gpu_pgxp_seam_generation++;
+   if (!gpu_pgxp_seam_generation)
+   {
+      memset(gpu_pgxp_seam_edges, 0, sizeof(gpu_pgxp_seam_edges));
+      gpu_pgxp_seam_generation = 1;
+   }
+}
+
+static INLINE gpu_pgxp_seam_edge *gpu_pgxp_seam_find(
+      int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+   uint32_t hash = UINT32_C(2166136261);
+   unsigned probe;
+
+#define GPU_PGXP_SEAM_HASH(value) do { \
+   hash = (hash ^ (uint32_t)(value)) * UINT32_C(16777619); \
+} while (0)
+   GPU_PGXP_SEAM_HASH(x0);
+   GPU_PGXP_SEAM_HASH(y0);
+   GPU_PGXP_SEAM_HASH(x1);
+   GPU_PGXP_SEAM_HASH(y1);
+#undef GPU_PGXP_SEAM_HASH
+
+   for (probe = 0; probe < GPU_PGXP_SEAM_SLOTS; probe++)
+   {
+      gpu_pgxp_seam_edge *edge = &gpu_pgxp_seam_edges[
+         (hash + probe) & (GPU_PGXP_SEAM_SLOTS - 1)];
+      if (edge->generation != gpu_pgxp_seam_generation)
+      {
+         edge->native_x[0] = x0;
+         edge->native_y[0] = y0;
+         edge->native_x[1] = x1;
+         edge->native_y[1] = y1;
+         edge->generation = gpu_pgxp_seam_generation;
+         edge->serial = 0;
+         return edge;
+      }
+      if (edge->native_x[0] == x0 && edge->native_y[0] == y0 &&
+          edge->native_x[1] == x1 && edge->native_y[1] == y1)
+         return edge;
+   }
+   return NULL;
+}
+
+static INLINE float gpu_pgxp_seam_endpoint_delta(
+      float ax, float ay, float bx, float by)
+{
+   float dx = fabsf(ax - bx);
+   float dy = fabsf(ay - by);
+   return dx > dy ? dx : dy;
+}
+
+static void gpu_pgxp_seam_process(tri_vertex *vertices, unsigned count,
+      unsigned upscale_shift, bool enabled)
+{
+   static const uint8_t triangle_edges[3][2] = {
+      { 0, 1 }, { 1, 2 }, { 2, 0 }
+   };
+   /* rhi quad topology is 0,1,2 / 3,2,1; 1--2 is the internal diagonal. */
+   static const uint8_t quad_edges[4][2] = {
+      { 0, 1 }, { 1, 3 }, { 3, 2 }, { 2, 0 }
+   };
+   const uint8_t (*edge_indices)[2];
+   gpu_pgxp_seam_edge *slots[4] = { NULL, NULL, NULL, NULL };
+   float proposed_x[4] = { 0.f, 0.f, 0.f, 0.f };
+   float proposed_y[4] = { 0.f, 0.f, 0.f, 0.f };
+   uint64_t proposed_age[4] = { UINT64_MAX, UINT64_MAX,
+      UINT64_MAX, UINT64_MAX };
+   uint8_t canonical_first[4] = { 0, 0, 0, 0 };
+   float scale = (float)(1u << upscale_shift);
+   float exact_epsilon = scale * 1.0e-6f;
+   float anchor_epsilon = scale * (1.0f / 64.0f);
+   float maximum_delta = scale * 1.25f;
+   unsigned edge_count;
+   unsigned observed_edges = 0;
+   unsigned moved_vertices = 0;
+   unsigned conflicts = 0;
+   unsigned edge_index;
+   unsigned i;
+
+   gpu_pgxp_seam_serial++;
+   if (!enabled || (count != 3 && count != 4))
+      return;
+
+   edge_indices = count == 4 ? quad_edges : triangle_edges;
+   edge_count = count;
+   for (edge_index = 0; edge_index < edge_count; edge_index++)
+   {
+      unsigned a = edge_indices[edge_index][0];
+      unsigned b = edge_indices[edge_index][1];
+      unsigned first = a;
+      unsigned second = b;
+      gpu_pgxp_seam_edge *edge;
+      float d0;
+      float d1;
+      float min_delta;
+      float max_delta;
+      uint64_t age;
+
+      if (vertices[b].x < vertices[a].x ||
+          (vertices[b].x == vertices[a].x && vertices[b].y < vertices[a].y))
+      {
+         first = b;
+         second = a;
+      }
+      if (vertices[first].x == vertices[second].x &&
+          vertices[first].y == vertices[second].y)
+         continue;
+      observed_edges++;
+      canonical_first[edge_index] = (uint8_t)first;
+      edge = gpu_pgxp_seam_find(vertices[first].x, vertices[first].y,
+         vertices[second].x, vertices[second].y);
+      slots[edge_index] = edge;
+      if (!edge || !edge->serial)
+         continue;
+
+      age = gpu_pgxp_seam_serial - edge->serial;
+      d0 = gpu_pgxp_seam_endpoint_delta(edge->precise_x[0],
+         edge->precise_y[0], vertices[first].precise[0],
+         vertices[first].precise[1]);
+      d1 = gpu_pgxp_seam_endpoint_delta(edge->precise_x[1],
+         edge->precise_y[1], vertices[second].precise[0],
+         vertices[second].precise[1]);
+      min_delta = d0 < d1 ? d0 : d1;
+      max_delta = d0 > d1 ? d0 : d1;
+
+      if (max_delta <= exact_epsilon)
+      {
+         PGXP_DiagSeamEdge(PGXP_DIAG_SEAM_EXACT,
+            max_delta / scale, age);
+         continue;
+      }
+      if (age > GPU_PGXP_SEAM_MAX_AGE)
+      {
+         PGXP_DiagSeamEdge(PGXP_DIAG_SEAM_STALE,
+            max_delta / scale, age);
+         continue;
+      }
+      if (max_delta > maximum_delta)
+      {
+         PGXP_DiagSeamEdge(PGXP_DIAG_SEAM_FAR,
+            max_delta / scale, age);
+         continue;
+      }
+      if (min_delta > anchor_epsilon)
+      {
+         PGXP_DiagSeamEdge(PGXP_DIAG_SEAM_UNANCHORED,
+            max_delta / scale, age);
+         continue;
+      }
+
+      PGXP_DiagSeamEdge(PGXP_DIAG_SEAM_ACCEPTED,
+         max_delta / scale, age);
+      if (d0 > exact_epsilon)
+      {
+         if (proposed_age[first] != UINT64_MAX &&
+             (proposed_x[first] != edge->precise_x[0] ||
+              proposed_y[first] != edge->precise_y[0]))
+            conflicts++;
+         if (age < proposed_age[first])
+         {
+            proposed_x[first] = edge->precise_x[0];
+            proposed_y[first] = edge->precise_y[0];
+            proposed_age[first] = age;
+         }
+      }
+      if (d1 > exact_epsilon)
+      {
+         if (proposed_age[second] != UINT64_MAX &&
+             (proposed_x[second] != edge->precise_x[1] ||
+              proposed_y[second] != edge->precise_y[1]))
+            conflicts++;
+         if (age < proposed_age[second])
+         {
+            proposed_x[second] = edge->precise_x[1];
+            proposed_y[second] = edge->precise_y[1];
+            proposed_age[second] = age;
+         }
+      }
+   }
+
+   for (i = 0; i < count; i++)
+   {
+      if (proposed_age[i] == UINT64_MAX)
+         continue;
+      vertices[i].precise[0] = proposed_x[i];
+      vertices[i].precise[1] = proposed_y[i];
+      moved_vertices++;
+   }
+
+   /* Publish the final welded perimeter, not the unreconciled input. */
+   for (edge_index = 0; edge_index < edge_count; edge_index++)
+   {
+      unsigned first = canonical_first[edge_index];
+      unsigned a = edge_indices[edge_index][0];
+      unsigned b = edge_indices[edge_index][1];
+      unsigned second = first == a ? b : a;
+      gpu_pgxp_seam_edge *edge = slots[edge_index];
+      if (!edge)
+         continue;
+      edge->precise_x[0] = vertices[first].precise[0];
+      edge->precise_y[0] = vertices[first].precise[1];
+      edge->precise_x[1] = vertices[second].precise[0];
+      edge->precise_y[1] = vertices[second].precise[1];
+      edge->serial = gpu_pgxp_seam_serial;
+   }
+   PGXP_DiagSeamPrimitive(observed_edges, moved_vertices, conflicts);
 }
 
 /* Defined later in the same translation unit (gpu.c includes this
@@ -1741,7 +1976,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    do \
    { \
       enum blending_modes blend_mode = BLEND_MODE_AVERAGE; \
-      bool gl_native_textured_probe; \
       if (TEXTURED_LIT) \
       { \
          if (TM_LIT) \
@@ -1749,8 +1983,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          else \
             blend_mode = BLEND_MODE_ADD; \
       } \
-      gl_native_textured_probe = (PGXP_LIT) && (TEXTURED_LIT) && \
-         ((BM_VAL) < 0) && rhi_intf_is_type() == RHI_OPENGL; \
       /* Line Renderer: Detect triangles that would resolve as lines at x1 scale and create second triangle to make quad */ \
       if ((line_render_mode != 0) && (!lineFound) && (NV_LIT == 3) && (TEXTURED_LIT)) \
       { \
@@ -1772,38 +2004,33 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
             { \
                /* We have 4 quad vertices, we can push that at once */ \
                tri_vertex *first = &gpu->InQuad_F3Vertices[0]; \
+               tri_vertex hw_vertices[4]; \
                Extend_UVLimits(gpu, first, 1); \
                Extend_UVLimits(gpu, vertices, 3); \
                Finalise_UVLimits(gpu); \
-               rhi_intf_push_quad(gpu_hw_probe_position(first, 0, \
-                     gl_native_textured_probe), \
-                  gpu_hw_probe_position(first, 1, gl_native_textured_probe), \
-                  first->precise[2], \
-                  gpu_hw_probe_position(&vertices[0], 0, \
-                     gl_native_textured_probe), \
-                  gpu_hw_probe_position(&vertices[0], 1, \
-                     gl_native_textured_probe), \
-                  vertices[0].precise[2], \
-                  gpu_hw_probe_position(&vertices[1], 0, \
-                     gl_native_textured_probe), \
-                  gpu_hw_probe_position(&vertices[1], 1, \
-                     gl_native_textured_probe), \
-                  vertices[1].precise[2], \
-                  gpu_hw_probe_position(&vertices[2], 0, \
-                     gl_native_textured_probe), \
-                  gpu_hw_probe_position(&vertices[2], 1, \
-                     gl_native_textured_probe), \
-                  vertices[2].precise[2], \
-                  ((uint32_t)first->r) | ((uint32_t)first->g << 8) | ((uint32_t)first->b << 16), \
-                  ((uint32_t)vertices[0].r) | ((uint32_t)vertices[0].g << 8) | ((uint32_t)vertices[0].b << 16), \
-                  ((uint32_t)vertices[1].r) | ((uint32_t)vertices[1].g << 8) | ((uint32_t)vertices[1].b << 16), \
-                  ((uint32_t)vertices[2].r) | ((uint32_t)vertices[2].g << 8) | ((uint32_t)vertices[2].b << 16), \
-                  gpu_precise_quad_rgb(first, vertices), \
-                  gpu_precise_quad_fog(first, vertices), \
-                  first->u + gpu->off_u, first->v + gpu->off_v, \
-                  vertices[0].u + gpu->off_u, vertices[0].v + gpu->off_v, \
-                  vertices[1].u + gpu->off_u, vertices[1].v + gpu->off_v, \
-                  vertices[2].u + gpu->off_u, vertices[2].v + gpu->off_v, \
+               hw_vertices[0] = *first; \
+               memcpy(&hw_vertices[1], vertices, 3 * sizeof(tri_vertex)); \
+               gpu_pgxp_seam_process(hw_vertices, 4, gpu->upscale_shift, \
+                  (PGXP_LIT) && (GOURAUD_LIT) && (TEXTURED_LIT) && \
+                  !invalidW && rhi_intf_is_type() == RHI_OPENGL); \
+               rhi_intf_push_quad(hw_vertices[0].precise[0], \
+                  hw_vertices[0].precise[1], hw_vertices[0].precise[2], \
+                  hw_vertices[1].precise[0], hw_vertices[1].precise[1], \
+                  hw_vertices[1].precise[2], \
+                  hw_vertices[2].precise[0], hw_vertices[2].precise[1], \
+                  hw_vertices[2].precise[2], \
+                  hw_vertices[3].precise[0], hw_vertices[3].precise[1], \
+                  hw_vertices[3].precise[2], \
+                  ((uint32_t)hw_vertices[0].r) | ((uint32_t)hw_vertices[0].g << 8) | ((uint32_t)hw_vertices[0].b << 16), \
+                  ((uint32_t)hw_vertices[1].r) | ((uint32_t)hw_vertices[1].g << 8) | ((uint32_t)hw_vertices[1].b << 16), \
+                  ((uint32_t)hw_vertices[2].r) | ((uint32_t)hw_vertices[2].g << 8) | ((uint32_t)hw_vertices[2].b << 16), \
+                  ((uint32_t)hw_vertices[3].r) | ((uint32_t)hw_vertices[3].g << 8) | ((uint32_t)hw_vertices[3].b << 16), \
+                  gpu_precise_quad_rgb(&hw_vertices[0], &hw_vertices[1]), \
+                  gpu_precise_quad_fog(&hw_vertices[0], &hw_vertices[1]), \
+                  hw_vertices[0].u + gpu->off_u, hw_vertices[0].v + gpu->off_v, \
+                  hw_vertices[1].u + gpu->off_u, hw_vertices[1].v + gpu->off_v, \
+                  hw_vertices[2].u + gpu->off_u, hw_vertices[2].v + gpu->off_v, \
+                  hw_vertices[3].u + gpu->off_u, hw_vertices[3].v + gpu->off_v, \
                   gpu->min_u, gpu->min_v, \
                   gpu->max_u, gpu->max_v, \
                   gpu->TexPageX, gpu->TexPageY, \
@@ -1821,6 +2048,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          else \
          { \
             tri_vertex *verts; \
+            tri_vertex hw_vertices[3]; \
             /* Only need to render first triangle that we skipped */ \
             if (gpu->killQuadPart == 2) \
                verts = &gpu->InQuad_F3Vertices[0]; \
@@ -1828,30 +2056,25 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                verts = &vertices[0]; \
             Extend_UVLimits(gpu, verts, 3); \
             Finalise_UVLimits(gpu); \
+            memcpy(hw_vertices, verts, 3 * sizeof(tri_vertex)); \
+            gpu_pgxp_seam_process(hw_vertices, 3, gpu->upscale_shift, \
+               (PGXP_LIT) && (GOURAUD_LIT) && (TEXTURED_LIT) && \
+               !invalidW && rhi_intf_is_type() == RHI_OPENGL); \
             /* Push a single triangle */ \
-            rhi_intf_push_triangle(gpu_hw_probe_position(&verts[0], 0, \
-                  gl_native_textured_probe), \
-               gpu_hw_probe_position(&verts[0], 1, \
-                  gl_native_textured_probe), \
-               verts[0].precise[2], \
-               gpu_hw_probe_position(&verts[1], 0, \
-                  gl_native_textured_probe), \
-               gpu_hw_probe_position(&verts[1], 1, \
-                  gl_native_textured_probe), \
-               verts[1].precise[2], \
-               gpu_hw_probe_position(&verts[2], 0, \
-                  gl_native_textured_probe), \
-               gpu_hw_probe_position(&verts[2], 1, \
-                  gl_native_textured_probe), \
-               verts[2].precise[2], \
-               ((uint32_t)verts[0].r) | ((uint32_t)verts[0].g << 8) | ((uint32_t)verts[0].b << 16), \
-               ((uint32_t)verts[1].r) | ((uint32_t)verts[1].g << 8) | ((uint32_t)verts[1].b << 16), \
-               ((uint32_t)verts[2].r) | ((uint32_t)verts[2].g << 8) | ((uint32_t)verts[2].b << 16), \
-               gpu_precise_tri_rgb(verts), \
-               gpu_precise_tri_fog(verts), \
-               verts[0].u, verts[0].v, \
-               verts[1].u, verts[1].v, \
-               verts[2].u, verts[2].v, \
+            rhi_intf_push_triangle(hw_vertices[0].precise[0], \
+               hw_vertices[0].precise[1], hw_vertices[0].precise[2], \
+               hw_vertices[1].precise[0], hw_vertices[1].precise[1], \
+               hw_vertices[1].precise[2], \
+               hw_vertices[2].precise[0], hw_vertices[2].precise[1], \
+               hw_vertices[2].precise[2], \
+               ((uint32_t)hw_vertices[0].r) | ((uint32_t)hw_vertices[0].g << 8) | ((uint32_t)hw_vertices[0].b << 16), \
+               ((uint32_t)hw_vertices[1].r) | ((uint32_t)hw_vertices[1].g << 8) | ((uint32_t)hw_vertices[1].b << 16), \
+               ((uint32_t)hw_vertices[2].r) | ((uint32_t)hw_vertices[2].g << 8) | ((uint32_t)hw_vertices[2].b << 16), \
+               gpu_precise_tri_rgb(hw_vertices), \
+               gpu_precise_tri_fog(hw_vertices), \
+               hw_vertices[0].u, hw_vertices[0].v, \
+               hw_vertices[1].u, hw_vertices[1].v, \
+               hw_vertices[2].u, hw_vertices[2].v, \
                gpu->min_u, gpu->min_v, \
                gpu->max_u, gpu->max_v, \
                gpu->TexPageX, gpu->TexPageY, \
