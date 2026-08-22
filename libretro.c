@@ -4759,6 +4759,45 @@ static void check_variables(bool startup)
    else
       psx_pgxp_nclip = PGXP_MODE_NONE;
 
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+   {
+      unsigned gl_test_mode = PGXP_DIAG_GL_TEST_OFF;
+      var.key = BEETLE_OPT(pgxp_gl_test);
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      {
+         if (strcmp(var.value, "native boundary") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_BOUNDARY;
+         else if (strcmp(var.value, "broad replay") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_BROAD_REPLAY;
+         else if (strcmp(var.value, "native-t improved") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_T_IMPROVED;
+         else if (strcmp(var.value, "native-t closed") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED;
+         else if (strcmp(var.value, "native-t closed endpoint") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED_ENDPOINT;
+         else if (strcmp(var.value, "native-t closed interior") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED_INTERIOR;
+         else if (strcmp(var.value, "native-t closed material") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED_MATERIAL;
+         else if (strcmp(var.value, "perp improved") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_PERP_IMPROVED;
+         else if (strcmp(var.value, "perp closed") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_PERP_CLOSED;
+         else if (strcmp(var.value, "perp closed endpoint") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_PERP_CLOSED_ENDPOINT;
+         else if (strcmp(var.value, "perp closed interior") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_PERP_CLOSED_INTERIOR;
+         else if (strcmp(var.value, "perp point closed") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_PERP_POINT_CLOSED;
+         else if (strcmp(var.value, "perp improved material") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_PERP_IMPROVED_MATERIAL;
+         else if (strcmp(var.value, "perp closed material") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL;
+      }
+      PGXP_DiagGLSetMode(gl_test_mode);
+   }
+#endif
+
    var.key = BEETLE_OPT(line_render);
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -5741,6 +5780,10 @@ bool retro_load_game(const struct retro_game_info *info)
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
          option_display.key = BEETLE_OPT(pgxp_vertex);
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+         option_display.key = BEETLE_OPT(pgxp_gl_test);
+         environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+#endif
          /* pgxp_texture is no longer hidden in SW mode: the SW
           * rasteriser implements perspective-correct texturing
           * via the precise[2] (w) PGXP carries on every vertex.
@@ -5798,6 +5841,11 @@ bool retro_load_game(const struct retro_game_info *info)
 
          option_display.key = BEETLE_OPT(depth);
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+         option_display.key = BEETLE_OPT(pgxp_gl_test);
+         environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+#endif
 
          option_display.key = BEETLE_OPT(image_offset);
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);

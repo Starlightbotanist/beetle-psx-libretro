@@ -23,6 +23,28 @@ enum PGXP_diag_trace_stage
 	PGXP_TRACE_VERTEX
 };
 
+/* Runtime-selectable OpenGL seam experiments.  These are exposed only by
+ * PGXP_DIAG builds; normal builds compile PGXP_DiagGLSetMode() away. */
+enum PGXP_diag_gl_test_mode
+{
+	PGXP_DIAG_GL_TEST_OFF = 0,
+	PGXP_DIAG_GL_TEST_NATIVE_BOUNDARY,
+	PGXP_DIAG_GL_TEST_BROAD_REPLAY,
+	PGXP_DIAG_GL_TEST_NATIVE_T_IMPROVED,
+	PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED,
+	PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED_ENDPOINT,
+	PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED_INTERIOR,
+	PGXP_DIAG_GL_TEST_NATIVE_T_CLOSED_MATERIAL,
+	PGXP_DIAG_GL_TEST_PERP_IMPROVED,
+	PGXP_DIAG_GL_TEST_PERP_CLOSED,
+	PGXP_DIAG_GL_TEST_PERP_CLOSED_ENDPOINT,
+	PGXP_DIAG_GL_TEST_PERP_CLOSED_INTERIOR,
+	PGXP_DIAG_GL_TEST_PERP_POINT_CLOSED,
+	PGXP_DIAG_GL_TEST_PERP_IMPROVED_MATERIAL,
+	PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL,
+	PGXP_DIAG_GL_TEST_COUNT
+};
+
 typedef struct PGXP_diag_primitive_vertex_Tag
 {
 	int32_t native_x;
@@ -83,9 +105,10 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 void PGXP_DiagSubmitPrimitive(const PGXP_diag_primitive_vertex* vertices,
 		unsigned count, int invalid_w, unsigned upscale_shift);
 void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
-		unsigned stride_bytes);
+		unsigned stride_bytes, uint64_t material_key);
 void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		unsigned stride_bytes);
+void PGXP_DiagGLSetMode(unsigned mode);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned quad_part, int invalid_w, unsigned upscale_shift);
@@ -148,8 +171,9 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagPacket(opcode, words, abr, tex_mode, mask_eval) ((void)0)
 #define PGXP_DiagPrimitive(vertices, invalid_w, tolerance, upscale_shift) ((void)0)
 #define PGXP_DiagSubmitPrimitive(vertices, count, invalid_w, upscale_shift) ((void)0)
-#define PGXP_DiagGLPrimitive(vertices, count, stride_bytes) ((void)0)
+#define PGXP_DiagGLPrimitive(vertices, count, stride_bytes, material_key) ((void)0)
 #define PGXP_DiagGLRepair(vertices, count, stride_bytes) ((void)0)
+#define PGXP_DiagGLSetMode(mode) ((void)0)
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagLineHack(average_y, rejected_w, w0, w1, w2) ((void)0)

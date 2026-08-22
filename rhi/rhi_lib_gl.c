@@ -5178,6 +5178,29 @@ static void vertex_add_blended_pass(
    }
 }
 
+#if PGXP_DIAG
+static uint64_t gl_pgxp_material_key(const gl_command_vertex *v)
+{
+   uint64_t hash = UINT64_C(1469598103934665603);
+   unsigned i;
+#define PGXP_GL_MATERIAL_MIX(value) do { \
+   hash ^= (uint64_t)(value); \
+   hash *= UINT64_C(1099511628211); \
+} while (0)
+   PGXP_GL_MATERIAL_MIX(v->texture_page[0]);
+   PGXP_GL_MATERIAL_MIX(v->texture_page[1]);
+   PGXP_GL_MATERIAL_MIX(v->clut[0]);
+   PGXP_GL_MATERIAL_MIX(v->clut[1]);
+   PGXP_GL_MATERIAL_MIX(v->texture_blend_mode);
+   PGXP_GL_MATERIAL_MIX(v->depth_shift);
+   PGXP_GL_MATERIAL_MIX(v->framebuffer_feedback);
+   for (i = 0; i < 4; i++)
+      PGXP_GL_MATERIAL_MIX(v->texture_window[i]);
+#undef PGXP_GL_MATERIAL_MIX
+   return hash;
+}
+#endif
+
 static void push_primitive(
       gl_renderer *renderer,
       gl_command_vertex *v,
@@ -5211,7 +5234,12 @@ static void push_primitive(
    /* vertex_preprocessing may flush a full command buffer.  Record the
     * sidecar only afterwards, when it is guaranteed to begin at the same
     * vertex as this mapped GL stream. */
-   PGXP_DiagGLPrimitive(v, count, (unsigned)sizeof(v[0]));
+#if PGXP_DIAG
+   PGXP_DiagGLPrimitive(v, count, (unsigned)sizeof(v[0]),
+         gl_pgxp_material_key(v));
+#else
+   PGXP_DiagGLPrimitive(v, count, (unsigned)sizeof(v[0]), 0);
+#endif
 
    index     = gl_draw_buffer_next_index(renderer->command_buffer);
    index_pos = renderer->vertex_index_pos;

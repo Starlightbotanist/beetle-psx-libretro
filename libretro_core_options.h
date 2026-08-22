@@ -860,6 +860,35 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "disabled"
    },
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+   {
+      BEETLE_OPT(pgxp_gl_test),
+      "PGXP OpenGL Seam Test",
+      NULL,
+      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Change one mode at a time while the same scene remains visible. 'Off' records data without changing geometry. Native Boundary and Broad Replay are positive/unsafe controls; the coverage-gated modes change only candidates whose local GL pixel model improves or closes completely.",
+      NULL,
+      "pgxp",
+      {
+         { "off",                    "0: Off (Observe Only)" },
+         { "native boundary",        "1: Native Boundary Control" },
+         { "broad replay",           "2: Broad Projection Replay (Unsafe)" },
+         { "native-t improved",      "3: Native-t Projection - Improved" },
+         { "native-t closed",        "4: Native-t Projection - Closed Only" },
+         { "native-t closed endpoint", "5: Native-t Closed - Endpoint Links" },
+         { "native-t closed interior", "6: Native-t Closed - Interior Links" },
+         { "native-t closed material", "7: Native-t Closed - Same Material" },
+         { "perp improved",          "8: Perpendicular Projection - Improved" },
+         { "perp closed",            "9: Perpendicular Projection - Closed Only" },
+         { "perp closed endpoint",   "10: Perpendicular Closed - Endpoint Links" },
+         { "perp closed interior",   "11: Perpendicular Closed - Interior Links" },
+         { "perp point closed",      "12: Perpendicular Closed - Junction Only" },
+         { "perp improved material", "13: Perpendicular Improved - Same Material" },
+         { "perp closed material",   "14: Perpendicular Closed - Same Material" },
+         { NULL, NULL },
+      },
+      "off"
+   },
+#endif
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN)
    {
       BEETLE_OPT(pgxp_vertex),
