@@ -40,8 +40,13 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_EDGE_DELTA_BINS 7u
 #define PGXP_DIAG_EDGE_PACKET_BINS 6u
 #define PGXP_DIAG_EDGE_SAMPLES 96u
-#define PGXP_DIAG_SEAM_ACCEPT_SAMPLES 256u
-#define PGXP_DIAG_SEAM_ACCEPT_WINDOW_SAMPLES 8u
+#define PGXP_DIAG_TJ_VERTEX_SLOTS 16384u
+#define PGXP_DIAG_TJ_VERTEX_WAYS 4u
+#define PGXP_DIAG_TJ_EDGE_CAPACITY 16384u
+#define PGXP_DIAG_TJ_MAX_STEPS 256u
+#define PGXP_DIAG_TJ_TOPOLOGIES 3u
+#define PGXP_DIAG_TJ_SAMPLES 2048u
+#define PGXP_DIAG_TJ_WINDOW_SAMPLES 8u
 
 enum PGXP_trace_event_type
 {
@@ -183,6 +188,55 @@ typedef struct
 	uint8_t invalid_w[2];
 	uint8_t valid[2];
 } PGXP_diag_edge;
+
+/* Frame-complete T-junction census.  A candidate is a native PSX vertex
+ * strictly inside another decoded edge.  Keeping triangle neighbours lets us
+ * distinguish an actual partitioned boundary from an unrelated vertex that
+ * happens to reuse the same screen coordinate. */
+typedef struct
+{
+	float precise_x;
+	float precise_y;
+	float precise_w;
+	int32_t neighbor_x[2];
+	int32_t neighbor_y[2];
+	uint64_t packet;
+	uint16_t u;
+	uint16_t v;
+	uint8_t opcode;
+	uint8_t textured;
+	uint8_t gouraud;
+	uint8_t invalid_w;
+	uint8_t stage;
+	uint8_t valid;
+} PGXP_diag_tj_observation;
+
+typedef struct
+{
+	int32_t native_x;
+	int32_t native_y;
+	PGXP_diag_tj_observation observation[PGXP_DIAG_TJ_VERTEX_WAYS];
+	uint8_t valid;
+} PGXP_diag_tj_vertex;
+
+typedef struct
+{
+	int32_t native_x[2];
+	int32_t native_y[2];
+	int32_t third_x;
+	int32_t third_y;
+	float precise_x[2];
+	float precise_y[2];
+	float precise_w[2];
+	uint64_t packet;
+	uint16_t u[2];
+	uint16_t v[2];
+	uint8_t opcode;
+	uint8_t textured;
+	uint8_t gouraud;
+	uint8_t invalid_w;
+	uint8_t stage[2];
+} PGXP_diag_tj_edge;
 
 typedef struct
 {
@@ -414,15 +468,41 @@ static double edge_delta_sum[PGXP_DIAG_EDGE_KINDS];
 static float edge_delta_max[PGXP_DIAG_EDGE_KINDS];
 static uint64_t edge_table_overflow;
 static uint32_t edge_samples;
-static uint64_t seam_results[PGXP_DIAG_SEAM_RESULTS];
-static uint64_t seam_delta_bins[PGXP_DIAG_EDGE_DELTA_BINS];
-static uint64_t seam_age_bins[PGXP_DIAG_EDGE_PACKET_BINS];
-static uint64_t seam_primitives;
-static uint64_t seam_observed_edges;
-static uint64_t seam_moved_vertices;
-static uint64_t seam_conflicts;
-static uint32_t seam_accept_samples;
-static uint32_t seam_accept_window_samples;
+static PGXP_diag_tj_vertex tj_vertex_table[PGXP_DIAG_TJ_VERTEX_SLOTS];
+static PGXP_diag_tj_edge tj_edges[PGXP_DIAG_TJ_EDGE_CAPACITY];
+static uint32_t tj_table_frame = ~UINT32_C(0);
+static uint32_t tj_edge_count;
+static uint64_t tj_edges_recorded;
+static uint64_t tj_lattice_edges;
+static uint64_t tj_long_edges;
+static uint64_t tj_interior_points;
+static uint64_t tj_matches[PGXP_DIAG_EDGE_KINDS];
+static uint64_t tj_topology[PGXP_DIAG_EDGE_KINDS]
+	[PGXP_DIAG_TJ_TOPOLOGIES];
+static uint64_t tj_perp_bins[PGXP_DIAG_EDGE_KINDS]
+	[PGXP_DIAG_EDGE_DELTA_BINS];
+static uint64_t tj_predicted_bins[PGXP_DIAG_EDGE_KINDS]
+	[PGXP_DIAG_EDGE_DELTA_BINS];
+static uint64_t tj_packet_bins[PGXP_DIAG_EDGE_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t tj_y_band[PGXP_DIAG_EDGE_KINDS][4];
+static uint64_t tj_step_bins[PGXP_DIAG_EDGE_KINDS][7];
+static uint64_t tj_risk[PGXP_DIAG_EDGE_KINDS];
+static uint64_t tj_offset_side[PGXP_DIAG_EDGE_KINDS][3];
+static uint64_t tj_risk_invalid_w[4];
+static uint64_t tj_risk_gouraud[4];
+static uint64_t tj_risk_packet[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t tj_risk_y[4];
+static uint64_t tj_context_invalid_w[4];
+static uint64_t tj_context_gouraud[4];
+static uint64_t tj_context_semi[4];
+static uint64_t tj_projected_outside;
+static uint64_t tj_degenerate_precise_edge;
+static uint64_t tj_vertex_overflow;
+static uint64_t tj_edge_overflow;
+static uint64_t tj_observation_evictions;
+static uint32_t tj_samples;
+static uint32_t tj_window_samples;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -734,15 +814,37 @@ void PGXP_DiagInit(void)
 	memset(edge_delta_max, 0, sizeof(edge_delta_max));
 	edge_table_overflow = 0;
 	edge_samples = 0;
-	memset(seam_results, 0, sizeof(seam_results));
-	memset(seam_delta_bins, 0, sizeof(seam_delta_bins));
-	memset(seam_age_bins, 0, sizeof(seam_age_bins));
-	seam_primitives = 0;
-	seam_observed_edges = 0;
-	seam_moved_vertices = 0;
-	seam_conflicts = 0;
-	seam_accept_samples = 0;
-	seam_accept_window_samples = 0;
+	memset(tj_vertex_table, 0, sizeof(tj_vertex_table));
+	memset(tj_edges, 0, sizeof(tj_edges));
+	tj_table_frame = ~UINT32_C(0);
+	tj_edge_count = 0;
+	tj_edges_recorded = 0;
+	tj_lattice_edges = 0;
+	tj_long_edges = 0;
+	tj_interior_points = 0;
+	memset(tj_matches, 0, sizeof(tj_matches));
+	memset(tj_topology, 0, sizeof(tj_topology));
+	memset(tj_perp_bins, 0, sizeof(tj_perp_bins));
+	memset(tj_predicted_bins, 0, sizeof(tj_predicted_bins));
+	memset(tj_packet_bins, 0, sizeof(tj_packet_bins));
+	memset(tj_y_band, 0, sizeof(tj_y_band));
+	memset(tj_step_bins, 0, sizeof(tj_step_bins));
+	memset(tj_risk, 0, sizeof(tj_risk));
+	memset(tj_offset_side, 0, sizeof(tj_offset_side));
+	memset(tj_risk_invalid_w, 0, sizeof(tj_risk_invalid_w));
+	memset(tj_risk_gouraud, 0, sizeof(tj_risk_gouraud));
+	memset(tj_risk_packet, 0, sizeof(tj_risk_packet));
+	memset(tj_risk_y, 0, sizeof(tj_risk_y));
+	memset(tj_context_invalid_w, 0, sizeof(tj_context_invalid_w));
+	memset(tj_context_gouraud, 0, sizeof(tj_context_gouraud));
+	memset(tj_context_semi, 0, sizeof(tj_context_semi));
+	tj_projected_outside = 0;
+	tj_degenerate_precise_edge = 0;
+	tj_vertex_overflow = 0;
+	tj_edge_overflow = 0;
+	tj_observation_evictions = 0;
+	tj_samples = 0;
+	tj_window_samples = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
@@ -1579,41 +1681,431 @@ static unsigned pgxp_diag_edge_packet_bin(uint64_t gap)
 	return 5;
 }
 
-void PGXP_DiagSeamEdge(enum PGXP_diag_seam_result result,
-		float delta, uint64_t age)
+static unsigned pgxp_diag_tj_gcd(unsigned a, unsigned b)
 {
-	if ((unsigned)result >= PGXP_DIAG_SEAM_RESULTS)
-		return;
-	seam_results[result]++;
-	seam_delta_bins[pgxp_diag_edge_delta_bin(delta)]++;
-	seam_age_bins[pgxp_diag_edge_packet_bin(age)]++;
+	while (b)
+	{
+		unsigned remainder = a % b;
+		a = b;
+		b = remainder;
+	}
+	return a;
 }
 
-void PGXP_DiagSeamAccept(int32_t x0, int32_t y0,
-		int32_t x1, int32_t y1, float delta0, float delta1,
-		uint64_t age)
+static unsigned pgxp_diag_tj_step_bin(unsigned steps)
 {
-	if (!log_cb || seam_accept_samples >= PGXP_DIAG_SEAM_ACCEPT_SAMPLES ||
-	    seam_accept_window_samples >= PGXP_DIAG_SEAM_ACCEPT_WINDOW_SAMPLES)
+	if (steps <= 2) return 0;
+	if (steps <= 4) return 1;
+	if (steps <= 8) return 2;
+	if (steps <= 16) return 3;
+	if (steps <= 32) return 4;
+	if (steps <= 64) return 5;
+	return 6;
+}
+
+static int64_t pgxp_diag_tj_native_cross(int32_t x0, int32_t y0,
+		int32_t x1, int32_t y1, int32_t px, int32_t py)
+{
+	return (int64_t)(x1 - x0) * (int64_t)(py - y0) -
+		(int64_t)(y1 - y0) * (int64_t)(px - x0);
+}
+
+static int pgxp_diag_tj_point_on_segment(int32_t x0, int32_t y0,
+		int32_t x1, int32_t y1, int32_t px, int32_t py)
+{
+	int32_t min_x = x0 < x1 ? x0 : x1;
+	int32_t max_x = x0 > x1 ? x0 : x1;
+	int32_t min_y = y0 < y1 ? y0 : y1;
+	int32_t max_y = y0 > y1 ? y0 : y1;
+	return pgxp_diag_tj_native_cross(x0, y0, x1, y1, px, py) == 0 &&
+		px >= min_x && px <= max_x && py >= min_y && py <= max_y;
+}
+
+static PGXP_diag_tj_vertex* pgxp_diag_tj_find_vertex(
+		int32_t x, int32_t y, int create)
+{
+	uint32_t hash = UINT32_C(2166136261);
+	unsigned probe;
+
+#define PGXP_TJ_HASH_VALUE(value) do { \
+	hash = (hash ^ (uint32_t)(value)) * UINT32_C(16777619); \
+} while (0)
+	PGXP_TJ_HASH_VALUE(x);
+	PGXP_TJ_HASH_VALUE(y);
+#undef PGXP_TJ_HASH_VALUE
+
+	for (probe = 0; probe < PGXP_DIAG_TJ_VERTEX_SLOTS; probe++)
+	{
+		PGXP_diag_tj_vertex* vertex = &tj_vertex_table[
+			(hash + probe) & (PGXP_DIAG_TJ_VERTEX_SLOTS - 1)];
+		if (!vertex->valid)
+		{
+			if (!create)
+				return NULL;
+			vertex->native_x = x;
+			vertex->native_y = y;
+			vertex->valid = 1;
+			return vertex;
+		}
+		if (vertex->native_x == x && vertex->native_y == y)
+			return vertex;
+	}
+	if (create)
+		tj_vertex_overflow++;
+	return NULL;
+}
+
+static PGXP_diag_tj_observation* pgxp_diag_tj_observation_slot(
+		PGXP_diag_tj_vertex* vertex)
+{
+	PGXP_diag_tj_observation* oldest = &vertex->observation[0];
+	unsigned i;
+
+	for (i = 0; i < PGXP_DIAG_TJ_VERTEX_WAYS; i++)
+	{
+		PGXP_diag_tj_observation* observation = &vertex->observation[i];
+		if (!observation->valid)
+			return observation;
+		if (observation->packet < oldest->packet)
+			oldest = observation;
+	}
+	tj_observation_evictions++;
+	return oldest;
+}
+
+static void pgxp_diag_tj_reset_frame(uint32_t frame)
+{
+	memset(tj_vertex_table, 0, sizeof(tj_vertex_table));
+	tj_edge_count = 0;
+	tj_table_frame = frame;
+}
+
+static void pgxp_diag_tj_sample(const PGXP_diag_tj_edge* edge,
+		const PGXP_diag_tj_observation* point,
+		int32_t point_x, int32_t point_y, float predicted_x,
+		float predicted_y, float perpendicular, float predicted_delta,
+		float signed_perpendicular, float native_t, float projected_t,
+		int64_t edge_side, int64_t point_side, uint64_t gap)
+{
+	if (!log_cb || tj_samples >= PGXP_DIAG_TJ_SAMPLES ||
+	    tj_window_samples >= PGXP_DIAG_TJ_WINDOW_SAMPLES)
 		return;
-	seam_accept_samples++;
-	seam_accept_window_samples++;
+	tj_samples++;
+	tj_window_samples++;
 	log_cb(RETRO_LOG_INFO,
-		"[pgxp_seam_accept] n=%u mf=%u packet=%llu op=%02x "
-		"native=%d/%d-%d/%d endpoint_delta=%.6f/%.6f age=%llu\n",
-		seam_accept_samples, mode_frame,
-		(unsigned long long)current_packet, current_opcode,
-		x0, y0, x1, y1, delta0, delta1,
-		(unsigned long long)age);
+		"[pgxp_tjunction] n=%u mf=%u edge=%llu/%02x point=%llu/%02x "
+		"native=%d/%d-%d/%d point=%d/%d "
+		"edge_xy=%.4f/%.4f-%.4f/%.4f point_xy=%.4f/%.4f "
+		"predicted=%.4f/%.4f perp=%.6f signed=%.6f "
+		"predicted_delta=%.6f t=%.6f projected_t=%.6f "
+		"side=%d/%d gap=%llu g=%u/%u invalid_w=%u/%u "
+		"w=%.6f/%.6f/%.6f stage=%u/%u/%u uv=%u/%u-%u/%u@%u/%u\n",
+		tj_samples, mode_frame,
+		(unsigned long long)edge->packet, edge->opcode,
+		(unsigned long long)point->packet, point->opcode,
+		edge->native_x[0], edge->native_y[0],
+		edge->native_x[1], edge->native_y[1], point_x, point_y,
+		edge->precise_x[0], edge->precise_y[0],
+		edge->precise_x[1], edge->precise_y[1],
+		point->precise_x, point->precise_y, predicted_x, predicted_y,
+		perpendicular, signed_perpendicular, predicted_delta, native_t,
+		projected_t, edge_side < 0 ? -1 : edge_side > 0 ? 1 : 0,
+		point_side < 0 ? -1 : point_side > 0 ? 1 : 0,
+		(unsigned long long)gap, edge->gouraud, point->gouraud,
+		edge->invalid_w, point->invalid_w, edge->precise_w[0],
+		edge->precise_w[1], point->precise_w, edge->stage[0],
+		edge->stage[1], point->stage, edge->u[0], edge->v[0],
+		edge->u[1], edge->v[1], point->u, point->v);
 }
 
-void PGXP_DiagSeamPrimitive(unsigned observed_edges,
-		unsigned moved_vertices, unsigned conflicts)
+static void pgxp_diag_tj_finish_frame(void)
 {
-	seam_primitives++;
-	seam_observed_edges += observed_edges;
-	seam_moved_vertices += moved_vertices;
-	seam_conflicts += conflicts;
+	unsigned edge_index;
+
+	if (tj_table_frame == ~UINT32_C(0))
+		return;
+
+	for (edge_index = 0; edge_index < tj_edge_count; edge_index++)
+	{
+		const PGXP_diag_tj_edge* edge = &tj_edges[edge_index];
+		int32_t dx = edge->native_x[1] - edge->native_x[0];
+		int32_t dy = edge->native_y[1] - edge->native_y[0];
+		unsigned abs_dx = (unsigned)(dx < 0 ? -dx : dx);
+		unsigned abs_dy = (unsigned)(dy < 0 ? -dy : dy);
+		unsigned steps = pgxp_diag_tj_gcd(abs_dx, abs_dy);
+		unsigned step;
+
+		if (steps <= 1 || steps > PGXP_DIAG_TJ_MAX_STEPS)
+			continue;
+		for (step = 1; step < steps; step++)
+		{
+			int32_t point_x = edge->native_x[0] +
+				(int32_t)(((int64_t)dx * step) / steps);
+			int32_t point_y = edge->native_y[0] +
+				(int32_t)(((int64_t)dy * step) / steps);
+			PGXP_diag_tj_vertex* vertex = pgxp_diag_tj_find_vertex(
+				point_x, point_y, 0);
+			unsigned way;
+
+			if (!vertex)
+				continue;
+			for (way = 0; way < PGXP_DIAG_TJ_VERTEX_WAYS; way++)
+			{
+				const PGXP_diag_tj_observation* point =
+					&vertex->observation[way];
+				unsigned kind;
+				unsigned topology = 0;
+				unsigned perpendicular_bin;
+				unsigned predicted_bin;
+				unsigned y_band;
+				unsigned context;
+				float edge_dx;
+				float edge_dy;
+				float length_squared;
+				float length;
+				float relative_x;
+				float relative_y;
+				float cross;
+				float perpendicular;
+				float signed_perpendicular;
+				float native_t;
+				float projected_t;
+				float predicted_x;
+				float predicted_y;
+				float predicted_dx;
+				float predicted_dy;
+				float predicted_delta;
+				uint64_t gap;
+				int64_t edge_side;
+				int64_t point_side = 0;
+				int linked = 0;
+				int mixed_side = 0;
+				unsigned offset_side = 0;
+				unsigned neighbor;
+
+				if (!point->valid || point->packet == edge->packet)
+					continue;
+				kind = edge->textured == point->textured ?
+					(edge->textured ? 2u : 0u) : 1u;
+				edge_dx = edge->precise_x[1] - edge->precise_x[0];
+				edge_dy = edge->precise_y[1] - edge->precise_y[0];
+				length_squared = edge_dx * edge_dx + edge_dy * edge_dy;
+				if (length_squared <= 1.0e-12f)
+				{
+					tj_degenerate_precise_edge++;
+					continue;
+				}
+				length = sqrtf(length_squared);
+				relative_x = point->precise_x - edge->precise_x[0];
+				relative_y = point->precise_y - edge->precise_y[0];
+				cross = edge_dx * relative_y - edge_dy * relative_x;
+				signed_perpendicular = cross / length;
+				perpendicular = fabsf(signed_perpendicular);
+				native_t = (float)step / (float)steps;
+				projected_t = (relative_x * edge_dx + relative_y * edge_dy) /
+					length_squared;
+				predicted_x = edge->precise_x[0] + native_t * edge_dx;
+				predicted_y = edge->precise_y[0] + native_t * edge_dy;
+				predicted_dx = fabsf(point->precise_x - predicted_x);
+				predicted_dy = fabsf(point->precise_y - predicted_y);
+				predicted_delta = predicted_dx > predicted_dy ?
+					predicted_dx : predicted_dy;
+				gap = edge->packet > point->packet ?
+					edge->packet - point->packet : point->packet - edge->packet;
+
+				edge_side = pgxp_diag_tj_native_cross(
+					edge->native_x[0], edge->native_y[0],
+					edge->native_x[1], edge->native_y[1],
+					edge->third_x, edge->third_y);
+				for (neighbor = 0; neighbor < 2; neighbor++)
+				{
+					int32_t nx = point->neighbor_x[neighbor];
+					int32_t ny = point->neighbor_y[neighbor];
+					int64_t side;
+					if ((nx != point_x || ny != point_y) &&
+					    pgxp_diag_tj_point_on_segment(edge->native_x[0],
+						edge->native_y[0], edge->native_x[1],
+						edge->native_y[1], nx, ny))
+					{
+						linked = 1;
+						continue;
+					}
+					side = pgxp_diag_tj_native_cross(edge->native_x[0],
+						edge->native_y[0], edge->native_x[1],
+						edge->native_y[1], nx, ny);
+					if (!side)
+						continue;
+					if (!point_side)
+						point_side = side;
+					else if ((point_side < 0) != (side < 0))
+						mixed_side = 1;
+				}
+				if (linked)
+					topology = !mixed_side && edge_side && point_side &&
+						((edge_side < 0) != (point_side < 0)) ? 2u : 1u;
+				if (topology == 2 && perpendicular > 1.0e-6f)
+					offset_side = ((signed_perpendicular < 0) ==
+						(edge_side < 0)) ? 1u : 2u;
+
+				perpendicular_bin = pgxp_diag_edge_delta_bin(perpendicular);
+				predicted_bin = pgxp_diag_edge_delta_bin(predicted_delta);
+				y_band = point_y < 64 ? 0u : point_y < 128 ? 1u :
+					point_y < 192 ? 2u : 3u;
+				context = (edge->invalid_w ? 2u : 0u) |
+					(point->invalid_w ? 1u : 0u);
+				tj_matches[kind]++;
+				tj_topology[kind][topology]++;
+				tj_perp_bins[kind][perpendicular_bin]++;
+				tj_predicted_bins[kind][predicted_bin]++;
+				tj_packet_bins[kind][pgxp_diag_edge_packet_bin(gap)]++;
+				tj_y_band[kind][y_band]++;
+				tj_step_bins[kind][pgxp_diag_tj_step_bin(steps)]++;
+				if (topology == 2)
+					tj_offset_side[kind][offset_side]++;
+				tj_context_invalid_w[context]++;
+				context = (edge->gouraud ? 2u : 0u) |
+					(point->gouraud ? 1u : 0u);
+				tj_context_gouraud[context]++;
+				context = ((edge->opcode & 0x02) ? 2u : 0u) |
+					((point->opcode & 0x02) ? 1u : 0u);
+				tj_context_semi[context]++;
+				if (projected_t <= 0.0f || projected_t >= 1.0f)
+					tj_projected_outside++;
+
+				if (topology == 2 && offset_side == 2 && kind == 2 &&
+				    !(edge->opcode & 0x02) && !(point->opcode & 0x02) &&
+				    perpendicular_bin >= 2 &&
+				    perpendicular <= 4.0f)
+				{
+					tj_risk[kind]++;
+					context = (edge->invalid_w ? 2u : 0u) |
+						(point->invalid_w ? 1u : 0u);
+					tj_risk_invalid_w[context]++;
+					context = (edge->gouraud ? 2u : 0u) |
+						(point->gouraud ? 1u : 0u);
+					tj_risk_gouraud[context]++;
+					tj_risk_packet[pgxp_diag_edge_packet_bin(gap)]++;
+					tj_risk_y[y_band]++;
+					pgxp_diag_tj_sample(edge, point, point_x, point_y,
+						predicted_x, predicted_y, perpendicular,
+						predicted_delta, signed_perpendicular,
+						native_t, projected_t, edge_side, point_side, gap);
+				}
+			}
+		}
+	}
+
+	tj_edge_count = 0;
+	tj_table_frame = ~UINT32_C(0);
+}
+
+static void pgxp_diag_tj_observe(
+		const PGXP_diag_primitive_vertex vertices[3],
+		int textured, int gouraud, int invalid_w, unsigned upscale_shift)
+{
+	static const uint8_t edge_vertices[3][3] = {
+		{ 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }
+	};
+	unsigned scale = 1u << upscale_shift;
+	float inverse_scale = 1.0f / (float)scale;
+	unsigned i;
+
+	if (tj_table_frame != mode_frame)
+		pgxp_diag_tj_reset_frame(mode_frame);
+
+	for (i = 0; i < 3; i++)
+	{
+		PGXP_diag_tj_vertex* vertex = pgxp_diag_tj_find_vertex(
+			vertices[i].native_x / (int32_t)scale,
+			vertices[i].native_y / (int32_t)scale, 1);
+		PGXP_diag_tj_observation* observation;
+		unsigned neighbor0 = (i + 1) % 3;
+		unsigned neighbor1 = (i + 2) % 3;
+
+		if (!vertex)
+			continue;
+		observation = pgxp_diag_tj_observation_slot(vertex);
+		observation->precise_x = vertices[i].precise_after_x * inverse_scale;
+		observation->precise_y = vertices[i].precise_after_y * inverse_scale;
+		observation->precise_w = vertices[i].precise_after_w;
+		observation->neighbor_x[0] =
+			vertices[neighbor0].native_x / (int32_t)scale;
+		observation->neighbor_y[0] =
+			vertices[neighbor0].native_y / (int32_t)scale;
+		observation->neighbor_x[1] =
+			vertices[neighbor1].native_x / (int32_t)scale;
+		observation->neighbor_y[1] =
+			vertices[neighbor1].native_y / (int32_t)scale;
+		observation->packet = current_packet;
+		observation->u = vertices[i].u;
+		observation->v = vertices[i].v;
+		observation->opcode = current_opcode;
+		observation->textured = textured != 0;
+		observation->gouraud = gouraud != 0;
+		observation->invalid_w = invalid_w != 0;
+		observation->stage = i < packet_vertex_count ?
+			packet_vertices[i].stage : PGXP_TRACE_NONE;
+		observation->valid = 1;
+	}
+
+	for (i = 0; i < 3; i++)
+	{
+		unsigned first = edge_vertices[i][0];
+		unsigned second = edge_vertices[i][1];
+		unsigned third = edge_vertices[i][2];
+		int32_t x0 = vertices[first].native_x / (int32_t)scale;
+		int32_t y0 = vertices[first].native_y / (int32_t)scale;
+		int32_t x1 = vertices[second].native_x / (int32_t)scale;
+		int32_t y1 = vertices[second].native_y / (int32_t)scale;
+		int32_t dx = x1 - x0;
+		int32_t dy = y1 - y0;
+		unsigned abs_dx = (unsigned)(dx < 0 ? -dx : dx);
+		unsigned abs_dy = (unsigned)(dy < 0 ? -dy : dy);
+		unsigned steps = pgxp_diag_tj_gcd(abs_dx, abs_dy);
+		PGXP_diag_tj_edge* edge;
+
+		tj_edges_recorded++;
+		if (steps <= 1)
+			continue;
+		tj_lattice_edges++;
+		tj_interior_points += steps - 1;
+		if (steps > PGXP_DIAG_TJ_MAX_STEPS)
+		{
+			tj_long_edges++;
+			continue;
+		}
+		if (tj_edge_count >= PGXP_DIAG_TJ_EDGE_CAPACITY)
+		{
+			tj_edge_overflow++;
+			continue;
+		}
+		edge = &tj_edges[tj_edge_count++];
+		edge->native_x[0] = x0;
+		edge->native_y[0] = y0;
+		edge->native_x[1] = x1;
+		edge->native_y[1] = y1;
+		edge->third_x = vertices[third].native_x / (int32_t)scale;
+		edge->third_y = vertices[third].native_y / (int32_t)scale;
+		edge->precise_x[0] = vertices[first].precise_after_x * inverse_scale;
+		edge->precise_y[0] = vertices[first].precise_after_y * inverse_scale;
+		edge->precise_w[0] = vertices[first].precise_after_w;
+		edge->precise_x[1] = vertices[second].precise_after_x * inverse_scale;
+		edge->precise_y[1] = vertices[second].precise_after_y * inverse_scale;
+		edge->precise_w[1] = vertices[second].precise_after_w;
+		edge->packet = current_packet;
+		edge->u[0] = vertices[first].u;
+		edge->v[0] = vertices[first].v;
+		edge->u[1] = vertices[second].u;
+		edge->v[1] = vertices[second].v;
+		edge->opcode = current_opcode;
+		edge->textured = textured != 0;
+		edge->gouraud = gouraud != 0;
+		edge->invalid_w = invalid_w != 0;
+		edge->stage[0] = first < packet_vertex_count ?
+			packet_vertices[first].stage : PGXP_TRACE_NONE;
+		edge->stage[1] = second < packet_vertex_count ?
+			packet_vertices[second].stage : PGXP_TRACE_NONE;
+	}
 }
 
 static PGXP_diag_edge* pgxp_diag_find_edge(int32_t x0, int32_t y0,
@@ -1821,6 +2313,8 @@ void PGXP_DiagPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	primitive_class[textured][gouraud][invalid_w != 0]++;
 	primitive_y_band[y_band]++;
 	pgxp_diag_observe_edges(vertices, textured, gouraud, invalid_w,
+		upscale_shift);
+	pgxp_diag_tj_observe(vertices, textured, gouraud, invalid_w,
 		upscale_shift);
 	for (i = 0; i < 3; i++)
 	{
@@ -2702,6 +3196,9 @@ void PGXP_DiagFrame(int backend)
 	unsigned mode = PGXP_GetModes();
 	uint32_t vc[7];
 
+	/* Primitive observation is frame-local.  Complete the prior frame before
+	 * advancing mode_frame so packet ages and the 60-frame aggregate align. */
+	pgxp_diag_tj_finish_frame();
 	frame_number++;
 	if (backend != last_backend || mode != last_mode)
 	{
@@ -3277,7 +3774,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_edge_summary] f=%llu observed=%llu/%llu "
 		"compared_uu_ut_tt=%llu/%llu/%llu overflow=%llu samples=%u "
-		"handoff=gl_decoded_triangle_edge_weld\n",
+		"handoff=unaltered analysis=frame_complete_tjunction\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)edge_observations[0],
 		(unsigned long long)edge_observations[1],
@@ -3286,35 +3783,65 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)edge_compares[2],
 		(unsigned long long)edge_table_overflow, edge_samples);
 	log_cb(RETRO_LOG_INFO,
-		"[pgxp_seam_summary] f=%llu primitives=%llu edges=%llu "
-		"exact=%llu accepted=%llu "
-		"stale=%llu unanchored=%llu far=%llu moved=%llu conflicts=%llu "
-		"delta=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
-		"age=%llu/%llu/%llu/%llu/%llu/%llu samples=%u\n",
+		"[pgxp_tjunction_summary] f=%llu edges=%llu lattice=%llu "
+		"long=%llu interior_points=%llu matches=%llu/%llu/%llu "
+		"risk=%llu/%llu/%llu outside=%llu degenerate=%llu "
+		"overflow=%llu/%llu evictions=%llu samples=%u\n",
 		(unsigned long long)frame_number,
-		(unsigned long long)seam_primitives,
-		(unsigned long long)seam_observed_edges,
-		(unsigned long long)seam_results[PGXP_DIAG_SEAM_EXACT],
-		(unsigned long long)seam_results[PGXP_DIAG_SEAM_ACCEPTED],
-		(unsigned long long)seam_results[PGXP_DIAG_SEAM_STALE],
-		(unsigned long long)seam_results[PGXP_DIAG_SEAM_UNANCHORED],
-		(unsigned long long)seam_results[PGXP_DIAG_SEAM_FAR],
-		(unsigned long long)seam_moved_vertices,
-		(unsigned long long)seam_conflicts,
-		(unsigned long long)seam_delta_bins[0],
-		(unsigned long long)seam_delta_bins[1],
-		(unsigned long long)seam_delta_bins[2],
-		(unsigned long long)seam_delta_bins[3],
-		(unsigned long long)seam_delta_bins[4],
-		(unsigned long long)seam_delta_bins[5],
-		(unsigned long long)seam_delta_bins[6],
-		(unsigned long long)seam_age_bins[0],
-		(unsigned long long)seam_age_bins[1],
-		(unsigned long long)seam_age_bins[2],
-		(unsigned long long)seam_age_bins[3],
-		(unsigned long long)seam_age_bins[4],
-		(unsigned long long)seam_age_bins[5],
-		seam_accept_samples);
+		(unsigned long long)tj_edges_recorded,
+		(unsigned long long)tj_lattice_edges,
+		(unsigned long long)tj_long_edges,
+		(unsigned long long)tj_interior_points,
+		(unsigned long long)tj_matches[0],
+		(unsigned long long)tj_matches[1],
+		(unsigned long long)tj_matches[2],
+		(unsigned long long)tj_risk[0],
+		(unsigned long long)tj_risk[1],
+		(unsigned long long)tj_risk[2],
+		(unsigned long long)tj_projected_outside,
+		(unsigned long long)tj_degenerate_precise_edge,
+		(unsigned long long)tj_vertex_overflow,
+		(unsigned long long)tj_edge_overflow,
+		(unsigned long long)tj_observation_evictions, tj_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_tjunction_context] f=%llu invalid_w=%llu/%llu/%llu/%llu "
+		"gouraud=%llu/%llu/%llu/%llu semi=%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)tj_context_invalid_w[0],
+		(unsigned long long)tj_context_invalid_w[1],
+		(unsigned long long)tj_context_invalid_w[2],
+		(unsigned long long)tj_context_invalid_w[3],
+		(unsigned long long)tj_context_gouraud[0],
+		(unsigned long long)tj_context_gouraud[1],
+		(unsigned long long)tj_context_gouraud[2],
+		(unsigned long long)tj_context_gouraud[3],
+		(unsigned long long)tj_context_semi[0],
+		(unsigned long long)tj_context_semi[1],
+		(unsigned long long)tj_context_semi[2],
+		(unsigned long long)tj_context_semi[3]);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_tjunction_risk] f=%llu invalid_w=%llu/%llu/%llu/%llu "
+		"gouraud=%llu/%llu/%llu/%llu packet=%llu/%llu/%llu/%llu/%llu/%llu "
+		"y=%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number,
+		(unsigned long long)tj_risk_invalid_w[0],
+		(unsigned long long)tj_risk_invalid_w[1],
+		(unsigned long long)tj_risk_invalid_w[2],
+		(unsigned long long)tj_risk_invalid_w[3],
+		(unsigned long long)tj_risk_gouraud[0],
+		(unsigned long long)tj_risk_gouraud[1],
+		(unsigned long long)tj_risk_gouraud[2],
+		(unsigned long long)tj_risk_gouraud[3],
+		(unsigned long long)tj_risk_packet[0],
+		(unsigned long long)tj_risk_packet[1],
+		(unsigned long long)tj_risk_packet[2],
+		(unsigned long long)tj_risk_packet[3],
+		(unsigned long long)tj_risk_packet[4],
+		(unsigned long long)tj_risk_packet[5],
+		(unsigned long long)tj_risk_y[0],
+		(unsigned long long)tj_risk_y[1],
+		(unsigned long long)tj_risk_y[2],
+		(unsigned long long)tj_risk_y[3]);
 	{
 		static const char* const edge_kind_name[PGXP_DIAG_EDGE_KINDS] = {
 			"uu", "ut", "tt"
@@ -3356,6 +3883,54 @@ void PGXP_DiagFrame(int backend)
 				(unsigned long long)edge_mismatch_y[kind][2],
 				(unsigned long long)edge_mismatch_y[kind][3],
 				mean, edge_delta_max[kind]);
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_tjunction_kind] f=%llu kind=%s "
+				"topology=%llu/%llu/%llu "
+				"perp=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"predicted=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"packet=%llu/%llu/%llu/%llu/%llu/%llu "
+				"y=%llu/%llu/%llu/%llu "
+				"steps=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"side=on/toward_edge/toward_neighbor=%llu/%llu/%llu risk=%llu\n",
+				(unsigned long long)frame_number, edge_kind_name[kind],
+				(unsigned long long)tj_topology[kind][0],
+				(unsigned long long)tj_topology[kind][1],
+				(unsigned long long)tj_topology[kind][2],
+				(unsigned long long)tj_perp_bins[kind][0],
+				(unsigned long long)tj_perp_bins[kind][1],
+				(unsigned long long)tj_perp_bins[kind][2],
+				(unsigned long long)tj_perp_bins[kind][3],
+				(unsigned long long)tj_perp_bins[kind][4],
+				(unsigned long long)tj_perp_bins[kind][5],
+				(unsigned long long)tj_perp_bins[kind][6],
+				(unsigned long long)tj_predicted_bins[kind][0],
+				(unsigned long long)tj_predicted_bins[kind][1],
+				(unsigned long long)tj_predicted_bins[kind][2],
+				(unsigned long long)tj_predicted_bins[kind][3],
+				(unsigned long long)tj_predicted_bins[kind][4],
+				(unsigned long long)tj_predicted_bins[kind][5],
+				(unsigned long long)tj_predicted_bins[kind][6],
+				(unsigned long long)tj_packet_bins[kind][0],
+				(unsigned long long)tj_packet_bins[kind][1],
+				(unsigned long long)tj_packet_bins[kind][2],
+				(unsigned long long)tj_packet_bins[kind][3],
+				(unsigned long long)tj_packet_bins[kind][4],
+				(unsigned long long)tj_packet_bins[kind][5],
+				(unsigned long long)tj_y_band[kind][0],
+				(unsigned long long)tj_y_band[kind][1],
+				(unsigned long long)tj_y_band[kind][2],
+				(unsigned long long)tj_y_band[kind][3],
+				(unsigned long long)tj_step_bins[kind][0],
+				(unsigned long long)tj_step_bins[kind][1],
+				(unsigned long long)tj_step_bins[kind][2],
+				(unsigned long long)tj_step_bins[kind][3],
+				(unsigned long long)tj_step_bins[kind][4],
+				(unsigned long long)tj_step_bins[kind][5],
+				(unsigned long long)tj_step_bins[kind][6],
+				(unsigned long long)tj_offset_side[kind][0],
+				(unsigned long long)tj_offset_side[kind][1],
+				(unsigned long long)tj_offset_side[kind][2],
+				(unsigned long long)tj_risk[kind]);
 		}
 	}
 	log_cb(RETRO_LOG_INFO,
@@ -3624,14 +4199,32 @@ void PGXP_DiagFrame(int backend)
 	memset(edge_delta_sum, 0, sizeof(edge_delta_sum));
 	memset(edge_delta_max, 0, sizeof(edge_delta_max));
 	edge_table_overflow = 0;
-	memset(seam_results, 0, sizeof(seam_results));
-	memset(seam_delta_bins, 0, sizeof(seam_delta_bins));
-	memset(seam_age_bins, 0, sizeof(seam_age_bins));
-	seam_primitives = 0;
-	seam_observed_edges = 0;
-	seam_moved_vertices = 0;
-	seam_conflicts = 0;
-	seam_accept_window_samples = 0;
+	tj_edges_recorded = 0;
+	tj_lattice_edges = 0;
+	tj_long_edges = 0;
+	tj_interior_points = 0;
+	memset(tj_matches, 0, sizeof(tj_matches));
+	memset(tj_topology, 0, sizeof(tj_topology));
+	memset(tj_perp_bins, 0, sizeof(tj_perp_bins));
+	memset(tj_predicted_bins, 0, sizeof(tj_predicted_bins));
+	memset(tj_packet_bins, 0, sizeof(tj_packet_bins));
+	memset(tj_y_band, 0, sizeof(tj_y_band));
+	memset(tj_step_bins, 0, sizeof(tj_step_bins));
+	memset(tj_risk, 0, sizeof(tj_risk));
+	memset(tj_offset_side, 0, sizeof(tj_offset_side));
+	memset(tj_risk_invalid_w, 0, sizeof(tj_risk_invalid_w));
+	memset(tj_risk_gouraud, 0, sizeof(tj_risk_gouraud));
+	memset(tj_risk_packet, 0, sizeof(tj_risk_packet));
+	memset(tj_risk_y, 0, sizeof(tj_risk_y));
+	memset(tj_context_invalid_w, 0, sizeof(tj_context_invalid_w));
+	memset(tj_context_gouraud, 0, sizeof(tj_context_gouraud));
+	memset(tj_context_semi, 0, sizeof(tj_context_semi));
+	tj_projected_outside = 0;
+	tj_degenerate_precise_edge = 0;
+	tj_vertex_overflow = 0;
+	tj_edge_overflow = 0;
+	tj_observation_evictions = 0;
+	tj_window_samples = 0;
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));

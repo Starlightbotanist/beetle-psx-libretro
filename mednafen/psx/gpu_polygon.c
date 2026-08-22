@@ -83,6 +83,10 @@ static INLINE const float *gpu_precise_quad_rgb(const tri_vertex *first,
    return gpu_precise_rgb_buf;
 }
 
+#if 0
+/* Falsified R4 shared-edge weld retained only until the diagnostic branch is
+ * consolidated.  The 6fc0a8a8 device test confirmed that this code accepted
+ * and moved the intended decoded edges without changing any visible holes. */
 /* Conservative PGXP shared-edge weld for the OpenGL renderer.
  *
  * R4's tunnel probe established that opaque textured PGXP X/Y is the source
@@ -112,78 +116,6 @@ static INLINE const float *gpu_precise_quad_rgb(const tri_vertex *first,
  * native fallback, flat-shaded, untextured, and already-correct Vulkan
  * geometry untouched.  Entries store the welded result, so a strip converges
  * on one precise edge rather than alternating between recovered variants. */
-#define GPU_PGXP_SEAM_SLOTS 16384u
-#define GPU_PGXP_SEAM_MAX_AGE 64u
-
-typedef struct gpu_pgxp_seam_edge_Tag
-{
-   int32_t native_x[2];
-   int32_t native_y[2];
-   float precise_x[2];
-   float precise_y[2];
-   uint64_t serial;
-   uint32_t generation;
-} gpu_pgxp_seam_edge;
-
-static gpu_pgxp_seam_edge gpu_pgxp_seam_edges[GPU_PGXP_SEAM_SLOTS];
-static uint64_t gpu_pgxp_seam_serial;
-static uint32_t gpu_pgxp_seam_generation = 1;
-
-static void gpu_pgxp_seam_reset(void)
-{
-   gpu_pgxp_seam_serial = 0;
-   gpu_pgxp_seam_generation++;
-   if (!gpu_pgxp_seam_generation)
-   {
-      memset(gpu_pgxp_seam_edges, 0, sizeof(gpu_pgxp_seam_edges));
-      gpu_pgxp_seam_generation = 1;
-   }
-}
-
-static INLINE gpu_pgxp_seam_edge *gpu_pgxp_seam_find(
-      int32_t x0, int32_t y0, int32_t x1, int32_t y1)
-{
-   uint32_t hash = UINT32_C(2166136261);
-   unsigned probe;
-
-#define GPU_PGXP_SEAM_HASH(value) do { \
-   hash = (hash ^ (uint32_t)(value)) * UINT32_C(16777619); \
-} while (0)
-   GPU_PGXP_SEAM_HASH(x0);
-   GPU_PGXP_SEAM_HASH(y0);
-   GPU_PGXP_SEAM_HASH(x1);
-   GPU_PGXP_SEAM_HASH(y1);
-#undef GPU_PGXP_SEAM_HASH
-
-   for (probe = 0; probe < GPU_PGXP_SEAM_SLOTS; probe++)
-   {
-      gpu_pgxp_seam_edge *edge = &gpu_pgxp_seam_edges[
-         (hash + probe) & (GPU_PGXP_SEAM_SLOTS - 1)];
-      if (edge->generation != gpu_pgxp_seam_generation)
-      {
-         edge->native_x[0] = x0;
-         edge->native_y[0] = y0;
-         edge->native_x[1] = x1;
-         edge->native_y[1] = y1;
-         edge->generation = gpu_pgxp_seam_generation;
-         edge->serial = 0;
-         return edge;
-      }
-      if (edge->native_x[0] == x0 && edge->native_y[0] == y0 &&
-          edge->native_x[1] == x1 && edge->native_y[1] == y1)
-         return edge;
-   }
-   return NULL;
-}
-
-static INLINE float gpu_pgxp_seam_endpoint_delta(
-      float ax, float ay, float bx, float by)
-{
-   float dx = fabsf(ax - bx);
-   float dy = fabsf(ay - by);
-   return dx > dy ? dx : dy;
-}
-
 static void gpu_pgxp_seam_process(tri_vertex *vertices,
       unsigned upscale_shift, bool enabled)
 {
@@ -334,6 +266,7 @@ static void gpu_pgxp_seam_process(tri_vertex *vertices,
    }
    PGXP_DiagSeamPrimitive(observed_edges, moved_vertices, conflicts);
 }
+#endif
 
 /* Defined later in the same translation unit (gpu.c includes this
  * file before the dither_table definition).  Forward-declared here so
@@ -1910,12 +1843,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          NV_LIT == 4 ? (gpu->InCmd == INCMD_QUAD ? 2 : 1) : 0, \
          invalidW, gpu->upscale_shift); \
    } \
-   /* Reconcile the exact decoded edge set recorded above.  This must precede \
-    * the first-half quad save so the second decoder invocation and final RHI \
-    * submission inherit the same welded coordinates. */ \
-   gpu_pgxp_seam_process(vertices, gpu->upscale_shift, \
-      (PGXP_LIT) && (GOURAUD_LIT) && (TEXTURED_LIT) && !invalidW && \
-      rhi_intf_is_type() == RHI_OPENGL); \
    /* Copy before Calc_UVOffsets which modifies vertices */ \
    /* Calc_UVOffsets likes to see unadjusted vertices */ \
    if (NV_LIT == 4 && gpu->InCmd != INCMD_QUAD) \
