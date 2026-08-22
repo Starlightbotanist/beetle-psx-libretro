@@ -60,10 +60,7 @@ void main() {
    // (-1;1, -1;1)
    float wpos = position.w;
    float xpos = (pos.x / 512.) - 1.0;
-   /* SwanStation offsets OpenGL Y very slightly to compensate for the
-    * lower-left-origin rasterisation mismatch. Its clip-space Y is the
-    * inverse of ours, so the equivalent bias here has the opposite sign. */
-   float ypos = (pos.y / 256.) - 1.0 - 0.00001;
+   float ypos = (pos.y / 256.) - 1.0;
 
    // position.z increases as the primitives near the camera so we
    // reverse the order to match the common GL convention

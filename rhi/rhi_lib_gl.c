@@ -5424,7 +5424,8 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_raster_bias] ndc_y=-0.000010 subpixel_bits=%d\n",
+         "[pgxp_gl_depth_test] forced=disabled raster_bias=disabled "
+         "subpixel_bits=%d\n",
          (int)subpixel_bits);
 
    /* Floor check.  Beetle's GL renderer needs VAOs (3.0+ core),
@@ -6005,7 +6006,11 @@ void rhi_gl_prepare_frame(void)
     * proportionally */
    glLineWidth((GLfloat)renderer->internal_upscaling);
    glEnable(GL_SCISSOR_TEST);
-   glEnable(GL_DEPTH_TEST);
+   /* Diagnostic: PSX polygons are already submitted in command order. If
+    * the R4 tunnel roof becomes complete with host depth testing disabled,
+    * the GL-only loss is in depth rejection/state rather than PGXP vertex
+    * production, raster coverage, texture lookup, or transparent discard. */
+   glDisable(GL_DEPTH_TEST);
    glDepthFunc(GL_LEQUAL);
    /* Used for PSX GPU command blending */
    glBlendColor(0.25, 0.25, 0.25, 0.5);
