@@ -1027,14 +1027,14 @@ vec4 get_texel_jinc2(out float opacity)
 #endif
 STRINGIZE(
 void main() {
-   // Focused follow-up to the maximum-coverage pass: keep the scene and all
-   // fixed-function state normal, but make an opaque untextured primitive
-   // unmistakably magenta if it is what occupies an R4 roof void.
+   // Focused follow-up to the class highlight: keep the scene and all
+   // fixed-function state normal, but remove opaque untextured fragments.
+   // If the R4 defects close, this class was overwriting valid textured
+   // coverage; if their silhouettes remain, it was only visible underneath.
    if (coverage_probe != 0U &&
          frag_texture_blend_mode == BLEND_MODE_NO_TEXTURE &&
          frag_semi_transparent == 0U) {
-      frag_color = vec4(1., 0., 1., 1.);
-      return;
+      discard;
    }
 
    if (force_zero != 0u) {

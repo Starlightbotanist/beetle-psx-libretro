@@ -5463,7 +5463,7 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_coverage_probe] opaque_untextured=magenta all_other=normal "
+         "[pgxp_gl_coverage_probe] opaque_untextured=discarded all_other=normal "
          "depth=enabled stencil=enabled scissor=enabled blend=normal "
          "submission=draw_arrays/expanded_quads "
          "subpixel_bits=%d\n",
