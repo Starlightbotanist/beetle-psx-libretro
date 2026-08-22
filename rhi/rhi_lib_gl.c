@@ -5424,7 +5424,7 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_depth_test] forced=disabled raster_bias=disabled "
+         "[pgxp_gl_transparent_probe] zero_texel=magenta depth_test=enabled "
          "subpixel_bits=%d\n",
          (int)subpixel_bits);
 
@@ -6006,11 +6006,7 @@ void rhi_gl_prepare_frame(void)
     * proportionally */
    glLineWidth((GLfloat)renderer->internal_upscaling);
    glEnable(GL_SCISSOR_TEST);
-   /* Diagnostic: PSX polygons are already submitted in command order. If
-    * the R4 tunnel roof becomes complete with host depth testing disabled,
-    * the GL-only loss is in depth rejection/state rather than PGXP vertex
-    * production, raster coverage, texture lookup, or transparent discard. */
-   glDisable(GL_DEPTH_TEST);
+   glEnable(GL_DEPTH_TEST);
    glDepthFunc(GL_LEQUAL);
    /* Used for PSX GPU command blending */
    glBlendColor(0.25, 0.25, 0.25, 0.5);

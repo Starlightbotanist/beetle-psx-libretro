@@ -1098,12 +1098,13 @@ STRINGIZE(
             }
          }
 
-	 // texel color 0x0000 is always fully transparent (even for opaque
-         // draw commands)
-      //   if (is_transparent(texel0)) {
+	 // Diagnostic: make every texel that the normal GL path would discard
+	 // unmistakable. Magenta in an R4 roof hole proves that geometry reached
+	 // the fragment shader but sampled transparent/stale VRAM; an unchanged
+	 // hole instead keeps the fault on geometry, scissor, or stencil coverage.
 		  if(opacity < 0.5) {
-	   // Fully transparent texel, discard
-	   discard;
+	   frag_color = vec4(1.0, 0.0, 1.0, 1.0);
+	   return;
          }
 
          // Bit 15 (stored in the alpha) is used as a flag for
