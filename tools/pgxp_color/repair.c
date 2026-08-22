@@ -13,6 +13,10 @@
 #include "../../pgxp/pgxp_diag.h"
 #include "../../pgxp/pgxp_main.h"
 
+#ifndef PGXP_DIAG_GL_REPAIR_APPLY
+#define PGXP_DIAG_GL_REPAIR_APPLY 0
+#endif
+
 typedef struct
 {
 	float position[4];
@@ -74,15 +78,19 @@ static void test_opposing_tjunction_closes(void)
 	};
 	test_vertex stream[6];
 
-	printf("[R1] opposing short edge projects onto the long PGXP edge\n");
+	printf("[R1] opposing short edge %s the long PGXP edge\n",
+		PGXP_DIAG_GL_REPAIR_APPLY ? "projects onto" : "is modeled against");
 	submit_triangle(&stream[0], long_native, long_precise, 0x2c);
 	submit_triangle(&stream[3], short_native, short_precise, 0x2c);
 	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
 	expect_near("junction point x", stream[3].position[0], 5.0f);
-	expect_near("junction point y", stream[3].position[1], 0.0f);
+	expect_near("junction point y", stream[3].position[1],
+		PGXP_DIAG_GL_REPAIR_APPLY ? 0.0f : -0.5f);
 	expect_near("linked endpoint x", stream[4].position[0], 10.0f);
-	expect_near("linked endpoint y", stream[4].position[1], 0.0f);
+	expect_near("linked endpoint y", stream[4].position[1],
+		PGXP_DIAG_GL_REPAIR_APPLY ? 0.0f : -0.5f);
 	expect_near("point triangle third y", stream[5].position[1], -10.0f);
+	PGXP_DiagFrame(0); /* exercise the frame-complete link classifier */
 }
 
 static void test_conflicting_targets_are_atomic(void)
@@ -114,6 +122,7 @@ static void test_conflicting_targets_are_atomic(void)
 	PGXP_DiagGLRepair(stream, 9, (unsigned)sizeof(stream[0]));
 	expect_near("conflicted junction point y", stream[6].position[1], -1.0f);
 	expect_near("conflicted linked endpoint y", stream[7].position[1], -1.0f);
+	PGXP_DiagFrame(0);
 }
 
 static void test_pgxp_off_is_untouched(void)
@@ -139,6 +148,7 @@ static void test_pgxp_off_is_untouched(void)
 	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
 	expect_near("PGXP-off junction point y", stream[3].position[1], -0.5f);
 	expect_near("PGXP-off linked endpoint y", stream[4].position[1], -0.5f);
+	PGXP_DiagFrame(0);
 	PGXP_SetModes(PGXP_MODE_MEMORY);
 }
 

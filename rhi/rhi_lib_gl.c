@@ -2884,8 +2884,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
       }
    }
 
-   /* The command buffer is still CPU-mapped here.  Repair only guarded PGXP
-    * short-edge junctions before GL consumes the final vertex stream. */
+   /* The command buffer is still CPU-mapped here.  Run the final-stream PGXP
+    * topology classifier before GL consumes it.  Live projection is disabled
+    * by default after the broad 3b1b8013 experiment proved screen-coordinate
+    * coincidence alone is not safe mutation provenance. */
    PGXP_DiagGLRepair(renderer->command_buffer->map,
          (unsigned)renderer->command_buffer->map_index,
          (unsigned)sizeof(gl_command_vertex));

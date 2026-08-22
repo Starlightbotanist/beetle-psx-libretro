@@ -53,10 +53,22 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_SUBMIT_SAMPLES 4096u
 #define PGXP_DIAG_SUBMIT_WINDOW_SAMPLES 16u
 #define PGXP_DIAG_SUBMIT_MAX_BBOX_PIXELS 65536u
+#define PGXP_DIAG_SUBMIT_LINK_KINDS 3u
+#define PGXP_DIAG_SUBMIT_W_BINS 7u
+#define PGXP_DIAG_SUBMIT_UV_BINS 6u
 #define PGXP_DIAG_GL_VERTEX_CAPACITY 16384u
 #define PGXP_DIAG_GL_HASH_BUCKETS 32768u
 #define PGXP_DIAG_GL_PAIR_CAPACITY 65536u
 #define PGXP_DIAG_GL_WINDOW_SAMPLES 16u
+
+/* The broad projection experiment in 3b1b8013 proved that native screen
+ * coincidence is not sufficient provenance for mutating live geometry.  Keep
+ * the complete buffered classifier active, but make production diagnostic
+ * builds observation-only until the stricter endpoint/packet/coverage gates
+ * below have device evidence.  The focused harness opts in explicitly. */
+#ifndef PGXP_DIAG_GL_REPAIR_APPLY
+#define PGXP_DIAG_GL_REPAIR_APPLY 0
+#endif
 
 enum PGXP_trace_event_type
 {
@@ -615,6 +627,24 @@ static uint64_t submit_raster_snap_closed;
 static uint64_t submit_raster_bbox_pixels;
 static uint64_t submit_raster_bbox_skips;
 static uint64_t submit_raster_degenerate;
+static uint64_t submit_link_candidates[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_link_tested[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_link_improved[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_link_closed[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_link_worse[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_link_raw_pixels[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_link_snap_pixels[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_EDGE_PACKET_BINS];
+static uint64_t submit_link_w_error[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_SUBMIT_W_BINS];
+static uint64_t submit_link_uv_error[PGXP_DIAG_SUBMIT_LINK_KINDS]
+	[PGXP_DIAG_SUBMIT_UV_BINS];
 static uint32_t submit_samples;
 static uint32_t submit_window_samples;
 static PGXP_diag_gl_vertex gl_vertices[PGXP_DIAG_GL_VERTEX_CAPACITY];
@@ -1068,6 +1098,15 @@ void PGXP_DiagInit(void)
 	submit_raster_bbox_pixels = 0;
 	submit_raster_bbox_skips = 0;
 	submit_raster_degenerate = 0;
+	memset(submit_link_candidates, 0, sizeof(submit_link_candidates));
+	memset(submit_link_tested, 0, sizeof(submit_link_tested));
+	memset(submit_link_improved, 0, sizeof(submit_link_improved));
+	memset(submit_link_closed, 0, sizeof(submit_link_closed));
+	memset(submit_link_worse, 0, sizeof(submit_link_worse));
+	memset(submit_link_raw_pixels, 0, sizeof(submit_link_raw_pixels));
+	memset(submit_link_snap_pixels, 0, sizeof(submit_link_snap_pixels));
+	memset(submit_link_w_error, 0, sizeof(submit_link_w_error));
+	memset(submit_link_uv_error, 0, sizeof(submit_link_uv_error));
 	submit_samples = 0;
 	submit_window_samples = 0;
 	pgxp_diag_gl_reset_stream();
@@ -1906,6 +1945,126 @@ static unsigned pgxp_diag_edge_packet_bin(uint64_t gap)
 		return 3;
 	if (gap <= 256)
 		return 4;
+	return 5;
+}
+
+static unsigned pgxp_diag_submit_link_kind(
+		const PGXP_diag_submit_triangle* edge, unsigned first,
+		unsigned second, const PGXP_diag_submit_triangle* point,
+		unsigned point_vertex, unsigned linked_vertex)
+{
+	if (point->native_x[point_vertex] == point->native_x[linked_vertex] &&
+	    point->native_y[point_vertex] == point->native_y[linked_vertex])
+		return 0; /* zero-length native short edge: unsafe to collapse */
+	if ((point->native_x[linked_vertex] == edge->native_x[first] &&
+	     point->native_y[linked_vertex] == edge->native_y[first]) ||
+	    (point->native_x[linked_vertex] == edge->native_x[second] &&
+	     point->native_y[linked_vertex] == edge->native_y[second]))
+		return 1; /* classic T-junction ending at a long-edge endpoint */
+	return 2; /* both short-boundary vertices lie inside the long edge */
+}
+
+static double pgxp_diag_submit_native_t(
+		const PGXP_diag_submit_triangle* edge, unsigned first,
+		unsigned second, int32_t x, int32_t y)
+{
+	double dx = (double)edge->native_x[second] - edge->native_x[first];
+	double dy = (double)edge->native_y[second] - edge->native_y[first];
+	double length_squared = dx * dx + dy * dy;
+	if (length_squared <= 0.0)
+		return 0.0;
+	return (((double)x - edge->native_x[first]) * dx +
+		((double)y - edge->native_y[first]) * dy) / length_squared;
+}
+
+static unsigned pgxp_diag_submit_w_error_bin(
+		const PGXP_diag_submit_triangle* edge, unsigned first,
+		unsigned second, const PGXP_diag_submit_triangle* point,
+		unsigned point_vertex, unsigned linked_vertex)
+{
+	double inv_first;
+	double inv_second;
+	double maximum = 0.0;
+	unsigned vertices[2];
+	unsigned i;
+	if (edge->invalid_w || point->invalid_w ||
+	    fabsf(edge->precise_w[first]) <= 1.0e-12f ||
+	    fabsf(edge->precise_w[second]) <= 1.0e-12f)
+		return PGXP_DIAG_SUBMIT_W_BINS - 1u;
+	inv_first = 1.0 / edge->precise_w[first];
+	inv_second = 1.0 / edge->precise_w[second];
+	vertices[0] = point_vertex;
+	vertices[1] = linked_vertex;
+	for (i = 0; i < 2; i++)
+	{
+		unsigned vertex = vertices[i];
+		double t;
+		double predicted;
+		double actual;
+		double relative;
+		if (fabsf(point->precise_w[vertex]) <= 1.0e-12f)
+			return PGXP_DIAG_SUBMIT_W_BINS - 1u;
+		t = pgxp_diag_submit_native_t(edge, first, second,
+			point->native_x[vertex], point->native_y[vertex]);
+		predicted = inv_first + t * (inv_second - inv_first);
+		actual = 1.0 / point->precise_w[vertex];
+		relative = fabs(actual - predicted) /
+			(fabs(predicted) > 1.0e-12 ? fabs(predicted) : 1.0e-12);
+		if (!isfinite(relative))
+			return PGXP_DIAG_SUBMIT_W_BINS - 1u;
+		if (relative > maximum)
+			maximum = relative;
+	}
+	if (maximum <= 1.0e-4) return 0;
+	if (maximum <= 1.0e-3) return 1;
+	if (maximum <= 1.0e-2) return 2;
+	if (maximum <= 5.0e-2) return 3;
+	if (maximum <= 2.0e-1) return 4;
+	if (maximum <= 1.0) return 5;
+	return 6;
+}
+
+static double pgxp_diag_submit_uv_delta(double actual, double predicted)
+{
+	double delta = fmod(fabs(actual - predicted), 256.0);
+	return delta > 128.0 ? 256.0 - delta : delta;
+}
+
+static unsigned pgxp_diag_submit_uv_error_bin(
+		const PGXP_diag_submit_triangle* edge, unsigned first,
+		unsigned second, const PGXP_diag_submit_triangle* point,
+		unsigned point_vertex, unsigned linked_vertex)
+{
+	double du = (double)(int)edge->u[second] - edge->u[first];
+	double dv = (double)(int)edge->v[second] - edge->v[first];
+	double maximum = 0.0;
+	unsigned vertices[2];
+	unsigned i;
+	if (du > 128.0) du -= 256.0;
+	if (du < -128.0) du += 256.0;
+	if (dv > 128.0) dv -= 256.0;
+	if (dv < -128.0) dv += 256.0;
+	vertices[0] = point_vertex;
+	vertices[1] = linked_vertex;
+	for (i = 0; i < 2; i++)
+	{
+		unsigned vertex = vertices[i];
+		double t = pgxp_diag_submit_native_t(edge, first, second,
+			point->native_x[vertex], point->native_y[vertex]);
+		double predicted_u = edge->u[first] + t * du;
+		double predicted_v = edge->v[first] + t * dv;
+		double error_u = pgxp_diag_submit_uv_delta(point->u[vertex],
+			predicted_u);
+		double error_v = pgxp_diag_submit_uv_delta(point->v[vertex],
+			predicted_v);
+		if (error_u > maximum) maximum = error_u;
+		if (error_v > maximum) maximum = error_v;
+	}
+	if (maximum <= 0.5) return 0;
+	if (maximum <= 1.0) return 1;
+	if (maximum <= 2.0) return 2;
+	if (maximum <= 8.0) return 3;
+	if (maximum <= 32.0) return 4;
 	return 5;
 }
 
@@ -2805,18 +2964,33 @@ static void pgxp_diag_submit_finish_frame(void)
 						unsigned context;
 						unsigned y_band = point_y < 64 ? 0u :
 							point_y < 128 ? 1u : point_y < 192 ? 2u : 3u;
+						unsigned packet_bin;
+						unsigned link_kind;
 						unsigned model;
 						gap = edge_triangle->packet > point_triangle->packet ?
 							edge_triangle->packet - point_triangle->packet :
 							point_triangle->packet - edge_triangle->packet;
+						packet_bin = pgxp_diag_edge_packet_bin(gap);
+						link_kind = pgxp_diag_submit_link_kind(edge_triangle,
+							first, second, point_triangle, point_vertex,
+							linked_vertex);
 						submit_risk++;
 						submit_risk_y[y_band]++;
-						submit_risk_packet[pgxp_diag_edge_packet_bin(gap)]++;
+						submit_risk_packet[packet_bin]++;
 						context = (edge_triangle->gouraud ? 2u : 0u) |
 							(point_triangle->gouraud ? 1u : 0u);
 						submit_risk_gouraud[context]++;
 						submit_risk_opcode[edge_triangle->opcode & 0x1fu]
 							[point_triangle->opcode & 0x1fu]++;
+						submit_link_candidates[link_kind][packet_bin]++;
+						submit_link_w_error[link_kind]
+							[pgxp_diag_submit_w_error_bin(edge_triangle,
+							first, second, point_triangle, point_vertex,
+							linked_vertex)]++;
+						submit_link_uv_error[link_kind]
+							[pgxp_diag_submit_uv_error_bin(edge_triangle,
+							first, second, point_triangle, point_vertex,
+							linked_vertex)]++;
 						raster_result = pgxp_diag_submit_raster(edge_triangle,
 							first, second, point_triangle, point_vertex,
 							linked_vertex, holes, &native_pixels, &bbox_pixels);
@@ -2827,6 +3001,15 @@ static void pgxp_diag_submit_finish_frame(void)
 						}
 						if (!raster_result)
 							continue;
+						submit_link_tested[link_kind][packet_bin]++;
+						submit_link_raw_pixels[link_kind][packet_bin] += holes[1];
+						submit_link_snap_pixels[link_kind][packet_bin] += holes[4];
+						if (holes[1] > holes[4])
+							submit_link_improved[link_kind][packet_bin]++;
+						else if (holes[4] > holes[1])
+							submit_link_worse[link_kind][packet_bin]++;
+						if (holes[1] && !holes[4])
+							submit_link_closed[link_kind][packet_bin]++;
 						submit_raster_pairs++;
 						submit_raster_native_pixels += native_pixels;
 						submit_raster_bbox_pixels += bbox_pixels;
@@ -3400,8 +3583,10 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 			float scale = (float)(1u << gl_vertices[edge_start].upscale_shift);
 			float movement = hypotf(gl_proposals[edge_start].x - position[0],
 				gl_proposals[edge_start].y - position[1]) / scale;
+#if PGXP_DIAG_GL_REPAIR_APPLY
 			position[0] = gl_proposals[edge_start].x;
 			position[1] = gl_proposals[edge_start].y;
+#endif
 			if (movement > 1.0e-6f)
 			{
 				gl_repair_moved++;
@@ -5225,6 +5410,85 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)submit_raster_bbox_pixels,
 		(unsigned long long)submit_raster_bbox_skips,
 		(unsigned long long)submit_raster_degenerate, submit_samples);
+	{
+		static const char* const link_name[PGXP_DIAG_SUBMIT_LINK_KINDS] = {
+			"same_native", "endpoint", "interior"
+		};
+		unsigned kind;
+		for (kind = 0; kind < PGXP_DIAG_SUBMIT_LINK_KINDS; kind++)
+		{
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_submit_link] f=%llu kind=%s "
+				"candidate=%llu/%llu/%llu/%llu/%llu/%llu "
+				"tested=%llu/%llu/%llu/%llu/%llu/%llu "
+				"improved=%llu/%llu/%llu/%llu/%llu/%llu "
+				"closed=%llu/%llu/%llu/%llu/%llu/%llu "
+				"worse=%llu/%llu/%llu/%llu/%llu/%llu\n",
+				(unsigned long long)frame_number, link_name[kind],
+				(unsigned long long)submit_link_candidates[kind][0],
+				(unsigned long long)submit_link_candidates[kind][1],
+				(unsigned long long)submit_link_candidates[kind][2],
+				(unsigned long long)submit_link_candidates[kind][3],
+				(unsigned long long)submit_link_candidates[kind][4],
+				(unsigned long long)submit_link_candidates[kind][5],
+				(unsigned long long)submit_link_tested[kind][0],
+				(unsigned long long)submit_link_tested[kind][1],
+				(unsigned long long)submit_link_tested[kind][2],
+				(unsigned long long)submit_link_tested[kind][3],
+				(unsigned long long)submit_link_tested[kind][4],
+				(unsigned long long)submit_link_tested[kind][5],
+				(unsigned long long)submit_link_improved[kind][0],
+				(unsigned long long)submit_link_improved[kind][1],
+				(unsigned long long)submit_link_improved[kind][2],
+				(unsigned long long)submit_link_improved[kind][3],
+				(unsigned long long)submit_link_improved[kind][4],
+				(unsigned long long)submit_link_improved[kind][5],
+				(unsigned long long)submit_link_closed[kind][0],
+				(unsigned long long)submit_link_closed[kind][1],
+				(unsigned long long)submit_link_closed[kind][2],
+				(unsigned long long)submit_link_closed[kind][3],
+				(unsigned long long)submit_link_closed[kind][4],
+				(unsigned long long)submit_link_closed[kind][5],
+				(unsigned long long)submit_link_worse[kind][0],
+				(unsigned long long)submit_link_worse[kind][1],
+				(unsigned long long)submit_link_worse[kind][2],
+				(unsigned long long)submit_link_worse[kind][3],
+				(unsigned long long)submit_link_worse[kind][4],
+				(unsigned long long)submit_link_worse[kind][5]);
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_submit_link_pixels] f=%llu kind=%s "
+				"base=%llu/%llu/%llu/%llu/%llu/%llu "
+				"snap=%llu/%llu/%llu/%llu/%llu/%llu "
+				"invw_error=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+				"uv_error=%llu/%llu/%llu/%llu/%llu/%llu\n",
+				(unsigned long long)frame_number, link_name[kind],
+				(unsigned long long)submit_link_raw_pixels[kind][0],
+				(unsigned long long)submit_link_raw_pixels[kind][1],
+				(unsigned long long)submit_link_raw_pixels[kind][2],
+				(unsigned long long)submit_link_raw_pixels[kind][3],
+				(unsigned long long)submit_link_raw_pixels[kind][4],
+				(unsigned long long)submit_link_raw_pixels[kind][5],
+				(unsigned long long)submit_link_snap_pixels[kind][0],
+				(unsigned long long)submit_link_snap_pixels[kind][1],
+				(unsigned long long)submit_link_snap_pixels[kind][2],
+				(unsigned long long)submit_link_snap_pixels[kind][3],
+				(unsigned long long)submit_link_snap_pixels[kind][4],
+				(unsigned long long)submit_link_snap_pixels[kind][5],
+				(unsigned long long)submit_link_w_error[kind][0],
+				(unsigned long long)submit_link_w_error[kind][1],
+				(unsigned long long)submit_link_w_error[kind][2],
+				(unsigned long long)submit_link_w_error[kind][3],
+				(unsigned long long)submit_link_w_error[kind][4],
+				(unsigned long long)submit_link_w_error[kind][5],
+				(unsigned long long)submit_link_w_error[kind][6],
+				(unsigned long long)submit_link_uv_error[kind][0],
+				(unsigned long long)submit_link_uv_error[kind][1],
+				(unsigned long long)submit_link_uv_error[kind][2],
+				(unsigned long long)submit_link_uv_error[kind][3],
+				(unsigned long long)submit_link_uv_error[kind][4],
+				(unsigned long long)submit_link_uv_error[kind][5]);
+		}
+	}
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gl_repair] f=%llu buffers=%llu vertices=%llu "
 		"metadata=mismatch/overflow/inactive=%llu/%llu/%llu "
@@ -5232,7 +5496,7 @@ void PGXP_DiagFrame(int backend)
 		"interior_points=%llu matches=%llu topology=%llu/%llu/%llu "
 		"candidates=%llu gate=invalid_w/movement/pair_overflow=%llu/%llu/%llu "
 		"proposals=%llu consistent=%llu conflicts=%llu "
-		"atomic_pairs=%llu moved=%llu mean=%.6f max=%.6f\n",
+		"atomic_pairs=%llu would_move=%llu mean=%.6f max=%.6f apply=%u\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)gl_repair_buffers,
 		(unsigned long long)gl_repair_vertices,
@@ -5259,7 +5523,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)gl_repair_moved,
 		gl_repair_moved ? gl_repair_move_sum /
 			(double)gl_repair_moved : 0.0,
-		gl_repair_move_max);
+		gl_repair_move_max, (unsigned)PGXP_DIAG_GL_REPAIR_APPLY);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gl_repair_context] f=%llu "
 		"y=%llu/%llu/%llu/%llu gouraud=%llu/%llu/%llu/%llu "
@@ -5781,6 +6045,15 @@ void PGXP_DiagFrame(int backend)
 	submit_raster_bbox_pixels = 0;
 	submit_raster_bbox_skips = 0;
 	submit_raster_degenerate = 0;
+	memset(submit_link_candidates, 0, sizeof(submit_link_candidates));
+	memset(submit_link_tested, 0, sizeof(submit_link_tested));
+	memset(submit_link_improved, 0, sizeof(submit_link_improved));
+	memset(submit_link_closed, 0, sizeof(submit_link_closed));
+	memset(submit_link_worse, 0, sizeof(submit_link_worse));
+	memset(submit_link_raw_pixels, 0, sizeof(submit_link_raw_pixels));
+	memset(submit_link_snap_pixels, 0, sizeof(submit_link_snap_pixels));
+	memset(submit_link_w_error, 0, sizeof(submit_link_w_error));
+	memset(submit_link_uv_error, 0, sizeof(submit_link_uv_error));
 	submit_window_samples = 0;
 	pgxp_diag_gl_reset_window();
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
