@@ -4853,6 +4853,16 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_BLEND_75;
          else if (strcmp(var.value, "ot y native x gt half") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_OT_Y_NATIVE_X_GT_HALF;
+         else if (strcmp(var.value, "conservative raster") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_CONSERVATIVE_RASTER;
+         else if (strcmp(var.value, "coverage expand quarter") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_QUARTER;
+         else if (strcmp(var.value, "coverage expand half") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_HALF;
+         else if (strcmp(var.value, "coverage expand one") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE;
+         else if (strcmp(var.value, "coverage expand two") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

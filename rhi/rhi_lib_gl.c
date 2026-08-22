@@ -23,6 +23,7 @@
 #include "tt_trace.h"
 #include "beetle_psx_globals.h"
 #include "pgxp/pgxp_diag.h"
+#include "pgxp/pgxp_main.h"
 
 /* HDR output state, owned by libretro.c (same contract as the Vulkan
  * renderer's extern block). psx_color_format records the *requested*
@@ -99,6 +100,12 @@ static bool gl_fp16_renderable(void)
 #define BEETLE_GL_CLIP_ORIGIN              0x935Cu
 #define BEETLE_GL_CLIP_DEPTH_MODE          0x935Du
 #define BEETLE_GL_NEGATIVE_ONE_TO_ONE      0x935Eu
+
+/* Conservative-raster tokens are local because the GLES headers shipped by
+ * several Android NDKs omit the vendor definitions even when the live driver
+ * advertises the extension.  Both extensions use ordinary glEnable/Disable. */
+#define BEETLE_GL_CONSERVATIVE_RASTER_NV    0x9346u
+#define BEETLE_GL_CONSERVATIVE_RASTER_INTEL 0x83FEu
 
 /* Field diagnostics, enabled by setting BEETLE_GL_DIAG in the
  * environment. Zero-cost when unset (one getenv on first use). Exists
@@ -394,6 +401,8 @@ typedef struct gl_caps
    PFN_BEETLE_GL_CLIPCONTROL      fp_glClipControl;
    int has_clip_control;
    unsigned subpixel_bits;
+   int has_conservative_raster_nv;
+   int has_conservative_raster_intel;
 
    /* Set to 1 when the detected version is below the floor
     * beetle's GL renderer needs to function (GL/GLES 3.0).
@@ -790,6 +799,10 @@ struct gl_primitive_batch {
    /* GL_TRIANGLES or GL_LINES */
    GLenum draw_mode;
    bool opaque;
+   /* Kept as a batch property only for renderer-side coverage experiments.
+    * Normal batching remains unchanged; mode 45 requests an extra split when
+    * texturing changes so conservative raster cannot leak onto HUD/lines. */
+   bool textured;
    /* Drives the stencil write value for this batch.  Note that
     * vertex_add_blended_pass() forces this true for the second pass of a
     * textured semi-transparent primitive, so it is NOT a faithful copy of
@@ -994,6 +1007,16 @@ struct gl_renderer {
    unsigned pgxp_raster_logged_requested;
    unsigned pgxp_raster_logged_effective;
    bool pgxp_raster_log_valid;
+   unsigned pgxp_coverage_mode;
+   uint64_t pgxp_coverage_candidates;
+   uint64_t pgxp_coverage_expanded;
+   uint64_t pgxp_coverage_degenerate;
+   uint64_t pgxp_coverage_nonfinite;
+   uint64_t pgxp_coverage_capped;
+   uint64_t pgxp_coverage_remainder;
+   uint64_t pgxp_conservative_batches;
+   double pgxp_coverage_move_sum;
+   float pgxp_coverage_move_max;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -1051,6 +1074,173 @@ struct gl_renderer {
    } vram_sync;
 };
 typedef struct gl_renderer gl_renderer;
+
+
+static float gl_pgxp_coverage_subpixel_units(unsigned mode)
+{
+   switch (mode)
+   {
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_QUARTER:
+         return 0.25f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_HALF:
+         return 0.5f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE:
+         return 1.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO:
+         return 2.0f;
+      default:
+         return 0.0f;
+   }
+}
+
+static GLenum gl_pgxp_conservative_raster_token(void)
+{
+   if (gl_caps.has_conservative_raster_nv)
+      return (GLenum)BEETLE_GL_CONSERVATIVE_RASTER_NV;
+   if (gl_caps.has_conservative_raster_intel)
+      return (GLenum)BEETLE_GL_CONSERVATIVE_RASTER_INTEL;
+   return 0;
+}
+
+static bool gl_pgxp_geometry_active(void)
+{
+   return (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
+}
+
+static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
+{
+   renderer->pgxp_coverage_mode = mode;
+   renderer->pgxp_coverage_candidates = 0;
+   renderer->pgxp_coverage_expanded = 0;
+   renderer->pgxp_coverage_degenerate = 0;
+   renderer->pgxp_coverage_nonfinite = 0;
+   renderer->pgxp_coverage_capped = 0;
+   renderer->pgxp_coverage_remainder = 0;
+   renderer->pgxp_conservative_batches = 0;
+   renderer->pgxp_coverage_move_sum = 0.0;
+   renderer->pgxp_coverage_move_max = 0.0f;
+}
+
+/* Expand each final OpenGL triangle by a small, renderer-subpixel-sized
+ * amount.  Scaling about the incenter offsets all three infinite edge lines
+ * equally; unlike the native-coordinate controls this never selects one side
+ * of a shared edge or changes PGXP provenance.  An 8-epsilon vertex-motion
+ * cap keeps acute/sliver triangles from growing long spikes. */
+static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon)
+{
+   gl_command_vertex *vertices;
+   size_t bi;
+
+   if (!renderer || !renderer->command_buffer->map || epsilon <= 0.0f ||
+       !gl_pgxp_geometry_active())
+      return;
+
+   vertices = (gl_command_vertex *)renderer->command_buffer->map;
+   for (bi = 0; bi < renderer->batches.count; bi++)
+   {
+      const struct gl_primitive_batch *batch = &renderer->batches.items[bi];
+      unsigned end;
+      unsigned i;
+
+      /* The opaque pass visits every textured primitive exactly once.  A
+       * semi-transparent textured primitive has a second overlapping batch;
+       * skipping that batch prevents applying the expansion twice while the
+       * shared mapped vertices still give both passes identical geometry. */
+      if (batch->draw_mode != GL_TRIANGLES || !batch->opaque)
+         continue;
+      if (batch->first > renderer->command_buffer->map_index ||
+          batch->count > renderer->command_buffer->map_index - batch->first)
+         continue;
+
+      end = batch->first + batch->count;
+      if (batch->count % 3u)
+         renderer->pgxp_coverage_remainder += batch->count % 3u;
+      for (i = batch->first; i + 2u < end; i += 3u)
+      {
+         gl_command_vertex *v = &vertices[i];
+         float x[3];
+         float y[3];
+         float opposite[3];
+         float perimeter;
+         float area2;
+         float inradius;
+         float incenter_x;
+         float incenter_y;
+         float scale_delta;
+         float max_radius = 0.0f;
+         float max_move;
+         unsigned j;
+
+         if (!v[0].texture_blend_mode || !v[1].texture_blend_mode ||
+             !v[2].texture_blend_mode)
+            continue;
+         renderer->pgxp_coverage_candidates++;
+
+         for (j = 0; j < 3u; j++)
+         {
+            x[j] = v[j].position[0];
+            y[j] = v[j].position[1];
+            if (!isfinite(x[j]) || !isfinite(y[j]))
+               break;
+         }
+         if (j != 3u)
+         {
+            renderer->pgxp_coverage_nonfinite++;
+            continue;
+         }
+
+         opposite[0] = hypotf(x[1] - x[2], y[1] - y[2]);
+         opposite[1] = hypotf(x[2] - x[0], y[2] - y[0]);
+         opposite[2] = hypotf(x[0] - x[1], y[0] - y[1]);
+         perimeter = opposite[0] + opposite[1] + opposite[2];
+         area2 = fabsf((x[1] - x[0]) * (y[2] - y[0]) -
+               (y[1] - y[0]) * (x[2] - x[0]));
+         if (!isfinite(perimeter) || !isfinite(area2) ||
+             perimeter <= 1.0e-6f || area2 <= 1.0e-6f)
+         {
+            renderer->pgxp_coverage_degenerate++;
+            continue;
+         }
+
+         inradius = area2 / perimeter;
+         incenter_x = (opposite[0] * x[0] + opposite[1] * x[1] +
+               opposite[2] * x[2]) / perimeter;
+         incenter_y = (opposite[0] * y[0] + opposite[1] * y[1] +
+               opposite[2] * y[2]) / perimeter;
+         scale_delta = epsilon / inradius;
+         for (j = 0; j < 3u; j++)
+         {
+            float radius = hypotf(x[j] - incenter_x, y[j] - incenter_y);
+            if (radius > max_radius)
+               max_radius = radius;
+         }
+         max_move = max_radius * scale_delta;
+         if (!isfinite(scale_delta) || !isfinite(max_move))
+         {
+            renderer->pgxp_coverage_nonfinite++;
+            continue;
+         }
+         if (max_move > 8.0f * epsilon)
+         {
+            scale_delta *= (8.0f * epsilon) / max_move;
+            renderer->pgxp_coverage_capped++;
+         }
+
+         for (j = 0; j < 3u; j++)
+         {
+            float dx = (x[j] - incenter_x) * scale_delta;
+            float dy = (y[j] - incenter_y) * scale_delta;
+            float move = hypotf(dx, dy);
+            v[j].position[0] = x[j] + dx;
+            v[j].position[1] = y[j] + dy;
+            renderer->pgxp_coverage_move_sum += (double)move;
+            if (move > renderer->pgxp_coverage_move_max)
+               renderer->pgxp_coverage_move_max = move;
+         }
+         renderer->pgxp_coverage_expanded++;
+      }
+   }
+}
 
 
 struct retro_gl
@@ -2838,6 +3028,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
    x = renderer->config.draw_offset[0];
    y = renderer->config.draw_offset[1];
    raster_requested = PGXP_DiagGLGetMode();
+   if (renderer->pgxp_coverage_mode != raster_requested)
+      gl_pgxp_coverage_reset(renderer, raster_requested);
    raster_effective = raster_requested;
    if (raster_effective > PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST &&
        raster_effective != PGXP_DIAG_GL_TEST_VULKAN_CLIP_MATH)
@@ -2905,13 +3097,18 @@ static void gl_renderer_draw(gl_renderer *renderer)
       log_cb(RETRO_LOG_INFO,
             "[pgxp_gl_raster_mode] requested=%u effective=%u "
             "clip_control=%s upper_left=%u clip_prior=%04x/%04x "
-            "subpixel_bits=%u scale=%u grid=%.0f\n",
+            "subpixel_bits=%u scale=%u grid=%.0f conservative=%s\n",
             raster_requested, raster_effective,
             gl_caps.has_clip_control ? "available" : "unavailable",
             raster_upper_left ? 1u : 0u,
             (unsigned)raster_prior_origin, (unsigned)raster_prior_depth,
             gl_caps.subpixel_bits,
-            renderer->internal_upscaling, (double)raster_grid);
+            renderer->internal_upscaling, (double)raster_grid,
+            gl_pgxp_conservative_raster_token() ==
+               (GLenum)BEETLE_GL_CONSERVATIVE_RASTER_NV ? "NV" :
+            gl_pgxp_conservative_raster_token() ==
+               (GLenum)BEETLE_GL_CONSERVATIVE_RASTER_INTEL ? "INTEL" :
+               "unavailable");
       renderer->pgxp_raster_logged_requested = raster_requested;
       renderer->pgxp_raster_logged_effective = raster_effective;
       renderer->pgxp_raster_log_valid = true;
@@ -2952,6 +3149,16 @@ static void gl_renderer_draw(gl_renderer *renderer)
       }
    }
 
+   /* Finalize the last batch while the buffer is still CPU-mapped.  The
+    * coverage probe needs exact primitive boundaries and the ordinary
+    * validation below needs the same count after unmapping. */
+   if (renderer->batches.count > 0)
+   {
+      struct gl_primitive_batch *last =
+         &renderer->batches.items[renderer->batches.count - 1];
+      last->count = renderer->vertex_index_pos - last->first;
+   }
+
    /* The command buffer is still CPU-mapped here.  Run the final-stream PGXP
     * topology classifier before GL consumes it.  Live projection is disabled
     * by default after the broad 3b1b8013 experiment proved screen-coordinate
@@ -2959,6 +3166,13 @@ static void gl_renderer_draw(gl_renderer *renderer)
    PGXP_DiagGLRepair(renderer->command_buffer->map,
          (unsigned)renderer->command_buffer->map_index,
          (unsigned)sizeof(gl_command_vertex));
+
+   {
+      float subpixel_units =
+         gl_pgxp_coverage_subpixel_units(raster_requested);
+      if (subpixel_units > 0.0f)
+         gl_pgxp_expand_coverage(renderer, subpixel_units / raster_grid);
+   }
 
    /* Bind and unmap the command buffer */
    glBindBuffer(GL_ARRAY_BUFFER, renderer->command_buffer->id);
@@ -2968,12 +3182,6 @@ static void gl_renderer_draw(gl_renderer *renderer)
    glBindVertexArray(renderer->command_buffer->vao);
 
    renderer->command_buffer->map = NULL;
-
-   if (renderer->batches.count > 0)
-   {
-      struct gl_primitive_batch *last = &renderer->batches.items[renderer->batches.count - 1];
-      last->count = renderer->vertex_index_pos - last->first;
-   }
 
    {
       size_t bi;
@@ -3000,6 +3208,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
       {
          struct gl_primitive_batch *it = &renderer->batches.items[bi];
          bool opaque;
+         bool conservative_raster = false;
          GLenum blend_func = GL_FUNC_ADD;
          GLenum blend_src = GL_CONSTANT_ALPHA;
          GLenum blend_dst = GL_CONSTANT_ALPHA;
@@ -3109,6 +3318,17 @@ static void gl_renderer_draw(gl_renderer *renderer)
       /* Drawing */
       if (!gl_draw_buffer_is_empty(renderer->command_buffer))
       {
+         if (raster_requested == PGXP_DIAG_GL_TEST_CONSERVATIVE_RASTER &&
+             it->draw_mode == GL_TRIANGLES && it->textured &&
+             gl_pgxp_geometry_active() &&
+             gl_pgxp_conservative_raster_token())
+         {
+            glEnable(gl_pgxp_conservative_raster_token());
+            conservative_raster = true;
+            renderer->pgxp_conservative_batches++;
+            renderer->pgxp_coverage_candidates += it->count / 3u;
+            renderer->pgxp_coverage_remainder += it->count % 3u;
+         }
          /* This method doesn't call prepare_draw/finalize_draw itself, it
           * must be handled by the caller. This is because this command
           * can be called several times on the same buffer (i.e. multiple
@@ -3142,6 +3362,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
             glStencilMask(1);
             glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "force_zero"), 0u);
          }
+         if (conservative_raster)
+            glDisable(gl_pgxp_conservative_raster_token());
       }
 
          if (hd_owned)
@@ -5188,6 +5410,10 @@ static void vertex_preprocessing(
    if (renderer->batches.count == 0
        || mode != renderer->command_draw_mode
        || is_opaque != renderer->opaque
+       || (PGXP_DiagGLGetMode() == PGXP_DIAG_GL_TEST_CONSERVATIVE_RASTER &&
+           gl_pgxp_geometry_active() &&
+           is_textured != renderer->batches.items[
+              renderer->batches.count - 1u].textured)
        || (is_semi_transparent &&
            stm != renderer->semi_transparency_mode)
        || renderer->set_mask != set_mask
@@ -5203,6 +5429,7 @@ static void vertex_preprocessing(
          last->count = renderer->vertex_index_pos - last->first;
       }
       batch.opaque = is_opaque;
+      batch.textured = is_textured;
       batch.draw_mode = mode;
       batch.transparency_mode = stm;
       batch.set_mask = set_mask;
@@ -5234,6 +5461,7 @@ static void vertex_add_blended_pass(
       last->count = renderer->vertex_index_pos - last->first;
 
       batch.opaque = false;
+      batch.textured = last->textured;
       batch.draw_mode = last->draw_mode;
       batch.transparency_mode = last->transparency_mode;
       batch.set_mask = true;
@@ -5621,6 +5849,10 @@ static void gl_caps_init(void)
       ((gl_caps.api == GL_API_DESKTOP && gl_caps.version_packed >= 0x0405) ||
        gl_caps_has_extension("GL_ARB_clip_control") ||
        gl_caps_has_extension("GL_EXT_clip_control"));
+   gl_caps.has_conservative_raster_nv =
+      gl_caps_has_extension("GL_NV_conservative_raster");
+   gl_caps.has_conservative_raster_intel =
+      gl_caps_has_extension("GL_INTEL_conservative_rasterization");
 
    log_cb(RETRO_LOG_INFO,
          "[gl_caps] %s | %s | %s\n",
@@ -5644,6 +5876,14 @@ static void gl_caps_init(void)
          "[gl_caps] glClipControl:     %s (extension/core=%s)\n",
          gl_caps.fp_glClipControl ? "resolved" : "NOT resolved",
          gl_caps.has_clip_control ? "available" : "unavailable");
+   log_cb(RETRO_LOG_INFO,
+         "[pgxp_gl_coverage_caps] subpixel_bits=%u "
+         "conservative_nv=%s conservative_intel=%s selected=%s\n",
+         gl_caps.subpixel_bits,
+         gl_caps.has_conservative_raster_nv ? "available" : "unavailable",
+         gl_caps.has_conservative_raster_intel ? "available" : "unavailable",
+         gl_caps.has_conservative_raster_nv ? "NV" :
+         gl_caps.has_conservative_raster_intel ? "INTEL" : "none");
    log_cb(RETRO_LOG_INFO,
          "[pgxp_gl_w_probe] homogeneous_w=position_w fragment=normal "
          "requires_pct=off depth=enabled stencil=enabled scissor=enabled blend=normal "
@@ -6336,6 +6576,39 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             (unsigned long long)renderer->submission_w_samples,
             (double)renderer->submission_w_min,
             (double)renderer->submission_w_max);
+      if (renderer->pgxp_coverage_mode >=
+            PGXP_DIAG_GL_TEST_CONSERVATIVE_RASTER)
+      {
+         float grid = (float)renderer->internal_upscaling *
+            (float)(UINT32_C(1) << gl_caps.subpixel_bits);
+         float units =
+            gl_pgxp_coverage_subpixel_units(renderer->pgxp_coverage_mode);
+         if (grid < 1.0f)
+            grid = 1.0f;
+         log_cb(RETRO_LOG_INFO,
+               "[pgxp_gl_coverage] frames=%u mode=%u active=%u "
+               "subpixel_bits=%u scale=%u units=%.2f epsilon=%.9g "
+               "candidates=%llu expanded=%llu degenerate=%llu "
+               "nonfinite=%llu capped=%llu remainder=%llu "
+               "conservative_batches=%llu move_mean=%.9g move_max=%.9g\n",
+               renderer->submission_frames,
+               renderer->pgxp_coverage_mode,
+               gl_pgxp_geometry_active() ? 1u : 0u,
+               gl_caps.subpixel_bits, renderer->internal_upscaling,
+               (double)units, units > 0.0f ? (double)(units / grid) : 0.0,
+               (unsigned long long)renderer->pgxp_coverage_candidates,
+               (unsigned long long)renderer->pgxp_coverage_expanded,
+               (unsigned long long)renderer->pgxp_coverage_degenerate,
+               (unsigned long long)renderer->pgxp_coverage_nonfinite,
+               (unsigned long long)renderer->pgxp_coverage_capped,
+               (unsigned long long)renderer->pgxp_coverage_remainder,
+               (unsigned long long)renderer->pgxp_conservative_batches,
+               renderer->pgxp_coverage_expanded ?
+                  renderer->pgxp_coverage_move_sum /
+                     (double)(renderer->pgxp_coverage_expanded * 3u) : 0.0,
+               (double)renderer->pgxp_coverage_move_max);
+         gl_pgxp_coverage_reset(renderer, renderer->pgxp_coverage_mode);
+      }
       renderer->submission_flushes = 0;
       renderer->submission_batches = 0;
       renderer->submission_vertices = 0;

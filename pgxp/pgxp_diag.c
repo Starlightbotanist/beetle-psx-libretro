@@ -811,7 +811,9 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"ot_y_blend_75", "ot_y_blend_875", "ot_y_gt_half",
 		"ot_y_gt_quarter", "ot_y_le_half", "ot_y_native_x_blend_25",
 		"ot_y_native_x_blend_50", "ot_y_native_x_blend_75",
-		"ot_y_native_x_gt_half"
+		"ot_y_native_x_gt_half", "conservative_raster",
+		"coverage_expand_quarter", "coverage_expand_half",
+		"coverage_expand_one", "coverage_expand_two"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

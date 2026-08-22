@@ -865,7 +865,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP OpenGL Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Modes 1-14 are the completed geometry-repair matrix; 15-22 are the completed raster-convention matrix; 23-33 partition the final native-XY positive control. Modes 34-44 test Vulkan clip math and continuity-preserving Y/X blends or per-vertex displacement gates.",
+      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Modes 1-14 are the completed geometry-repair matrix; 15-22 are the completed raster-convention matrix; 23-33 partition the final native-XY positive control; 34-44 are completed coordinate probes; 45-49 test OpenGL-only coverage handling.",
       NULL,
       "pgxp",
       {
@@ -914,6 +914,11 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "ot y native x blend 50", "42: Native Y + X 50% Toward Native" },
          { "ot y native x blend 75", "43: Native Y + X 75% Toward Native" },
          { "ot y native x gt half", "44: Native Y + Native X Where |dX| > 0.5px" },
+         { "conservative raster",   "45: GL Conservative Raster (If Supported)" },
+         { "coverage expand quarter", "46: GL Coverage Expand - 1/4 Subpixel" },
+         { "coverage expand half", "47: GL Coverage Expand - 1/2 Subpixel" },
+         { "coverage expand one",  "48: GL Coverage Expand - 1 Subpixel" },
+         { "coverage expand two",  "49: GL Coverage Expand - 2 Subpixels" },
          { NULL, NULL },
       },
       "off"
