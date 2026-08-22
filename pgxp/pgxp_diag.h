@@ -97,6 +97,9 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned quad_part, int invalid_w, unsigned upscale_shift);
 void PGXP_DiagSeamEdge(enum PGXP_diag_seam_result result,
 		float delta, uint64_t age);
+void PGXP_DiagSeamAccept(int32_t x0, int32_t y0,
+		int32_t x1, int32_t y1, float delta0, float delta1,
+		uint64_t age);
 void PGXP_DiagSeamPrimitive(unsigned observed_edges,
 		unsigned moved_vertices, unsigned conflicts);
 void PGXP_DiagLineHack(int32_t average_y, int rejected_w,
@@ -159,6 +162,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagPrimitive(vertices, invalid_w, tolerance, upscale_shift) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagSeamEdge(result, delta, age) ((void)0)
+#define PGXP_DiagSeamAccept(x0, y0, x1, y1, delta0, delta1, age) ((void)0)
 #define PGXP_DiagSeamPrimitive(observed_edges, moved_vertices, conflicts) ((void)0)
 #define PGXP_DiagLineHack(average_y, rejected_w, w0, w1, w2) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, native_x, native_y, valid_w, valid_xy, value_match) ((void)0)

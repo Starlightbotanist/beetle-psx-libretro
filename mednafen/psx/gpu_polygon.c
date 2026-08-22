@@ -89,22 +89,29 @@ static INLINE const float *gpu_precise_quad_rgb(const tri_vertex *first,
  * of the holes: substituting native X/Y at the final hand-off closes 99% of
  * them, but naturally restores native vertex wobble.  The accompanying edge
  * trace identifies a much narrower invariant.  Adjacent Gouraud-textured
- * packets repeatedly present the exact same native edge, with one precise
- * endpoint bit-identical and the other split by roughly 0.25--1 native pixel.
- * Those are wedge cracks, not independent surfaces.
+ * decoded triangles repeatedly present the exact same native edge, with one
+ * precise endpoint bit-identical and the other split by roughly 0.25--1
+ * native pixel.  Those are wedge cracks, not independent surfaces.
  *
  * Preserve the recovered coordinates everywhere except that anchored case.
  * A current edge may inherit the previous edge's precise endpoint only when:
  *   - the complete native edge is identical;
- *   - it was seen in the current frontend frame and <=64 polygon draws ago;
+ *   - it was seen in the current frontend frame and <=64 polygon halves ago;
  *   - at least one endpoint already agrees within 1/64 native pixel; and
  *   - neither endpoint differs by more than 1.25 native pixels.
  *
  * The first endpoint is the proof of adjacency; the second is the seam being
- * repaired.  Processing only valid-W PGXP Gouraud-textured OpenGL polygons
- * leaves native fallback, 2D, untextured, and already-correct Vulkan geometry
- * untouched.  Entries store the welded result, so a strip converges on one
- * precise edge rather than alternating between two recovered variants. */
+ * repaired.  Processing the three decoded edges immediately after the
+ * diagnostic observes them is important: Beetle receives a PSX quad as two
+ * command-buffer triangles, but the final RHI quad hand-off exposes only its
+ * four exterior edges.  The first version welded at that later perimeter and
+ * consequently missed most of R4's measured splits.  Applying the same rule
+ * here also carries a reconciled first half into the saved quad state.
+ *
+ * Only valid-W PGXP Gouraud-textured OpenGL triangles participate, leaving
+ * native fallback, flat-shaded, untextured, and already-correct Vulkan
+ * geometry untouched.  Entries store the welded result, so a strip converges
+ * on one precise edge rather than alternating between recovered variants. */
 #define GPU_PGXP_SEAM_SLOTS 16384u
 #define GPU_PGXP_SEAM_MAX_AGE 64u
 
@@ -177,28 +184,21 @@ static INLINE float gpu_pgxp_seam_endpoint_delta(
    return dx > dy ? dx : dy;
 }
 
-static void gpu_pgxp_seam_process(tri_vertex *vertices, unsigned count,
+static void gpu_pgxp_seam_process(tri_vertex *vertices,
       unsigned upscale_shift, bool enabled)
 {
    static const uint8_t triangle_edges[3][2] = {
       { 0, 1 }, { 1, 2 }, { 2, 0 }
    };
-   /* rhi quad topology is 0,1,2 / 3,2,1; 1--2 is the internal diagonal. */
-   static const uint8_t quad_edges[4][2] = {
-      { 0, 1 }, { 1, 3 }, { 3, 2 }, { 2, 0 }
-   };
-   const uint8_t (*edge_indices)[2];
-   gpu_pgxp_seam_edge *slots[4] = { NULL, NULL, NULL, NULL };
-   float proposed_x[4] = { 0.f, 0.f, 0.f, 0.f };
-   float proposed_y[4] = { 0.f, 0.f, 0.f, 0.f };
-   uint64_t proposed_age[4] = { UINT64_MAX, UINT64_MAX,
-      UINT64_MAX, UINT64_MAX };
-   uint8_t canonical_first[4] = { 0, 0, 0, 0 };
+   gpu_pgxp_seam_edge *slots[3] = { NULL, NULL, NULL };
+   float proposed_x[3] = { 0.f, 0.f, 0.f };
+   float proposed_y[3] = { 0.f, 0.f, 0.f };
+   uint64_t proposed_age[3] = { UINT64_MAX, UINT64_MAX, UINT64_MAX };
+   uint8_t canonical_first[3] = { 0, 0, 0 };
    float scale = (float)(1u << upscale_shift);
    float exact_epsilon = scale * 1.0e-6f;
    float anchor_epsilon = scale * (1.0f / 64.0f);
    float maximum_delta = scale * 1.25f;
-   unsigned edge_count;
    unsigned observed_edges = 0;
    unsigned moved_vertices = 0;
    unsigned conflicts = 0;
@@ -206,15 +206,13 @@ static void gpu_pgxp_seam_process(tri_vertex *vertices, unsigned count,
    unsigned i;
 
    gpu_pgxp_seam_serial++;
-   if (!enabled || (count != 3 && count != 4))
+   if (!enabled)
       return;
 
-   edge_indices = count == 4 ? quad_edges : triangle_edges;
-   edge_count = count;
-   for (edge_index = 0; edge_index < edge_count; edge_index++)
+   for (edge_index = 0; edge_index < 3; edge_index++)
    {
-      unsigned a = edge_indices[edge_index][0];
-      unsigned b = edge_indices[edge_index][1];
+      unsigned a = triangle_edges[edge_index][0];
+      unsigned b = triangle_edges[edge_index][1];
       unsigned first = a;
       unsigned second = b;
       gpu_pgxp_seam_edge *edge;
@@ -278,6 +276,9 @@ static void gpu_pgxp_seam_process(tri_vertex *vertices, unsigned count,
 
       PGXP_DiagSeamEdge(PGXP_DIAG_SEAM_ACCEPTED,
          max_delta / scale, age);
+      PGXP_DiagSeamAccept(vertices[first].x, vertices[first].y,
+         vertices[second].x, vertices[second].y,
+         d0 / scale, d1 / scale, age);
       if (d0 > exact_epsilon)
       {
          if (proposed_age[first] != UINT64_MAX &&
@@ -306,7 +307,7 @@ static void gpu_pgxp_seam_process(tri_vertex *vertices, unsigned count,
       }
    }
 
-   for (i = 0; i < count; i++)
+   for (i = 0; i < 3; i++)
    {
       if (proposed_age[i] == UINT64_MAX)
          continue;
@@ -315,12 +316,12 @@ static void gpu_pgxp_seam_process(tri_vertex *vertices, unsigned count,
       moved_vertices++;
    }
 
-   /* Publish the final welded perimeter, not the unreconciled input. */
-   for (edge_index = 0; edge_index < edge_count; edge_index++)
+   /* Publish the final welded triangle, not the unreconciled input. */
+   for (edge_index = 0; edge_index < 3; edge_index++)
    {
       unsigned first = canonical_first[edge_index];
-      unsigned a = edge_indices[edge_index][0];
-      unsigned b = edge_indices[edge_index][1];
+      unsigned a = triangle_edges[edge_index][0];
+      unsigned b = triangle_edges[edge_index][1];
       unsigned second = first == a ? b : a;
       gpu_pgxp_seam_edge *edge = slots[edge_index];
       if (!edge)
@@ -1909,6 +1910,12 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          NV_LIT == 4 ? (gpu->InCmd == INCMD_QUAD ? 2 : 1) : 0, \
          invalidW, gpu->upscale_shift); \
    } \
+   /* Reconcile the exact decoded edge set recorded above.  This must precede \
+    * the first-half quad save so the second decoder invocation and final RHI \
+    * submission inherit the same welded coordinates. */ \
+   gpu_pgxp_seam_process(vertices, gpu->upscale_shift, \
+      (PGXP_LIT) && (GOURAUD_LIT) && (TEXTURED_LIT) && !invalidW && \
+      rhi_intf_is_type() == RHI_OPENGL); \
    /* Copy before Calc_UVOffsets which modifies vertices */ \
    /* Calc_UVOffsets likes to see unadjusted vertices */ \
    if (NV_LIT == 4 && gpu->InCmd != INCMD_QUAD) \
@@ -2010,9 +2017,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                Finalise_UVLimits(gpu); \
                hw_vertices[0] = *first; \
                memcpy(&hw_vertices[1], vertices, 3 * sizeof(tri_vertex)); \
-               gpu_pgxp_seam_process(hw_vertices, 4, gpu->upscale_shift, \
-                  (PGXP_LIT) && (GOURAUD_LIT) && (TEXTURED_LIT) && \
-                  !invalidW && rhi_intf_is_type() == RHI_OPENGL); \
                rhi_intf_push_quad(hw_vertices[0].precise[0], \
                   hw_vertices[0].precise[1], hw_vertices[0].precise[2], \
                   hw_vertices[1].precise[0], hw_vertices[1].precise[1], \
@@ -2057,9 +2061,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
             Extend_UVLimits(gpu, verts, 3); \
             Finalise_UVLimits(gpu); \
             memcpy(hw_vertices, verts, 3 * sizeof(tri_vertex)); \
-            gpu_pgxp_seam_process(hw_vertices, 3, gpu->upscale_shift, \
-               (PGXP_LIT) && (GOURAUD_LIT) && (TEXTURED_LIT) && \
-               !invalidW && rhi_intf_is_type() == RHI_OPENGL); \
             /* Push a single triangle */ \
             rhi_intf_push_triangle(hw_vertices[0].precise[0], \
                hw_vertices[0].precise[1], hw_vertices[0].precise[2], \

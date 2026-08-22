@@ -40,6 +40,8 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_EDGE_DELTA_BINS 7u
 #define PGXP_DIAG_EDGE_PACKET_BINS 6u
 #define PGXP_DIAG_EDGE_SAMPLES 96u
+#define PGXP_DIAG_SEAM_ACCEPT_SAMPLES 256u
+#define PGXP_DIAG_SEAM_ACCEPT_WINDOW_SAMPLES 8u
 
 enum PGXP_trace_event_type
 {
@@ -419,6 +421,8 @@ static uint64_t seam_primitives;
 static uint64_t seam_observed_edges;
 static uint64_t seam_moved_vertices;
 static uint64_t seam_conflicts;
+static uint32_t seam_accept_samples;
+static uint32_t seam_accept_window_samples;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -737,6 +741,8 @@ void PGXP_DiagInit(void)
 	seam_observed_edges = 0;
 	seam_moved_vertices = 0;
 	seam_conflicts = 0;
+	seam_accept_samples = 0;
+	seam_accept_window_samples = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
@@ -1581,6 +1587,24 @@ void PGXP_DiagSeamEdge(enum PGXP_diag_seam_result result,
 	seam_results[result]++;
 	seam_delta_bins[pgxp_diag_edge_delta_bin(delta)]++;
 	seam_age_bins[pgxp_diag_edge_packet_bin(age)]++;
+}
+
+void PGXP_DiagSeamAccept(int32_t x0, int32_t y0,
+		int32_t x1, int32_t y1, float delta0, float delta1,
+		uint64_t age)
+{
+	if (!log_cb || seam_accept_samples >= PGXP_DIAG_SEAM_ACCEPT_SAMPLES ||
+	    seam_accept_window_samples >= PGXP_DIAG_SEAM_ACCEPT_WINDOW_SAMPLES)
+		return;
+	seam_accept_samples++;
+	seam_accept_window_samples++;
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_seam_accept] n=%u mf=%u packet=%llu op=%02x "
+		"native=%d/%d-%d/%d endpoint_delta=%.6f/%.6f age=%llu\n",
+		seam_accept_samples, mode_frame,
+		(unsigned long long)current_packet, current_opcode,
+		x0, y0, x1, y1, delta0, delta1,
+		(unsigned long long)age);
 }
 
 void PGXP_DiagSeamPrimitive(unsigned observed_edges,
@@ -3253,7 +3277,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_edge_summary] f=%llu observed=%llu/%llu "
 		"compared_uu_ut_tt=%llu/%llu/%llu overflow=%llu samples=%u "
-		"handoff=gl_textured_edge_weld\n",
+		"handoff=gl_decoded_triangle_edge_weld\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)edge_observations[0],
 		(unsigned long long)edge_observations[1],
@@ -3266,7 +3290,7 @@ void PGXP_DiagFrame(int backend)
 		"exact=%llu accepted=%llu "
 		"stale=%llu unanchored=%llu far=%llu moved=%llu conflicts=%llu "
 		"delta=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
-		"age=%llu/%llu/%llu/%llu/%llu/%llu\n",
+		"age=%llu/%llu/%llu/%llu/%llu/%llu samples=%u\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)seam_primitives,
 		(unsigned long long)seam_observed_edges,
@@ -3289,7 +3313,8 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)seam_age_bins[2],
 		(unsigned long long)seam_age_bins[3],
 		(unsigned long long)seam_age_bins[4],
-		(unsigned long long)seam_age_bins[5]);
+		(unsigned long long)seam_age_bins[5],
+		seam_accept_samples);
 	{
 		static const char* const edge_kind_name[PGXP_DIAG_EDGE_KINDS] = {
 			"uu", "ut", "tt"
@@ -3606,6 +3631,7 @@ void PGXP_DiagFrame(int backend)
 	seam_observed_edges = 0;
 	seam_moved_vertices = 0;
 	seam_conflicts = 0;
+	seam_accept_window_samples = 0;
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
