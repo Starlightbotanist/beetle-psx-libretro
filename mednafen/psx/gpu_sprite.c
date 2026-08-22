@@ -449,6 +449,7 @@ DRAWSPRITE_T1_BMGROUP(1, 2, 1, 1)
                               (BM_VAL), \
                               (ME_LIT), \
                               (gpu)->MaskSetOR != 0, \
+                              false, \
                               true, true); \
       } \
    } while (0)

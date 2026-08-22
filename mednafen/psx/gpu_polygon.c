@@ -2009,6 +2009,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                   (BM_VAL), \
                   (ME_LIT), \
                   gpu->MaskSetOR != 0, \
+                  (PGXP_LIT) && !invalidW, \
                   false, \
                   gpu->may_be_2d); \
             } \
@@ -2051,7 +2052,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                DitherEnabled(gpu), \
                (BM_VAL), \
                (ME_LIT), \
-               gpu->MaskSetOR != 0); \
+               gpu->MaskSetOR != 0, \
+               (PGXP_LIT) && !invalidW); \
             if (gpu->killQuadPart == 2) \
             { \
                gpu->killQuadPart = 0; \

@@ -712,6 +712,9 @@ struct gl_command_vertex {
    /* The primitive samples VRAM content produced by GPU rendering rather
     * than only game-uploaded texture data. */
    uint8_t framebuffer_feedback;
+   /* Decoder provenance for renderer-side PGXP coverage handling.  This is
+    * not a shader attribute: the CPU consumes it before unmapping. */
+   uint8_t pgxp_valid_w;
    /* Depth-cue sidecar: far colour (1.0 == 0xFF) in [0..2], blend factor in
     * [3]. t == 0 makes the shader mix the identity, so vertices without a
     * recovered cue cost nothing. KEEP LAST -- positional initializers above
@@ -1014,6 +1017,10 @@ struct gl_renderer {
    uint64_t pgxp_coverage_nonfinite;
    uint64_t pgxp_coverage_capped;
    uint64_t pgxp_coverage_remainder;
+   uint64_t pgxp_coverage_valid_w;
+   uint64_t pgxp_coverage_invalid_w;
+   uint64_t pgxp_coverage_mixed_w;
+   uint64_t pgxp_coverage_rejected_w;
    uint64_t pgxp_conservative_batches;
    uint64_t pgxp_probe_opaque_textured;
    uint64_t pgxp_probe_semitrans_textured;
@@ -1095,16 +1102,26 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO:
          return 2.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE:
          return 3.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR:
          return 4.0f;
       default:
          return 0.0f;
    }
+}
+
+static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1161,6 +1178,10 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_coverage_nonfinite = 0;
    renderer->pgxp_coverage_capped = 0;
    renderer->pgxp_coverage_remainder = 0;
+   renderer->pgxp_coverage_valid_w = 0;
+   renderer->pgxp_coverage_invalid_w = 0;
+   renderer->pgxp_coverage_mixed_w = 0;
+   renderer->pgxp_coverage_rejected_w = 0;
    renderer->pgxp_conservative_batches = 0;
    renderer->pgxp_probe_opaque_textured = 0;
    renderer->pgxp_probe_semitrans_textured = 0;
@@ -1232,7 +1253,7 @@ static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
  * of a shared edge or changes PGXP provenance.  The selected vertex-motion
  * cap keeps acute/sliver triangles from growing long spikes. */
 static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
-      float vertex_cap)
+      float vertex_cap, bool require_valid_w)
 {
    gl_command_vertex *vertices;
    size_t bi;
@@ -1277,12 +1298,28 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
          float max_radius = 0.0f;
          float max_move;
          float achieved_epsilon;
+         bool valid_w;
          unsigned j;
 
          if (!v[0].texture_blend_mode || !v[1].texture_blend_mode ||
              !v[2].texture_blend_mode)
             continue;
          renderer->pgxp_coverage_candidates++;
+
+         valid_w = v[0].pgxp_valid_w && v[1].pgxp_valid_w &&
+            v[2].pgxp_valid_w;
+         if (v[0].pgxp_valid_w != v[1].pgxp_valid_w ||
+             v[0].pgxp_valid_w != v[2].pgxp_valid_w)
+            renderer->pgxp_coverage_mixed_w++;
+         else if (valid_w)
+            renderer->pgxp_coverage_valid_w++;
+         else
+            renderer->pgxp_coverage_invalid_w++;
+         if (require_valid_w && !valid_w)
+         {
+            renderer->pgxp_coverage_rejected_w++;
+            continue;
+         }
 
          for (j = 0; j < 3u; j++)
          {
@@ -3294,7 +3331,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
          gl_pgxp_count_texture_probe(renderer);
       if (subpixel_units > 0.0f)
          gl_pgxp_expand_coverage(renderer, subpixel_units / raster_grid,
-               gl_pgxp_coverage_vertex_cap(raster_requested));
+               gl_pgxp_coverage_vertex_cap(raster_requested),
+               gl_pgxp_coverage_requires_valid_w(raster_requested));
    }
 
    /* Bind and unmap the command buffer */
@@ -6713,9 +6751,10 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
          log_cb(RETRO_LOG_INFO,
                "[pgxp_gl_coverage] frames=%u mode=%u active=%u "
                "texture_probe=%s subpixel_bits=%u scale=%u "
-               "units=%.2f epsilon=%.9g vertex_cap=%.1f "
+               "units=%.2f epsilon=%.9g vertex_cap=%.1f valid_w_gate=%u "
                "candidates=%llu expanded=%llu degenerate=%llu "
                "nonfinite=%llu capped=%llu remainder=%llu "
+               "provenance=valid/invalid/mixed/rejected:%llu/%llu/%llu/%llu "
                "conservative_batches=%llu probe_triangles=ot/st/ut/mixed:"
                "%llu/%llu/%llu/%llu move_mean=%.9g move_max=%.9g "
                "edge_mean=%.9g edge_min=%.9g edge_max=%.9g\n",
@@ -6726,12 +6765,18 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                gl_caps.subpixel_bits, renderer->internal_upscaling,
                (double)units, units > 0.0f ? (double)(units / grid) : 0.0,
                (double)cap,
+               gl_pgxp_coverage_requires_valid_w(
+                  renderer->pgxp_coverage_mode) ? 1u : 0u,
                (unsigned long long)renderer->pgxp_coverage_candidates,
                (unsigned long long)renderer->pgxp_coverage_expanded,
                (unsigned long long)renderer->pgxp_coverage_degenerate,
                (unsigned long long)renderer->pgxp_coverage_nonfinite,
                (unsigned long long)renderer->pgxp_coverage_capped,
                (unsigned long long)renderer->pgxp_coverage_remainder,
+               (unsigned long long)renderer->pgxp_coverage_valid_w,
+               (unsigned long long)renderer->pgxp_coverage_invalid_w,
+               (unsigned long long)renderer->pgxp_coverage_mixed_w,
+               (unsigned long long)renderer->pgxp_coverage_rejected_w,
                (unsigned long long)renderer->pgxp_conservative_batches,
                (unsigned long long)renderer->pgxp_probe_opaque_textured,
                (unsigned long long)renderer->pgxp_probe_semitrans_textured,
@@ -7198,7 +7243,8 @@ void rhi_gl_push_triangle(
       uint8_t depth_shift,
       bool dither,
       int blend_mode,
-      bool mask_test, bool set_mask)
+      bool mask_test, bool set_mask,
+      bool pgxp_valid_w)
 {
    gl_renderer *renderer;
    gl_semi_transparency_mode semi_transparency_mode    = SEMI_TRANSPARENCY_MODE_ADD;
@@ -7291,9 +7337,11 @@ void rhi_gl_push_triangle(
       };
 
       { int _fi, _fc;
-        for (_fi = 0; _fi < 3; _fi++)
+        for (_fi = 0; _fi < 3; _fi++) {
+           v[_fi].pgxp_valid_w = pgxp_valid_w ? 1u : 0u;
            for (_fc = 0; _fc < 4; _fc++)
-              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
+              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f;
+        } }
 
       gl_vram_sync_primitive(renderer, v, 3);
       push_primitive(renderer, v, 3, GL_TRIANGLES,
@@ -7324,7 +7372,8 @@ void rhi_gl_push_quad(
       uint8_t depth_shift,
       bool dither,
       int blend_mode,
-      bool mask_test, bool set_mask)
+      bool mask_test, bool set_mask,
+      bool pgxp_valid_w)
 {
    gl_renderer *renderer;
    gl_semi_transparency_mode semi_transparency_mode = SEMI_TRANSPARENCY_MODE_ADD;
@@ -7433,9 +7482,11 @@ void rhi_gl_push_quad(
       };
 
       { int _fi, _fc;
-        for (_fi = 0; _fi < 4; _fi++)
+        for (_fi = 0; _fi < 4; _fi++) {
+           v[_fi].pgxp_valid_w = pgxp_valid_w ? 1u : 0u;
            for (_fc = 0; _fc < 4; _fc++)
-              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
+              v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f;
+        } }
 
       gl_vram_sync_primitive(renderer, v, 4);
       {

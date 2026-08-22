@@ -817,7 +817,8 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"texture_solid_opaque", "texture_transparent_marker",
 		"coverage_expand_three", "coverage_expand_four",
 		"coverage_expand_two_cap4", "coverage_expand_three_cap4",
-		"coverage_expand_four_cap4"
+		"coverage_expand_four_cap4", "coverage_valid_w_two",
+		"coverage_valid_w_three", "coverage_valid_w_four"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

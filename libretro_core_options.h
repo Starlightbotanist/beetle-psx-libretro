@@ -865,7 +865,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP OpenGL Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-56 extend coverage by measured amounts and compare acute-triangle caps.",
+      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-56 extend coverage and compare acute-triangle caps; 57-59 restrict expansion to valid-W PGXP geometry.",
       NULL,
       "pgxp",
       {
@@ -926,6 +926,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "coverage expand two cap4", "54: GL Coverage Expand - 2 Subpixels (Cap 4x)" },
          { "coverage expand three cap4", "55: GL Coverage Expand - 3 Subpixels (Cap 4x)" },
          { "coverage expand four cap4", "56: GL Coverage Expand - 4 Subpixels (Cap 4x)" },
+         { "coverage valid w two", "57: GL Coverage Expand - 2 Subpixels (Valid PGXP W)" },
+         { "coverage valid w three", "58: GL Coverage Expand - 3 Subpixels (Valid PGXP W)" },
+         { "coverage valid w four", "59: GL Coverage Expand - 4 Subpixels (Valid PGXP W)" },
          { NULL, NULL },
       },
       "off"

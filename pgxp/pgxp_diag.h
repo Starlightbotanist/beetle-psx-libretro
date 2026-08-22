@@ -100,6 +100,11 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4,
 	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4,
 	PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4,
+	/* Provenance-gated coverage: expand only primitives that reached the
+	 * renderer with a valid PGXP W, excluding sprites/native 2D fallback. */
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO,
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE,
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

@@ -782,7 +782,8 @@ void rhi_intf_push_triangle(
       bool dither,
       int blend_mode,
       bool mask_test,
-      bool set_mask)
+      bool set_mask,
+      bool pgxp_valid_w)
 {
 #ifdef RHI_DUMP
    const rhi_dump_vertex vertices[3] = {
@@ -813,7 +814,7 @@ void rhi_intf_push_triangle(
                texture_blend_mode,
                depth_shift,
                dither,
-               blend_mode, mask_test, set_mask);
+               blend_mode, mask_test, set_mask, pgxp_valid_w);
 #endif
          break;
       case RHI_VULKAN:
@@ -853,6 +854,7 @@ void rhi_intf_push_quad(
    int blend_mode,
    bool mask_test,
    bool set_mask,
+   bool pgxp_valid_w,
    bool is_sprite,
    bool may_be_2d)
 {
@@ -888,7 +890,7 @@ void rhi_intf_push_quad(
                depth_shift,
                /* Sprite modulation uses a zero dither offset. */
                dither && !is_sprite,
-               blend_mode, mask_test, set_mask);
+               blend_mode, mask_test, set_mask, pgxp_valid_w);
 #endif
          break;
       case RHI_VULKAN:

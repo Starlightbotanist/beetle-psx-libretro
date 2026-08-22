@@ -106,7 +106,10 @@ void rhi_intf_push_triangle(float p0x, float p0y, float p0w,
                              * FFI */
                             int blend_mode,
                             bool mask_test,
-                            bool set_mask);
+                            bool set_mask,
+                            /* True only when this polygon retained a valid
+                             * PGXP W through the decoder's all-vertex gate. */
+                            bool pgxp_valid_w);
 
 void rhi_intf_push_quad(float p0x, float p0y, float p0w,
                         float p1x, float p1y, float p1w,
@@ -133,6 +136,7 @@ void rhi_intf_push_quad(float p0x, float p0y, float p0w,
                         int blend_mode,
                         bool mask_test,
                         bool set_mask,
+                        bool pgxp_valid_w,
                         bool is_sprite,
                         bool may_be_2d);
 

@@ -4877,6 +4877,12 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4;
          else if (strcmp(var.value, "coverage expand four cap4") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4;
+         else if (strcmp(var.value, "coverage valid w two") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO;
+         else if (strcmp(var.value, "coverage valid w three") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE;
+         else if (strcmp(var.value, "coverage valid w four") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }
