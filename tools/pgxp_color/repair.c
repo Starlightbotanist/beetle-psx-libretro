@@ -26,9 +26,9 @@ typedef struct
 static int failures;
 static uint64_t submit_material_key = 1;
 
-static void submit_triangle(test_vertex output[3],
+static void submit_triangle_ex(test_vertex output[3],
 		const int32_t native[3][2], const float precise[3][2],
-		uint8_t opcode)
+		uint8_t opcode, int invalid_w)
 {
 	PGXP_diag_primitive_vertex submitted[3];
 	unsigned i;
@@ -49,9 +49,16 @@ static void submit_triangle(test_vertex output[3],
 		output[i].position[1] = precise[i][1];
 		output[i].position[3] = 1.0f;
 	}
-	PGXP_DiagSubmitPrimitive(submitted, 3, 0, 0);
+	PGXP_DiagSubmitPrimitive(submitted, 3, invalid_w, 0);
 	PGXP_DiagGLPrimitive(output, 3, (unsigned)sizeof(output[0]),
 		submit_material_key);
+}
+
+static void submit_triangle(test_vertex output[3],
+		const int32_t native[3][2], const float precise[3][2],
+		uint8_t opcode)
+{
+	submit_triangle_ex(output, native, precise, opcode, 0);
 }
 
 static void expect_near(const char* name, float actual, float expected)
@@ -223,6 +230,22 @@ static void run_interior_mode(unsigned mode, test_vertex stream[6])
 	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
 }
 
+static void run_native_handoff_mode(unsigned mode, uint8_t opcode,
+		int invalid_w, float dx, float dy, test_vertex stream[3])
+{
+	static const int32_t native[3][2] = {
+		{ 10, 20 }, { 20, 20 }, { 10, 30 }
+	};
+	float precise[3][2] = {
+		{ 10.0f + dx, 20.0f + dy },
+		{ 20.0f + dx, 20.0f + dy },
+		{ 10.0f + dx, 30.0f + dy }
+	};
+	PGXP_DiagGLSetMode(mode);
+	submit_triangle_ex(stream, native, precise, opcode, invalid_w);
+	PGXP_DiagGLRepair(stream, 3, (unsigned)sizeof(stream[0]));
+}
+
 static void test_runtime_mode_matrix(void)
 {
 	test_vertex stream[6];
@@ -286,7 +309,7 @@ static void test_runtime_mode_matrix(void)
 	run_interior_mode(PGXP_DIAG_GL_TEST_PERP_CLOSED_INTERIOR, stream);
 	expect_near("perpendicular interior accepts interior", stream[3].position[1], 20.0f);
 	for (mode = PGXP_DIAG_GL_TEST_SWAN_Y_POS;
-	     mode < PGXP_DIAG_GL_TEST_COUNT; mode++)
+	     mode <= PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST; mode++)
 	{
 		run_endpoint_mode(mode, 19.25f, 19.25f, stream);
 		snprintf(label, sizeof(label),
@@ -302,6 +325,57 @@ static void test_runtime_mode_matrix(void)
 			failures++;
 		}
 	}
+
+	puts("[R5] native opaque-textured modes partition the positive control");
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_ALL,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("native all x", stream[0].position[0], 10.0f);
+	expect_near("native all y", stream[0].position[1], 20.0f);
+
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_TRI,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("flat triangle selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_TRI,
+		0x34, 0, 0.25f, -0.75f, stream);
+	expect_near("flat triangle rejects gouraud", stream[0].position[1], 19.25f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_QUAD,
+		0x2c, 0, 0.25f, -0.75f, stream);
+	expect_near("flat quad selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_GOURAUD_TRI,
+		0x34, 0, 0.25f, -0.75f, stream);
+	expect_near("gouraud triangle selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_GOURAUD_QUAD,
+		0x3c, 0, 0.25f, -0.75f, stream);
+	expect_near("gouraud quad selected", stream[0].position[1], 20.0f);
+
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_X_ONLY,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("native X selected", stream[0].position[0], 10.0f);
+	expect_near("native X preserves Y", stream[0].position[1], 19.25f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_Y_ONLY,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("native Y preserves X", stream[0].position[0], 10.25f);
+	expect_near("native Y selected", stream[0].position[1], 20.0f);
+
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_SMALL,
+		0x24, 0, 0.25f, -0.25f, stream);
+	expect_near("small delta selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_SMALL,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("small delta rejects large", stream[0].position[1], 19.25f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_LARGE,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("large delta selected", stream[0].position[1], 20.0f);
+
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_VALID_W,
+		0x24, 0, 0.25f, -0.75f, stream);
+	expect_near("valid W selected", stream[0].position[1], 20.0f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_VALID_W,
+		0x24, 1, 0.25f, -0.75f, stream);
+	expect_near("valid W rejects invalid", stream[0].position[1], 19.25f);
+	run_native_handoff_mode(PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W,
+		0x24, 1, 0.25f, -0.75f, stream);
+	expect_near("invalid W selected", stream[0].position[1], 20.0f);
 	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OFF);
 	PGXP_DiagFrame(0);
 }

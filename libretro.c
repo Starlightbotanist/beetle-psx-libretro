@@ -4809,6 +4809,28 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_UPPER_LEFT_SWAN;
          else if (strcmp(var.value, "upper-left nearest") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST;
+         else if (strcmp(var.value, "native ot all") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_ALL;
+         else if (strcmp(var.value, "native ot flat tri") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_TRI;
+         else if (strcmp(var.value, "native ot flat quad") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_QUAD;
+         else if (strcmp(var.value, "native ot gouraud tri") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_GOURAUD_TRI;
+         else if (strcmp(var.value, "native ot gouraud quad") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_GOURAUD_QUAD;
+         else if (strcmp(var.value, "native ot x") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_X_ONLY;
+         else if (strcmp(var.value, "native ot y") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_Y_ONLY;
+         else if (strcmp(var.value, "native ot delta small") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_SMALL;
+         else if (strcmp(var.value, "native ot delta large") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_LARGE;
+         else if (strcmp(var.value, "native ot valid w") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_VALID_W;
+         else if (strcmp(var.value, "native ot invalid w") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

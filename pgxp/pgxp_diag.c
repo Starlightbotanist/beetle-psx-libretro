@@ -60,6 +60,8 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_GL_HASH_BUCKETS 32768u
 #define PGXP_DIAG_GL_PAIR_CAPACITY 65536u
 #define PGXP_DIAG_GL_WINDOW_SAMPLES 16u
+#define PGXP_DIAG_GL_NATIVE_SAMPLES 4096u
+#define PGXP_DIAG_GL_NATIVE_WINDOW_SAMPLES 16u
 
 /* The broad projection experiment in 3b1b8013 proved that native screen
  * coincidence is not sufficient provenance for mutating live geometry.  Keep
@@ -697,9 +699,21 @@ static double gl_repair_move_sum;
 static float gl_repair_move_max;
 static uint32_t gl_repair_samples;
 static uint32_t gl_repair_window_samples;
+static uint64_t gl_native_triangles[4];
+static uint64_t gl_native_selected[4];
+static uint64_t gl_native_w[2];
+static uint64_t gl_native_selected_w[2];
+static uint64_t gl_native_vertices;
+static uint64_t gl_native_moved;
+static uint64_t gl_native_axis_moved[2];
+static uint64_t gl_native_delta_bins[PGXP_DIAG_EDGE_DELTA_BINS];
+static double gl_native_move_sum;
+static float gl_native_move_max;
+static uint32_t gl_native_samples;
+static uint32_t gl_native_window_samples;
 static unsigned gl_repair_mode = PGXP_DIAG_GL_REPAIR_APPLY ?
 	PGXP_DIAG_GL_TEST_BROAD_REPLAY : PGXP_DIAG_GL_TEST_OFF;
-static uint32_t gl_repair_mode_mask;
+static uint64_t gl_repair_mode_mask;
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -763,6 +777,17 @@ static void pgxp_diag_gl_reset_window(void)
 	gl_repair_move_sum = 0.0;
 	gl_repair_move_max = 0.0f;
 	gl_repair_window_samples = 0;
+	memset(gl_native_triangles, 0, sizeof(gl_native_triangles));
+	memset(gl_native_selected, 0, sizeof(gl_native_selected));
+	memset(gl_native_w, 0, sizeof(gl_native_w));
+	memset(gl_native_selected_w, 0, sizeof(gl_native_selected_w));
+	gl_native_vertices = 0;
+	gl_native_moved = 0;
+	memset(gl_native_axis_moved, 0, sizeof(gl_native_axis_moved));
+	memset(gl_native_delta_bins, 0, sizeof(gl_native_delta_bins));
+	gl_native_move_sum = 0.0;
+	gl_native_move_max = 0.0f;
+	gl_native_window_samples = 0;
 	gl_repair_mode_mask = 0;
 }
 
@@ -777,7 +802,12 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"perp_point_closed", "perp_improved_material",
 		"perp_closed_material", "swan_y_pos", "swan_y_neg",
 		"subpixel_nearest", "subpixel_floor", "subpixel_y_phase",
-		"upper_left", "upper_left_swan", "upper_left_nearest"
+		"upper_left", "upper_left_swan", "upper_left_nearest",
+		"native_ot_all", "native_ot_flat_tri", "native_ot_flat_quad",
+		"native_ot_gouraud_tri", "native_ot_gouraud_quad",
+		"native_ot_x", "native_ot_y", "native_ot_delta_small",
+		"native_ot_delta_large", "native_ot_valid_w",
+		"native_ot_invalid_w"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -1173,6 +1203,7 @@ void PGXP_DiagInit(void)
 	pgxp_diag_gl_reset_stream();
 	pgxp_diag_gl_reset_window();
 	gl_repair_samples = 0;
+	gl_native_samples = 0;
 	gpu_quad_native_sign = 0;
 	gpu_quad_precise_sign = 0;
 	gpu_quad_invalid_w = 0;
@@ -3333,6 +3364,157 @@ static int pgxp_diag_gl_mode_needs_material(unsigned mode)
 		mode == PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL;
 }
 
+static int pgxp_diag_gl_mode_is_native_handoff(unsigned mode)
+{
+	return mode >= PGXP_DIAG_GL_TEST_NATIVE_OT_ALL &&
+		mode <= PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W;
+}
+
+static int pgxp_diag_gl_native_select(unsigned mode, unsigned class_index,
+		int invalid_w, float triangle_delta)
+{
+	switch (mode)
+	{
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_ALL:
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_X_ONLY:
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_Y_ONLY:
+			return 1;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_TRI:
+			return class_index == 0u;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_FLAT_QUAD:
+			return class_index == 1u;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_GOURAUD_TRI:
+			return class_index == 2u;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_GOURAUD_QUAD:
+			return class_index == 3u;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_SMALL:
+			return triangle_delta <= 0.5f;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_DELTA_LARGE:
+			return triangle_delta > 0.5f;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_VALID_W:
+			return !invalid_w;
+		case PGXP_DIAG_GL_TEST_NATIVE_OT_INVALID_W:
+			return invalid_w;
+		default:
+			return 0;
+	}
+}
+
+/* Reproduce dd4f6ade's known-positive native coverage substitution at the
+ * final mapped GL stream, where the sidecar proves that each native/precise
+ * vertex still belongs to the same decoded polygon.  The runtime modes split
+ * that control into exhaustive primitive classes without guessing adjacency.
+ * W, UV, depth, colour, ordering, batching, and every non-opaque-textured
+ * primitive remain byte-for-byte untouched. */
+static void pgxp_diag_gl_native_handoff(void* vertices, unsigned count,
+		unsigned stride_bytes, unsigned mode)
+{
+	uint32_t start;
+	int apply_x = mode != PGXP_DIAG_GL_TEST_NATIVE_OT_Y_ONLY;
+	int apply_y = mode != PGXP_DIAG_GL_TEST_NATIVE_OT_X_ONLY;
+
+	for (start = 0; start < count; start++)
+	{
+		const PGXP_diag_gl_vertex* triangle;
+		float delta[3];
+		float precise_x[3];
+		float precise_y[3];
+		float precise_w[3];
+		float triangle_delta = 0.0f;
+		unsigned class_index;
+		unsigned invalid_index;
+		unsigned i;
+
+		if (!pgxp_diag_gl_triangle_valid(start, count) ||
+		    gl_vertices[start].vertex != 0)
+			continue;
+		triangle = &gl_vertices[start];
+		if (!triangle->textured || triangle->semi_transparent)
+			continue;
+		class_index = (triangle->gouraud ? 2u : 0u) |
+			((triangle->opcode & 0x08u) ? 1u : 0u);
+		invalid_index = triangle->invalid_w ? 1u : 0u;
+		gl_native_triangles[class_index]++;
+		gl_native_w[invalid_index]++;
+
+		for (i = 0; i < 3; i++)
+		{
+			const float* position = pgxp_diag_gl_position(vertices,
+				stride_bytes, start + i);
+			float dx;
+			float dy;
+			precise_x[i] = position[0];
+			precise_y[i] = position[1];
+			precise_w[i] = position[3];
+			dx = (float)gl_vertices[start + i].native_x - position[0];
+			dy = (float)gl_vertices[start + i].native_y - position[1];
+			delta[i] = hypotf(dx, dy);
+			if (delta[i] > triangle_delta)
+				triangle_delta = delta[i];
+		}
+		if (!pgxp_diag_gl_native_select(mode, class_index,
+			triangle->invalid_w, triangle_delta))
+			continue;
+		if (log_cb && gl_native_samples < PGXP_DIAG_GL_NATIVE_SAMPLES &&
+		    gl_native_window_samples < PGXP_DIAG_GL_NATIVE_WINDOW_SAMPLES)
+		{
+			log_cb(RETRO_LOG_INFO,
+				"[pgxp_gl_native_sample] n=%u mf=%u mode=%u "
+				"packet=%llu opcode=%02x class=%u invalid_w=%u upscale=%u "
+				"delta=%.6f vertex_delta=%.6f/%.6f/%.6f "
+				"native=%d/%d,%d/%d,%d/%d "
+				"precise=%.6f/%.6f,%.6f/%.6f,%.6f/%.6f "
+				"w=%.9g/%.9g/%.9g uv=%u/%u,%u/%u,%u/%u\n",
+				gl_native_samples + 1, mode_frame, mode,
+				(unsigned long long)triangle->packet, triangle->opcode,
+				class_index, invalid_index, triangle->upscale_shift,
+				triangle_delta, delta[0], delta[1], delta[2],
+				gl_vertices[start].native_x, gl_vertices[start].native_y,
+				gl_vertices[start + 1].native_x,
+				gl_vertices[start + 1].native_y,
+				gl_vertices[start + 2].native_x,
+				gl_vertices[start + 2].native_y,
+				precise_x[0], precise_y[0], precise_x[1], precise_y[1],
+				precise_x[2], precise_y[2], precise_w[0], precise_w[1],
+				precise_w[2], gl_vertices[start].u, gl_vertices[start].v,
+				gl_vertices[start + 1].u, gl_vertices[start + 1].v,
+				gl_vertices[start + 2].u, gl_vertices[start + 2].v);
+			gl_native_samples++;
+			gl_native_window_samples++;
+		}
+
+		gl_native_selected[class_index]++;
+		gl_native_selected_w[invalid_index]++;
+		gl_native_vertices += 3;
+		for (i = 0; i < 3; i++)
+		{
+			float* position = pgxp_diag_gl_position(vertices, stride_bytes,
+				start + i);
+			float dx = (float)gl_vertices[start + i].native_x - position[0];
+			float dy = (float)gl_vertices[start + i].native_y - position[1];
+			float applied_delta = hypotf(apply_x ? dx : 0.0f,
+				apply_y ? dy : 0.0f);
+			if (applied_delta > 1.0e-6f)
+			{
+				gl_native_moved++;
+				if (apply_x && fabsf(dx) > 1.0e-6f)
+					gl_native_axis_moved[0]++;
+				if (apply_y && fabsf(dy) > 1.0e-6f)
+					gl_native_axis_moved[1]++;
+				gl_native_delta_bins[
+					pgxp_diag_edge_delta_bin(applied_delta)]++;
+				gl_native_move_sum += applied_delta;
+				if (applied_delta > gl_native_move_max)
+					gl_native_move_max = applied_delta;
+			}
+			if (apply_x)
+				position[0] = (float)gl_vertices[start + i].native_x;
+			if (apply_y)
+				position[1] = (float)gl_vertices[start + i].native_y;
+		}
+	}
+}
+
 static void pgxp_diag_gl_build_triangle(void* vertices,
 		unsigned stride_bytes, uint32_t start,
 		PGXP_diag_submit_triangle* output)
@@ -3448,11 +3630,18 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		pgxp_diag_gl_reset_stream();
 		return;
 	}
-	gl_repair_mode_mask |= UINT32_C(1) << gl_repair_mode;
-	/* Modes after PERP_CLOSED_MATERIAL are renderer-state experiments.
-	 * Keep collecting the exact submitted stream, but never feed them into
-	 * the retired T-junction projector (whose default branch would otherwise
-	 * interpret an unknown mode as a broad native-t mutation). */
+	gl_repair_mode_mask |= UINT64_C(1) << gl_repair_mode;
+	if (pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode))
+	{
+		pgxp_diag_gl_native_handoff(vertices, count, stride_bytes,
+			gl_repair_mode);
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
+	/* Raster modes 15..22 never alter CPU vertices.  Keep collecting the
+	 * exact submitted stream, but never feed them into the retired T-junction
+	 * projector (whose default branch would otherwise interpret an unknown
+	 * mode as a broad native-t mutation). */
 	if (gl_repair_mode > PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL)
 	{
 		pgxp_diag_gl_reset_stream();
@@ -5790,7 +5979,7 @@ void PGXP_DiagFrame(int backend)
 		"candidates=%llu gate=invalid_w/movement/pair_overflow=%llu/%llu/%llu "
 		"proposals=%llu consistent=%llu conflicts=%llu "
 		"atomic_pairs=%llu would_move=%llu applied=%llu mean=%.6f max=%.6f "
-		"mode=%u name=%s mask=%08x apply=%u\n",
+		"mode=%u name=%s mask=%016llx apply=%u\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)gl_repair_buffers,
 		(unsigned long long)gl_repair_vertices,
@@ -5819,9 +6008,53 @@ void PGXP_DiagFrame(int backend)
 		gl_repair_moved ? gl_repair_move_sum /
 			(double)gl_repair_moved : 0.0,
 		gl_repair_move_max, gl_repair_mode,
-		pgxp_diag_gl_mode_name(gl_repair_mode), gl_repair_mode_mask,
+		pgxp_diag_gl_mode_name(gl_repair_mode),
+		(unsigned long long)gl_repair_mode_mask,
 		gl_repair_mode > PGXP_DIAG_GL_TEST_OFF &&
-		gl_repair_mode <= PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL);
+		(gl_repair_mode <= PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL ||
+		 pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode)));
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gl_native_handoff] f=%llu mode=%u name=%s "
+		"triangles=%llu class=FT/FQ/GT/GQ:%llu/%llu/%llu/%llu "
+		"selected=%llu class=%llu/%llu/%llu/%llu "
+		"w=valid/invalid:%llu/%llu selected_w=%llu/%llu "
+		"vertices=%llu moved=%llu axis=x/y:%llu/%llu "
+		"delta=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"mean=%.6f max=%.6f samples=%u\n",
+		(unsigned long long)frame_number, gl_repair_mode,
+		pgxp_diag_gl_mode_name(gl_repair_mode),
+		(unsigned long long)(gl_native_triangles[0] +
+			gl_native_triangles[1] + gl_native_triangles[2] +
+			gl_native_triangles[3]),
+		(unsigned long long)gl_native_triangles[0],
+		(unsigned long long)gl_native_triangles[1],
+		(unsigned long long)gl_native_triangles[2],
+		(unsigned long long)gl_native_triangles[3],
+		(unsigned long long)(gl_native_selected[0] +
+			gl_native_selected[1] + gl_native_selected[2] +
+			gl_native_selected[3]),
+		(unsigned long long)gl_native_selected[0],
+		(unsigned long long)gl_native_selected[1],
+		(unsigned long long)gl_native_selected[2],
+		(unsigned long long)gl_native_selected[3],
+		(unsigned long long)gl_native_w[0],
+		(unsigned long long)gl_native_w[1],
+		(unsigned long long)gl_native_selected_w[0],
+		(unsigned long long)gl_native_selected_w[1],
+		(unsigned long long)gl_native_vertices,
+		(unsigned long long)gl_native_moved,
+		(unsigned long long)gl_native_axis_moved[0],
+		(unsigned long long)gl_native_axis_moved[1],
+		(unsigned long long)gl_native_delta_bins[0],
+		(unsigned long long)gl_native_delta_bins[1],
+		(unsigned long long)gl_native_delta_bins[2],
+		(unsigned long long)gl_native_delta_bins[3],
+		(unsigned long long)gl_native_delta_bins[4],
+		(unsigned long long)gl_native_delta_bins[5],
+		(unsigned long long)gl_native_delta_bins[6],
+		gl_native_moved ? gl_native_move_sum /
+			(double)gl_native_moved : 0.0,
+		gl_native_move_max, gl_native_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gl_repair_gate] f=%llu mode=%u "
 		"rejected=link/material/raster=%llu/%llu/%llu "

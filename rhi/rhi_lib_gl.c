@@ -2839,6 +2839,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
    y = renderer->config.draw_offset[1];
    raster_requested = PGXP_DiagGLGetMode();
    raster_effective = raster_requested;
+   if (raster_effective > PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST)
+      raster_effective = PGXP_DIAG_GL_TEST_OFF;
    raster_upper_left = raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT ||
       raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT_SWAN ||
       raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST;
