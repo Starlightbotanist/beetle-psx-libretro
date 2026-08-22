@@ -1028,6 +1028,16 @@ void main() {
       return;
    }
 
+   // Diagnostic: bypass texture fetches, transparency tests, modulation, and
+   // filtering for opaque textured primitives. If a missing R4 tunnel-roof
+   // region is covered by submitted geometry, it must appear cyan; a hole in
+   // the cyan silhouette therefore originates before fragment shading.
+   if (frag_texture_blend_mode != BLEND_MODE_NO_TEXTURE &&
+         frag_semi_transparent == 0U) {
+      frag_color = vec4(0., 1., 1., 1.);
+      return;
+   }
+
    vec4 color;
    bool modulation_quantized = false;
    float opacity=1.;

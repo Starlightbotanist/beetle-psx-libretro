@@ -2851,11 +2851,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
    glClear(GL_DEPTH_BUFFER_BIT);
 
    glStencilMask(1);
-   /* Diagnostic: remove the mask-bit stencil buffer from both rejection and
-    * update. If the R4 roof returns, its PGXP geometry is reaching GL and a
-    * stale/over-wide mask footprint is suppressing it before the fragment
-    * shader. */
-   glDisable(GL_STENCIL_TEST);
+   glEnable(GL_STENCIL_TEST);
 
    /* Bind and unmap the command buffer */
    glBindBuffer(GL_ARRAY_BUFFER, renderer->command_buffer->id);
@@ -5428,8 +5424,8 @@ static void gl_caps_init(void)
          "[gl_caps] glCopyImageSubData: %s\n",
          gl_caps.fp_glCopyImageSubData ? "available" : "NOT available");
    log_cb(RETRO_LOG_INFO,
-         "[pgxp_gl_stencil_test] forced=disabled transparent_discard=enabled "
-         "subpixel_bits=%d\n",
+         "[pgxp_gl_coverage_probe] opaque_textured=cyan depth_test=enabled "
+         "stencil_test=enabled subpixel_bits=%d\n",
          (int)subpixel_bits);
 
    /* Floor check.  Beetle's GL renderer needs VAOs (3.0+ core),
