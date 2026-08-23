@@ -1648,13 +1648,11 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 	uint32_t dest = (instr >> 11) & 31;
 	PGXP_value result;
 
-	/* d85d3347's ordinary Memory-mode helper and the older diagnostic
-	 * lineage implementation both preserve this shift family.  The stack
-	 * ablation must stop both or the diagnostic copy silently repairs the
-	 * shadow after PGXP_CPU_TryMFC2SLL5/SRA5 declines it.  Keep candidate
-	 * accounting, but clear the destination lineage so no later identity
+	/* This diagnostic lineage implementation is behaviorally independent
+	 * from d85d3347's ordinary Memory-mode helper.  Keep candidate accounting
+	 * while disabled, but clear the destination lineage so no later identity
 	 * operation can turn observation state back into rendering state. */
-	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
+	if (!PGXP_FeatureEnabled(PGXP_FEATURE_DIAG_SHIFT))
 	{
 		PGXP_DiagShift(instr, before, after, arithmetic);
 		lineage_reg_touched |= UINT32_C(1) << dest;

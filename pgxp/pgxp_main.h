@@ -49,7 +49,8 @@
 #define PGXP_FEATURE_NCLIP_SIGN_ONLY         (UINT32_C(1) << 6)
 #define PGXP_FEATURE_GL_COVERAGE              (UINT32_C(1) << 7)
 #define PGXP_FEATURE_IDENTITY_MOVE            (UINT32_C(1) << 8)
-#define PGXP_FEATURE_ALL                     (UINT32_C(0x1FF))
+#define PGXP_FEATURE_DIAG_SHIFT               (UINT32_C(1) << 9)
+#define PGXP_FEATURE_ALL                     (UINT32_C(0x3FF))
 
 #ifdef __cplusplus
 extern "C" {

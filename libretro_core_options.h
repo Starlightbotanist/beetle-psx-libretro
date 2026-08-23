@@ -879,7 +879,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_stack_mfc2_shift),
       "PGXP Stack B: MFC2 Shift Preservation",
       NULL,
-      "Ablation control for the d85d3347 and e966b182 shift-preservation family, including its later stale-shadow and native-roundtrip safety gates. Preserves precise GTE coordinates through MFC2 to SLL5 to SRA5 vertex packing. Disabled now suppresses both the ordinary and diagnostic implementations. Restart content after changing it.",
+      "Ablation control for d85d3347's ordinary Memory-mode helper. Preserves precise GTE coordinates through the common MFC2 to SLL5 to SRA5 vertex-packing sequence. Stack J independently controls the later diagnostic implementation of this handoff. Restart content after changing it.",
       NULL,
       "pgxp",
       {
@@ -978,6 +978,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "PGXP Stack I: Identity-Move Preservation",
       NULL,
       "Ablation control for 8711cc00. Preserves precise Memory-mode GTE shadows through ADD, ADDU, ADDI, ADDIU, OR, ORI, XOR and XORI operations which are exact register copies because one operand is zero. This is the change associated with removing Gran Turismo 2's white wheel seams. Restart content after changing it.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_diag_shift),
+      "PGXP Stack J: Traced Shift Handoff",
+      NULL,
+      "Ablation control for the diagnostic SLL5/SRA5 preservation family introduced at 2b03b799 and broadened at e966b182, including the later stale-shadow and native-roundtrip safety gates. This separate behavior path produced the original Spyro ground breakthrough even when the ordinary Stack B helper declined a shift. Restart content after changing it.",
       NULL,
       "pgxp",
       {
