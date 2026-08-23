@@ -402,13 +402,30 @@ static void test_stack_ablation_gates(void)
    if (CPU_reg[3].x != 1.f)
       fail("CPU invariant ablation inactive", (uint32_t)CPU_reg[3].x, 1);
 
-   /* Disabling the MFC2 layer clears its lineage and refuses a new chain. */
+   /* Disabling the MFC2 layer clears its ordinary lineage and also refuses
+    * the diagnostic implementation of the same Memory-mode repair. */
    PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_MFC2_SHIFT);
    PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
    PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
    instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
    if (PGXP_CPU_TryMFC2SLL5(instr, packed << 5, packed))
       fail("MFC2 shift ablation inactive", 1, 0);
+   memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
+   PGXP_CPU_DiagShift(instr, packed, packed << 5, 0);
+   if ((CPU_reg[9].flags & VALID_01) == VALID_01)
+      fail("diagnostic shift ablation inactive", 1, 0);
+
+   /* 8711cc00 is a separate behavior-changing diagnostic path.  Its own
+    * gate must prevent an exact-zero identity operation from copying the
+    * source shadow into the destination register. */
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_IDENTITY_MOVE);
+   PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
+   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+   memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
+   instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(9) | 0x21u;
+   PGXP_CPU_DiagIdentityMove(instr, packed, packed);
+   if ((CPU_reg[9].flags & VALID_01) == VALID_01)
+      fail("identity-move ablation inactive", 1, 0);
 
    /* Current ordering keeps the post-wrap drawing offset; legacy ordering
     * wraps the offset result. W normalization is independently reversible. */

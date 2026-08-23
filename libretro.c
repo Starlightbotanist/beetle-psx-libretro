@@ -4780,15 +4780,16 @@ static void check_variables(bool startup)
       PGXP_STACK_OPTION(pgxp_stack_w_provenance, PGXP_FEATURE_W_PROVENANCE);
       PGXP_STACK_OPTION(pgxp_stack_nclip_sign, PGXP_FEATURE_NCLIP_SIGN_ONLY);
       PGXP_STACK_OPTION(pgxp_stack_gl_coverage, PGXP_FEATURE_GL_COVERAGE);
+      PGXP_STACK_OPTION(pgxp_stack_identity_move, PGXP_FEATURE_IDENTITY_MOVE);
 #undef PGXP_STACK_OPTION
 
       PGXP_SetExperimentMask(stack_mask);
       if (stack_mask != logged_stack_mask)
       {
          log_cb(RETRO_LOG_INFO,
-               "[pgxp_stack] mask=%02x cpu_invariants=%u mfc2_shift=%u "
+               "[pgxp_stack] mask=%03x cpu_invariants=%u mfc2_shift=%u "
                "recovery=%u coord_wrap=%u w_normalize=%u w_provenance=%u "
-               "nclip_sign=%u gl_coverage=%u\n",
+               "nclip_sign=%u gl_coverage=%u identity_move=%u\n",
                stack_mask,
                (stack_mask & PGXP_FEATURE_CPU_SHADOW_INVARIANTS) != 0,
                (stack_mask & PGXP_FEATURE_MFC2_SHIFT) != 0,
@@ -4797,7 +4798,8 @@ static void check_variables(bool startup)
                (stack_mask & PGXP_FEATURE_W_NORMALIZE) != 0,
                (stack_mask & PGXP_FEATURE_W_PROVENANCE) != 0,
                (stack_mask & PGXP_FEATURE_NCLIP_SIGN_ONLY) != 0,
-               (stack_mask & PGXP_FEATURE_GL_COVERAGE) != 0);
+               (stack_mask & PGXP_FEATURE_GL_COVERAGE) != 0,
+               (stack_mask & PGXP_FEATURE_IDENTITY_MOVE) != 0);
          logged_stack_mask = stack_mask;
       }
    }

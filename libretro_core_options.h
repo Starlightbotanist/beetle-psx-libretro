@@ -879,7 +879,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_stack_mfc2_shift),
       "PGXP Stack B: MFC2 Shift Preservation",
       NULL,
-      "Ablation control for d85d3347. Preserves precise GTE coordinates through the common MFC2 to SLL5 to SRA5 vertex-packing sequence.",
+      "Ablation control for the d85d3347 and e966b182 shift-preservation family, including its later stale-shadow and native-roundtrip safety gates. Preserves precise GTE coordinates through MFC2 to SLL5 to SRA5 vertex packing. Disabled now suppresses both the ordinary and diagnostic implementations. Restart content after changing it.",
       NULL,
       "pgxp",
       {
@@ -964,6 +964,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "PGXP Stack H: OpenGL Coverage Repair",
       NULL,
       "Ablation control for raster seam mode 88. Enabled adds the opaque valid-W outside repair skirt; disabled makes mode 88 render the ordinary baseline stream only.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_identity_move),
+      "PGXP Stack I: Identity-Move Preservation",
+      NULL,
+      "Ablation control for 8711cc00. Preserves precise Memory-mode GTE shadows through ADD, ADDU, ADDI, ADDIU, OR, ORI, XOR and XORI operations which are exact register copies because one operand is zero. This is the change associated with removing Gran Turismo 2's white wheel seams. Restart content after changing it.",
       NULL,
       "pgxp",
       {

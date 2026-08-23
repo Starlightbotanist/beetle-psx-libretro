@@ -429,9 +429,11 @@ typedef struct
 	uint64_t lineage_sra5_matches;
 	uint64_t lineage_preserve_sll5;
 	uint64_t lineage_preserve_sra5;
+	uint64_t lineage_shift_blocked;
 	uint64_t lineage_identity_candidates;
 	uint64_t lineage_identity_matches;
 	uint64_t lineage_identity_preserve;
+	uint64_t lineage_identity_blocked;
 	uint64_t lineage_drops;
 	uint64_t lineage_transforms;
 	uint64_t lineage_transform_state[4][4];
@@ -1646,6 +1648,21 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 	uint32_t dest = (instr >> 11) & 31;
 	PGXP_value result;
 
+	/* d85d3347's ordinary Memory-mode helper and the older diagnostic
+	 * lineage implementation both preserve this shift family.  The stack
+	 * ablation must stop both or the diagnostic copy silently repairs the
+	 * shadow after PGXP_CPU_TryMFC2SLL5/SRA5 declines it.  Keep candidate
+	 * accounting, but clear the destination lineage so no later identity
+	 * operation can turn observation state back into rendering state. */
+	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
+	{
+		PGXP_DiagShift(instr, before, after, arithmetic);
+		lineage_reg_touched |= UINT32_C(1) << dest;
+		memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+		window.lineage_shift_blocked++;
+		return 0;
+	}
+
 	Validate(&CPU_reg[source], before);
 	result = CPU_reg[source];
 	PGXP_DiagShift(instr, before, after, arithmetic);
@@ -1711,6 +1728,11 @@ void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
 	window.lineage_identity_candidates++;
 	lineage_reg_touched |= UINT32_C(1) << dest;
 	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	if (!PGXP_FeatureEnabled(PGXP_FEATURE_IDENTITY_MOVE))
+	{
+		window.lineage_identity_blocked++;
+		return;
+	}
 	if (source == 0 || before != after || !prior.valid)
 		return;
 	expected = prior.current_value;
@@ -5789,7 +5811,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
 		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
-		"identity=%llu/%llu/%llu drops=%llu transforms=%llu "
+		"blocked=%llu/%llu identity=%llu/%llu/%llu drops=%llu transforms=%llu "
 		"store=%llu/%llu fifo=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)window.lineage_mfc2,
@@ -5799,6 +5821,8 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_sra5_candidates,
 		(unsigned long long)window.lineage_preserve_sll5,
 		(unsigned long long)window.lineage_preserve_sra5,
+		(unsigned long long)window.lineage_shift_blocked,
+		(unsigned long long)window.lineage_identity_blocked,
 		(unsigned long long)window.lineage_identity_matches,
 		(unsigned long long)window.lineage_identity_candidates,
 		(unsigned long long)window.lineage_identity_preserve,
