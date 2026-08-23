@@ -1016,6 +1016,7 @@ struct gl_renderer {
    uint64_t pgxp_coverage_degenerate;
    uint64_t pgxp_coverage_nonfinite;
    uint64_t pgxp_coverage_capped;
+   uint64_t pgxp_coverage_scale_capped;
    uint64_t pgxp_coverage_remainder;
    uint64_t pgxp_coverage_valid_w;
    uint64_t pgxp_coverage_invalid_w;
@@ -1031,6 +1032,10 @@ struct gl_renderer {
    double pgxp_coverage_edge_sum;
    float pgxp_coverage_edge_min;
    float pgxp_coverage_edge_max;
+   uint64_t pgxp_coverage_inradius_bins[8];
+   uint64_t pgxp_coverage_radius_bins[8];
+   uint64_t pgxp_coverage_aspect_bins[8];
+   uint64_t pgxp_coverage_desired_scale_bins[8];
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -1112,6 +1117,12 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_128:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_64:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_32:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
@@ -1126,7 +1137,13 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_128 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_64 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_32 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1138,10 +1155,50 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_128:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_64:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_32:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16:
          return 16.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12:
+         return 12.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14:
+         return 14.0f;
       default:
          return gl_pgxp_coverage_subpixel_units(mode) > 0.0f ? 8.0f : 0.0f;
    }
+}
+
+/* Scaling about the incenter multiplies every side length by
+ * (1 + scale_delta).  These modes retain mode 61's high absolute cap for
+ * large roof triangles while bounding proportional distortion on smaller
+ * textured geometry such as the R4 car. */
+static float gl_pgxp_coverage_scale_cap(unsigned mode)
+{
+   switch (mode)
+   {
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_128:
+         return 1.0f / 128.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_64:
+         return 1.0f / 64.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_32:
+         return 1.0f / 32.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16:
+         return 1.0f / 16.0f;
+      default:
+         return 0.0f;
+   }
+}
+
+static unsigned gl_pgxp_coverage_bin(float value, const float limits[7])
+{
+   unsigned i;
+   for (i = 0; i < 7u; i++)
+   {
+      if (value < limits[i])
+         return i;
+   }
+   return 7u;
 }
 
 static unsigned gl_pgxp_texture_probe(unsigned mode)
@@ -1184,6 +1241,7 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_coverage_degenerate = 0;
    renderer->pgxp_coverage_nonfinite = 0;
    renderer->pgxp_coverage_capped = 0;
+   renderer->pgxp_coverage_scale_capped = 0;
    renderer->pgxp_coverage_remainder = 0;
    renderer->pgxp_coverage_valid_w = 0;
    renderer->pgxp_coverage_invalid_w = 0;
@@ -1199,6 +1257,14 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_coverage_edge_sum = 0.0;
    renderer->pgxp_coverage_edge_min = 0.0f;
    renderer->pgxp_coverage_edge_max = 0.0f;
+   memset(renderer->pgxp_coverage_inradius_bins, 0,
+         sizeof(renderer->pgxp_coverage_inradius_bins));
+   memset(renderer->pgxp_coverage_radius_bins, 0,
+         sizeof(renderer->pgxp_coverage_radius_bins));
+   memset(renderer->pgxp_coverage_aspect_bins, 0,
+         sizeof(renderer->pgxp_coverage_aspect_bins));
+   memset(renderer->pgxp_coverage_desired_scale_bins, 0,
+         sizeof(renderer->pgxp_coverage_desired_scale_bins));
 }
 
 static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
@@ -1260,8 +1326,16 @@ static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
  * of a shared edge or changes PGXP provenance.  The selected vertex-motion
  * cap keeps acute/sliver triangles from growing long spikes. */
 static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
-      float vertex_cap, bool require_valid_w)
+      float vertex_cap, float scale_cap, bool require_valid_w)
 {
+   static const float inradius_limits[7] =
+      { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f };
+   static const float radius_limits[7] =
+      { 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f };
+   static const float aspect_limits[7] =
+      { 4.0f, 8.0f, 12.0f, 16.0f, 24.0f, 32.0f, 64.0f };
+   static const float scale_limits[7] =
+      { 0.005f, 0.01f, 0.02f, 0.04f, 0.08f, 0.16f, 0.32f };
    gl_command_vertex *vertices;
    size_t bi;
 
@@ -1305,6 +1379,8 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
          float max_radius = 0.0f;
          float max_move;
          float achieved_epsilon;
+         float output_scale;
+         float aspect;
          bool valid_w;
          unsigned j;
 
@@ -1372,10 +1448,29 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
             renderer->pgxp_coverage_nonfinite++;
             continue;
          }
+
+         output_scale = (float)renderer->internal_upscaling;
+         aspect = max_radius / inradius;
+         renderer->pgxp_coverage_inradius_bins[
+            gl_pgxp_coverage_bin(inradius * output_scale,
+               inradius_limits)]++;
+         renderer->pgxp_coverage_radius_bins[
+            gl_pgxp_coverage_bin(max_radius * output_scale,
+               radius_limits)]++;
+         renderer->pgxp_coverage_aspect_bins[
+            gl_pgxp_coverage_bin(aspect, aspect_limits)]++;
+         renderer->pgxp_coverage_desired_scale_bins[
+            gl_pgxp_coverage_bin(scale_delta, scale_limits)]++;
+
          if (max_move > vertex_cap * epsilon)
          {
             scale_delta *= (vertex_cap * epsilon) / max_move;
             renderer->pgxp_coverage_capped++;
+         }
+         if (scale_cap > 0.0f && scale_delta > scale_cap)
+         {
+            scale_delta = scale_cap;
+            renderer->pgxp_coverage_scale_capped++;
          }
 
          achieved_epsilon = inradius * scale_delta;
@@ -3339,6 +3434,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
       if (subpixel_units > 0.0f)
          gl_pgxp_expand_coverage(renderer, subpixel_units / raster_grid,
                gl_pgxp_coverage_vertex_cap(raster_requested),
+               gl_pgxp_coverage_scale_cap(raster_requested),
                gl_pgxp_coverage_requires_valid_w(raster_requested));
    }
 
@@ -6753,25 +6849,36 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             gl_pgxp_coverage_subpixel_units(renderer->pgxp_coverage_mode);
          float cap =
             gl_pgxp_coverage_vertex_cap(renderer->pgxp_coverage_mode);
+         float scale_cap =
+            gl_pgxp_coverage_scale_cap(renderer->pgxp_coverage_mode);
          if (grid < 1.0f)
             grid = 1.0f;
          log_cb(RETRO_LOG_INFO,
                "[pgxp_gl_coverage] frames=%u mode=%u active=%u "
                "texture_probe=%s subpixel_bits=%u scale=%u "
-               "units=%.2f epsilon=%.9g vertex_cap=%.1f valid_w_gate=%u "
+               "units=%.2f epsilon=%.9g vertex_cap=%.1f scale_cap=%.9g "
+               "valid_w_gate=%u "
                "candidates=%llu expanded=%llu degenerate=%llu "
-               "nonfinite=%llu capped=%llu remainder=%llu "
+               "nonfinite=%llu capped=vertex/scale:%llu/%llu remainder=%llu "
                "provenance=valid/invalid/mixed/rejected:%llu/%llu/%llu/%llu "
                "conservative_batches=%llu probe_triangles=ot/st/ut/mixed:"
                "%llu/%llu/%llu/%llu move_mean=%.9g move_max=%.9g "
-               "edge_mean=%.9g edge_min=%.9g edge_max=%.9g\n",
+               "edge_mean=%.9g edge_min=%.9g edge_max=%.9g "
+               "shape_bins=inradius_px:<.25/.5/1/2/4/8/16/inf:"
+               "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+               "radius_px:<4/8/16/32/64/128/256/inf:"
+               "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+               "aspect:<4/8/12/16/24/32/64/inf:"
+               "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+               "desired_scale:<.005/.01/.02/.04/.08/.16/.32/inf:"
+               "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
                renderer->submission_frames,
                renderer->pgxp_coverage_mode,
                gl_pgxp_geometry_active() ? 1u : 0u,
                gl_pgxp_texture_probe_name(renderer->pgxp_coverage_mode),
                gl_caps.subpixel_bits, renderer->internal_upscaling,
                (double)units, units > 0.0f ? (double)(units / grid) : 0.0,
-               (double)cap,
+               (double)cap, (double)scale_cap,
                gl_pgxp_coverage_requires_valid_w(
                   renderer->pgxp_coverage_mode) ? 1u : 0u,
                (unsigned long long)renderer->pgxp_coverage_candidates,
@@ -6779,6 +6886,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                (unsigned long long)renderer->pgxp_coverage_degenerate,
                (unsigned long long)renderer->pgxp_coverage_nonfinite,
                (unsigned long long)renderer->pgxp_coverage_capped,
+               (unsigned long long)renderer->pgxp_coverage_scale_capped,
                (unsigned long long)renderer->pgxp_coverage_remainder,
                (unsigned long long)renderer->pgxp_coverage_valid_w,
                (unsigned long long)renderer->pgxp_coverage_invalid_w,
@@ -6797,7 +6905,39 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                   renderer->pgxp_coverage_edge_sum /
                      (double)renderer->pgxp_coverage_expanded : 0.0,
                (double)renderer->pgxp_coverage_edge_min,
-               (double)renderer->pgxp_coverage_edge_max);
+               (double)renderer->pgxp_coverage_edge_max,
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[0],
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[1],
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[2],
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[3],
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[4],
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[5],
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[6],
+               (unsigned long long)renderer->pgxp_coverage_inradius_bins[7],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[0],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[1],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[2],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[3],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[4],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[5],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[6],
+               (unsigned long long)renderer->pgxp_coverage_radius_bins[7],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[0],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[1],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[2],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[3],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[4],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[5],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[6],
+               (unsigned long long)renderer->pgxp_coverage_aspect_bins[7],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[0],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[1],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[2],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[3],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[4],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[5],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[6],
+               (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[7]);
          gl_pgxp_coverage_reset(renderer, renderer->pgxp_coverage_mode);
       }
       renderer->submission_flushes = 0;

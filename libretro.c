@@ -4891,6 +4891,18 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_NEAREST_4BIT;
          else if (strcmp(var.value, "vk valid w snap floor 4bit") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_FLOOR_4BIT;
+         else if (strcmp(var.value, "coverage valid w four scale 128") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_128;
+         else if (strcmp(var.value, "coverage valid w four scale 64") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_64;
+         else if (strcmp(var.value, "coverage valid w four scale 32") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_32;
+         else if (strcmp(var.value, "coverage valid w four scale 16") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16;
+         else if (strcmp(var.value, "coverage valid w four cap12") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12;
+         else if (strcmp(var.value, "coverage valid w four cap14") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

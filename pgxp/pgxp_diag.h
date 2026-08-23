@@ -114,6 +114,15 @@ enum PGXP_diag_gl_test_mode
 	 * Vulkan still evaluates edges with its advertised native precision. */
 	PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_NEAREST_4BIT,
 	PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_FLOOR_4BIT,
+	/* High-cap GL coverage with a second, relative-growth safety bound. */
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_128,
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_64,
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_32,
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16,
+	/* Intermediate absolute caps between the safe cap-8 and perfect cap-16
+	 * controls, retaining the four-subpixel target. */
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12,
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

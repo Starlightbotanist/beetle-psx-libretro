@@ -713,10 +713,10 @@ static uint32_t gl_native_samples;
 static uint32_t gl_native_window_samples;
 static unsigned gl_repair_mode = PGXP_DIAG_GL_REPAIR_APPLY ?
 	PGXP_DIAG_GL_TEST_BROAD_REPLAY : PGXP_DIAG_GL_TEST_OFF;
-static uint64_t gl_repair_mode_mask;
+static uint64_t gl_repair_mode_mask[2];
 /* gl_repair_mode_mask records every selected runtime mode by bit index. */
-typedef char pgxp_diag_gl_mode_mask_must_fit_u64[
-	PGXP_DIAG_GL_TEST_COUNT <= 64 ? 1 : -1];
+typedef char pgxp_diag_gl_mode_mask_must_fit_u128[
+	PGXP_DIAG_GL_TEST_COUNT <= 128 ? 1 : -1];
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -791,7 +791,7 @@ static void pgxp_diag_gl_reset_window(void)
 	gl_native_move_sum = 0.0;
 	gl_native_move_max = 0.0f;
 	gl_native_window_samples = 0;
-	gl_repair_mode_mask = 0;
+	memset(gl_repair_mode_mask, 0, sizeof(gl_repair_mode_mask));
 }
 
 static const char* pgxp_diag_gl_mode_name(unsigned mode)
@@ -824,7 +824,13 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_valid_w_three", "coverage_valid_w_four",
 		"coverage_valid_w_five", "coverage_valid_w_four_cap16",
 		"vk_valid_w_snap_nearest_4bit",
-		"vk_valid_w_snap_floor_4bit"
+		"vk_valid_w_snap_floor_4bit",
+		"coverage_valid_w_four_scale_128",
+		"coverage_valid_w_four_scale_64",
+		"coverage_valid_w_four_scale_32",
+		"coverage_valid_w_four_scale_16",
+		"coverage_valid_w_four_cap12",
+		"coverage_valid_w_four_cap14"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -3724,7 +3730,8 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		pgxp_diag_gl_reset_stream();
 		return;
 	}
-	gl_repair_mode_mask |= UINT64_C(1) << gl_repair_mode;
+	gl_repair_mode_mask[gl_repair_mode >> 6] |=
+		UINT64_C(1) << (gl_repair_mode & 63u);
 	if (pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode))
 	{
 		pgxp_diag_gl_native_handoff(vertices, count, stride_bytes,
@@ -6073,7 +6080,7 @@ void PGXP_DiagFrame(int backend)
 		"candidates=%llu gate=invalid_w/movement/pair_overflow=%llu/%llu/%llu "
 		"proposals=%llu consistent=%llu conflicts=%llu "
 		"atomic_pairs=%llu would_move=%llu applied=%llu mean=%.6f max=%.6f "
-		"mode=%u name=%s mask=%016llx apply=%u\n",
+		"mode=%u name=%s mask=%016llx/%016llx apply=%u\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)gl_repair_buffers,
 		(unsigned long long)gl_repair_vertices,
@@ -6103,7 +6110,8 @@ void PGXP_DiagFrame(int backend)
 			(double)gl_repair_moved : 0.0,
 		gl_repair_move_max, gl_repair_mode,
 		pgxp_diag_gl_mode_name(gl_repair_mode),
-		(unsigned long long)gl_repair_mode_mask,
+		(unsigned long long)gl_repair_mode_mask[0],
+		(unsigned long long)gl_repair_mode_mask[1],
 		gl_repair_mode > PGXP_DIAG_GL_TEST_OFF &&
 		(gl_repair_mode <= PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL ||
 		 pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode)));
