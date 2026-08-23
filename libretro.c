@@ -5061,6 +5061,23 @@ static void check_variables(bool startup)
          else if (strcmp(var.value, "partial long gap fit") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT;
+         else if (strcmp(var.value, "partial both gap five") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE;
+         else if (strcmp(var.value, "partial both gap six") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX;
+         else if (strcmp(var.value,
+                  "partial both gap fit floor4") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4;
+         else if (strcmp(var.value, "partial both mixed four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR;
+         else if (strcmp(var.value,
+                  "partial both gap mixed four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

@@ -991,7 +991,9 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"overlap_both_any_four", "partial_long_any_four",
 		"partial_both_gap_four", "partial_long_gap_four",
 		"partial_both_overlap_four", "partial_both_gap_fit",
-		"partial_long_gap_fit"
+		"partial_long_gap_fit", "partial_both_gap_five",
+		"partial_both_gap_six", "partial_both_gap_fit_floor4",
+		"partial_both_mixed_four", "partial_both_gap_mixed_four"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -1005,7 +1007,7 @@ static int pgxp_diag_gl_mode_is_exact_adjacency(unsigned mode)
 static int pgxp_diag_gl_mode_is_partial_adjacency(unsigned mode)
 {
 	return mode >= PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR &&
-		mode <= PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT;
+		mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR;
 }
 
 static int pgxp_diag_gl_mode_is_adjacency(unsigned mode)
@@ -4188,7 +4190,12 @@ static int pgxp_diag_gl_partial_marks_both(unsigned mode)
 		mode == PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR ||
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR ||
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR ||
-		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT;
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4 ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR;
 }
 
 static int pgxp_diag_gl_partial_marks_long(unsigned mode)
@@ -4198,22 +4205,31 @@ static int pgxp_diag_gl_partial_marks_long(unsigned mode)
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT;
 }
 
-static int pgxp_diag_gl_partial_required_topology(unsigned mode)
+static int pgxp_diag_gl_partial_allows_topology(unsigned mode,
+		unsigned topology)
 {
 	if (mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR ||
 	    mode == PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR ||
 	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT ||
-	    mode == PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT)
-		return 1;
+	    mode == PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT ||
+	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE ||
+	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX ||
+	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4)
+		return topology == 1u;
 	if (mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR)
-		return 2;
-	return 0;
+		return topology == 2u;
+	if (mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR)
+		return topology == 0u;
+	if (mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR)
+		return topology != 2u;
+	return 1;
 }
 
 static int pgxp_diag_gl_partial_fits_gap(unsigned mode)
 {
 	return mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT ||
-		mode == PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT;
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4;
 }
 
 static int pgxp_diag_gl_partial_allows_crossing_overlap(unsigned mode)
@@ -4517,7 +4533,6 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 				float fitted_expansion = 0.0f;
 				unsigned marked_edges = 0;
 				unsigned topology;
-				int required_topology;
 				int pair_available = 0;
 				unsigned endpoint;
 
@@ -4633,15 +4648,24 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 				if (pgxp_diag_gl_partial_requires_material(mode) &&
 				    !material_same)
 					continue;
-				required_topology =
-					pgxp_diag_gl_partial_required_topology(mode);
-				if (required_topology &&
-				    topology != (unsigned)required_topology)
+				if (!pgxp_diag_gl_partial_allows_topology(mode, topology))
 					continue;
 				gl_partial_eligible_pairs++;
 				if (pgxp_diag_gl_partial_fits_gap(mode))
+				{
 					fitted_expansion = raw_normal_gap *
 						(pgxp_diag_gl_partial_marks_both(mode) ? 0.5f : 1.0f);
+					if (mode ==
+					    PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4)
+					{
+						float raster_grid = scale *
+							(float)(UINT32_C(1) << submit_gl_subpixel_bits);
+						float floor_expansion = raster_grid > 0.0f ?
+							3.0f / raster_grid : 0.0f;
+						if (fitted_expansion < floor_expansion)
+							fitted_expansion = floor_expansion;
+					}
+				}
 
 				if (pgxp_diag_gl_partial_marks_both(mode))
 				{

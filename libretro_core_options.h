@@ -963,7 +963,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_stack_gl_coverage),
       "PGXP Stack H: OpenGL Coverage Repair",
       NULL,
-      "Ablation control for raster seam modes 88-105. Enabled adds the selected opaque valid-W outside repair skirt; disabled makes those modes render the ordinary baseline stream only.",
+      "Ablation control for raster seam modes 88-110. Enabled adds the selected opaque valid-W outside repair skirt; disabled makes those modes render the ordinary baseline stream only.",
       NULL,
       "pgxp",
       {
@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound; 77-79 separate opaque and semi-transparent coverage; 80-85 probe opaque skirts and cap/edge tradeoffs; 86-87 replace fixed coverage with mathematical inside tests; 88 preserves baseline coverage and adds an opaque repair skirt; 89-94 restrict that skirt to exact native shared edges; 95-99 target native-collinear partial edges and T-junctions; 100-105 split long edges, true gaps, existing overlaps, and measured-gap expansion.",
+      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound; 77-79 separate opaque and semi-transparent coverage; 80-85 probe opaque skirts and cap/edge tradeoffs; 86-87 replace fixed coverage with mathematical inside tests; 88 preserves baseline coverage and adds an opaque repair skirt; 89-94 restrict that skirt to exact native shared edges; 95-99 target native-collinear partial edges and T-junctions; 100-105 split long edges, true gaps, existing overlaps, and measured-gap expansion; 106-110 vary bounded true-gap width and isolate mixed topology.",
       NULL,
       "pgxp",
       {
@@ -1115,6 +1115,11 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "partial both overlap four", "103: GL Partial Existing Overlap - Both, 4 Subpixels" },
          { "partial both gap fit", "104: GL Partial True Gap - Both, Measured Fit" },
          { "partial long gap fit", "105: GL Partial True Gap - Long Only, Measured Fit" },
+         { "partial both gap five", "106: GL Partial True Gap - Both, 5 Subpixels (Max 1px)" },
+         { "partial both gap six", "107: GL Partial True Gap - Both, 6 Subpixels (Max 1px)" },
+         { "partial both gap fit floor4", "108: GL Partial True Gap - Both, Max(4 Subpixels, Fit)" },
+         { "partial both mixed four", "109: GL Partial Mixed - Both, 4 Subpixels" },
+         { "partial both gap mixed four", "110: GL Partial Gap + Mixed - Both, 4 Subpixels" },
          { NULL, NULL },
       },
       "off"

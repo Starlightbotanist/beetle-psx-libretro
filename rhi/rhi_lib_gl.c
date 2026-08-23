@@ -1131,7 +1131,7 @@ typedef struct gl_renderer gl_renderer;
 static bool gl_pgxp_adjacency_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
-      mode <= PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT;
+      mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1205,9 +1205,16 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR:
          return 4.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE:
+         return 5.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX:
+         return 6.0f;
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT:
       case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4:
          /* One hardware subpixel of guard is added to the measured gap. */
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
@@ -1300,9 +1307,18 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR:
          return 8.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE:
+         /* Preserve mode 101's one-pixel absolute movement ceiling. */
+         return 32.0f / 5.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX:
+         /* Preserve mode 101's one-pixel absolute movement ceiling. */
+         return 16.0f / 3.0f;
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT:
       case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4:
          /* 1 subpixel * cap 32 retains mode 98's absolute movement bound
           * (4 subpixels * cap 8) while allowing a gap-sized edge offset. */
          return 32.0f;

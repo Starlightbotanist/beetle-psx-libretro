@@ -840,6 +840,39 @@ static void test_partial_edge_adjacency(void)
 		PGXP_DiagGLSharedEdgeMask(3), 0u);
 	PGXP_DiagFrame(0);
 
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise_mixed, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("mixed-only selects mixed long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("mixed-only selects mixed short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(
+		PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("gap+mixed selects true-gap long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("gap+mixed selects true-gap short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(
+		PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native,
+		short_precise_overlap, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("gap+mixed rejects overlap long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("gap+mixed rejects overlap short",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
 	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT);
 	submit_triangle(&stream[0], long_native, long_precise, 0x24);
 	submit_triangle(&stream[3], short_native, short_precise, 0x24);
@@ -866,6 +899,21 @@ static void test_partial_edge_adjacency(void)
 		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.125f);
 	expect_near("fitted long contained has no expansion",
 		PGXP_DiagGLSharedEdgeExpansion(3, 0), 0.0f);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(
+		PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("floor-four fit selects long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("floor-four fit selects short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	expect_near("floor-four fit long minimum extra",
+		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.1875f);
+	expect_near("floor-four fit short minimum extra",
+		PGXP_DiagGLSharedEdgeExpansion(3, 0), 0.1875f);
 	PGXP_DiagFrame(0);
 
 	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);
@@ -897,6 +945,7 @@ int main(void)
 {
 	PGXP_Init();
 	PGXP_DiagInit();
+	PGXP_DiagGLRasterCaps(4);
 	PGXP_SetModes(PGXP_MODE_MEMORY);
 	test_opposing_tjunction_closes();
 	test_conflicting_targets_are_atomic();

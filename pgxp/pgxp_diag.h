@@ -186,6 +186,14 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR,
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT,
 	PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT,
+	/* Bounded follow-ups to the true-gap result.  The fixed-width modes keep
+	 * mode 101's one-pixel absolute vertex-movement ceiling while varying the
+	 * edge offset; the final two expose the otherwise-rejected mixed class. */
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
