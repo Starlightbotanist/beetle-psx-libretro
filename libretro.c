@@ -4917,6 +4917,14 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1;
          else if (strcmp(var.value, "coverage preserve three max1") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1;
+         else if (strcmp(var.value, "coverage preserve cap8 opaque") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE;
+         else if (strcmp(var.value, "coverage preserve cap8 semitrans") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS;
+         else if (strcmp(var.value,
+                  "coverage preserve cap8 opaque semi one") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

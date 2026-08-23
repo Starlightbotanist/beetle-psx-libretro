@@ -1031,6 +1031,16 @@ struct gl_renderer {
    uint64_t pgxp_coverage_invalid_w;
    uint64_t pgxp_coverage_mixed_w;
    uint64_t pgxp_coverage_rejected_w;
+   /* Index 0 is opaque textured; index 1 is semi-transparent textured. */
+   uint64_t pgxp_coverage_class_seen[2];
+   uint64_t pgxp_coverage_class_candidates[2];
+   uint64_t pgxp_coverage_class_expanded[2];
+   uint64_t pgxp_coverage_class_capped[2];
+   uint64_t pgxp_coverage_class_rejected_w[2];
+   uint64_t pgxp_coverage_class_mixed;
+   double pgxp_coverage_class_move_sum[2];
+   float pgxp_coverage_class_move_max[2];
+   double pgxp_coverage_class_edge_sum[2];
    uint64_t pgxp_conservative_batches;
    uint64_t pgxp_probe_opaque_textured;
    uint64_t pgxp_probe_semitrans_textured;
@@ -1143,6 +1153,9 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
@@ -1170,7 +1183,10 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1 ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1196,6 +1212,9 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16:
          return 16.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE:
          return 8.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1:
          return 32.0f;
@@ -1216,7 +1235,44 @@ static bool gl_pgxp_coverage_preserves_surface(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1 ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE;
+}
+
+/* Coverage can safely retain one geometry policy for ordinary opaque
+ * textures while disabling or reducing it for semi-transparent textures.
+ * OpenGL renders the latter in an opaque-texel pass and a blended-texel
+ * pass, so new boundary coverage changes compositing even when the original
+ * projective surface remains exact. */
+static void gl_pgxp_coverage_class_config(unsigned mode, float raster_grid,
+      float epsilon[2], float vertex_cap[2])
+{
+   float units = gl_pgxp_coverage_subpixel_units(mode);
+   float cap = gl_pgxp_coverage_vertex_cap(mode);
+
+   if (raster_grid < 1.0f)
+      raster_grid = 1.0f;
+   epsilon[0] = epsilon[1] = units / raster_grid;
+   vertex_cap[0] = vertex_cap[1] = cap;
+
+   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE)
+   {
+      epsilon[1] = 0.0f;
+      vertex_cap[1] = 0.0f;
+   }
+   else if (mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS)
+   {
+      epsilon[0] = 0.0f;
+      vertex_cap[0] = 0.0f;
+   }
+   else if (mode ==
+         PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE)
+   {
+      epsilon[1] = 1.0f / raster_grid;
+      vertex_cap[1] = 8.0f;
+   }
 }
 
 /* Scaling about the incenter multiplies every side length by
@@ -1300,6 +1356,23 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_coverage_invalid_w = 0;
    renderer->pgxp_coverage_mixed_w = 0;
    renderer->pgxp_coverage_rejected_w = 0;
+   memset(renderer->pgxp_coverage_class_seen, 0,
+         sizeof(renderer->pgxp_coverage_class_seen));
+   memset(renderer->pgxp_coverage_class_candidates, 0,
+         sizeof(renderer->pgxp_coverage_class_candidates));
+   memset(renderer->pgxp_coverage_class_expanded, 0,
+         sizeof(renderer->pgxp_coverage_class_expanded));
+   memset(renderer->pgxp_coverage_class_capped, 0,
+         sizeof(renderer->pgxp_coverage_class_capped));
+   memset(renderer->pgxp_coverage_class_rejected_w, 0,
+         sizeof(renderer->pgxp_coverage_class_rejected_w));
+   renderer->pgxp_coverage_class_mixed = 0;
+   memset(renderer->pgxp_coverage_class_move_sum, 0,
+         sizeof(renderer->pgxp_coverage_class_move_sum));
+   memset(renderer->pgxp_coverage_class_move_max, 0,
+         sizeof(renderer->pgxp_coverage_class_move_max));
+   memset(renderer->pgxp_coverage_class_edge_sum, 0,
+         sizeof(renderer->pgxp_coverage_class_edge_sum));
    renderer->pgxp_conservative_batches = 0;
    renderer->pgxp_probe_opaque_textured = 0;
    renderer->pgxp_probe_semitrans_textured = 0;
@@ -1499,9 +1572,9 @@ static bool gl_pgxp_preserve_expanded_surface(gl_renderer *renderer,
  * equally; unlike the native-coordinate controls this never selects one side
  * of a shared edge or changes PGXP provenance.  The selected vertex-motion
  * cap keeps acute/sliver triangles from growing long spikes. */
-static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
-      float vertex_cap, float scale_cap, bool require_valid_w,
-      bool preserve_surface)
+static void gl_pgxp_expand_coverage(gl_renderer *renderer,
+      const float epsilon[2], const float vertex_cap[2], float scale_cap,
+      bool require_valid_w, bool preserve_surface)
 {
    static const float inradius_limits[7] =
       { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f };
@@ -1514,8 +1587,10 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
    gl_command_vertex *vertices;
    size_t bi;
 
-   if (!renderer || !renderer->command_buffer->map || epsilon <= 0.0f ||
-       vertex_cap <= 0.0f ||
+   if (!renderer || !renderer->command_buffer->map || !epsilon ||
+       !vertex_cap ||
+       ((epsilon[0] <= 0.0f || vertex_cap[0] <= 0.0f) &&
+        (epsilon[1] <= 0.0f || vertex_cap[1] <= 0.0f)) ||
        !gl_pgxp_geometry_active())
       return;
 
@@ -1556,13 +1631,29 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
          float achieved_epsilon;
          float output_scale;
          float aspect;
+         float class_epsilon;
+         float class_vertex_cap;
          bool valid_w;
+         unsigned coverage_class;
          unsigned j;
 
          if (!v[0].texture_blend_mode || !v[1].texture_blend_mode ||
              !v[2].texture_blend_mode)
             continue;
+         if (v[0].semi_transparent != v[1].semi_transparent ||
+             v[0].semi_transparent != v[2].semi_transparent)
+         {
+            renderer->pgxp_coverage_class_mixed++;
+            continue;
+         }
+         coverage_class = v[0].semi_transparent ? 1u : 0u;
+         renderer->pgxp_coverage_class_seen[coverage_class]++;
+         class_epsilon = epsilon[coverage_class];
+         class_vertex_cap = vertex_cap[coverage_class];
+         if (class_epsilon <= 0.0f || class_vertex_cap <= 0.0f)
+            continue;
          renderer->pgxp_coverage_candidates++;
+         renderer->pgxp_coverage_class_candidates[coverage_class]++;
 
          valid_w = v[0].pgxp_valid_w && v[1].pgxp_valid_w &&
             v[2].pgxp_valid_w;
@@ -1576,6 +1667,7 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
          if (require_valid_w && !valid_w)
          {
             renderer->pgxp_coverage_rejected_w++;
+            renderer->pgxp_coverage_class_rejected_w[coverage_class]++;
             continue;
          }
 
@@ -1610,7 +1702,7 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
                opposite[2] * x[2]) / perimeter;
          incenter_y = (opposite[0] * y[0] + opposite[1] * y[1] +
                opposite[2] * y[2]) / perimeter;
-         scale_delta = epsilon / inradius;
+         scale_delta = class_epsilon / inradius;
          for (j = 0; j < 3u; j++)
          {
             float radius = hypotf(x[j] - incenter_x, y[j] - incenter_y);
@@ -1637,10 +1729,12 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
          renderer->pgxp_coverage_desired_scale_bins[
             gl_pgxp_coverage_bin(scale_delta, scale_limits)]++;
 
-         if (max_move > vertex_cap * epsilon)
+         if (max_move > class_vertex_cap * class_epsilon)
          {
-            scale_delta *= (vertex_cap * epsilon) / max_move;
+            scale_delta *=
+               (class_vertex_cap * class_epsilon) / max_move;
             renderer->pgxp_coverage_capped++;
+            renderer->pgxp_coverage_class_capped[coverage_class]++;
          }
          if (scale_cap > 0.0f && scale_delta > scale_cap)
          {
@@ -1665,6 +1759,8 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
          if (achieved_epsilon > renderer->pgxp_coverage_edge_max)
             renderer->pgxp_coverage_edge_max = achieved_epsilon;
          renderer->pgxp_coverage_edge_sum += (double)achieved_epsilon;
+         renderer->pgxp_coverage_class_edge_sum[coverage_class] +=
+            (double)achieved_epsilon;
 
          for (j = 0; j < 3u; j++)
          {
@@ -1674,10 +1770,16 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
             v[j].position[0] = x[j] + dx;
             v[j].position[1] = y[j] + dy;
             renderer->pgxp_coverage_move_sum += (double)move;
+            renderer->pgxp_coverage_class_move_sum[coverage_class] +=
+               (double)move;
             if (move > renderer->pgxp_coverage_move_max)
                renderer->pgxp_coverage_move_max = move;
+            if (move >
+                  renderer->pgxp_coverage_class_move_max[coverage_class])
+               renderer->pgxp_coverage_class_move_max[coverage_class] = move;
          }
          renderer->pgxp_coverage_expanded++;
+         renderer->pgxp_coverage_class_expanded[coverage_class]++;
       }
    }
 }
@@ -3614,14 +3716,19 @@ static void gl_renderer_draw(gl_renderer *renderer)
          gl_pgxp_texture_probe(raster_requested);
       float subpixel_units =
          gl_pgxp_coverage_subpixel_units(raster_requested);
+      float class_epsilon[2];
+      float class_vertex_cap[2];
       if (texture_probe)
          gl_pgxp_count_texture_probe(renderer);
       if (subpixel_units > 0.0f)
-         gl_pgxp_expand_coverage(renderer, subpixel_units / raster_grid,
-               gl_pgxp_coverage_vertex_cap(raster_requested),
+      {
+         gl_pgxp_coverage_class_config(raster_requested, raster_grid,
+               class_epsilon, class_vertex_cap);
+         gl_pgxp_expand_coverage(renderer, class_epsilon, class_vertex_cap,
                gl_pgxp_coverage_scale_cap(raster_requested),
                gl_pgxp_coverage_requires_valid_w(raster_requested),
                gl_pgxp_coverage_preserves_surface(raster_requested));
+      }
    }
 
    /* Bind and unmap the command buffer */
@@ -7041,19 +7148,31 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             gl_pgxp_coverage_vertex_cap(renderer->pgxp_coverage_mode);
          float scale_cap =
             gl_pgxp_coverage_scale_cap(renderer->pgxp_coverage_mode);
+         float class_epsilon[2];
+         float class_vertex_cap[2];
          if (grid < 1.0f)
             grid = 1.0f;
+         gl_pgxp_coverage_class_config(renderer->pgxp_coverage_mode, grid,
+               class_epsilon, class_vertex_cap);
          log_cb(RETRO_LOG_INFO,
                "[pgxp_gl_coverage] frames=%u mode=%u active=%u "
                "texture_probe=%s subpixel_bits=%u scale=%u "
                "units=%.2f epsilon=%.9g vertex_cap=%.1f scale_cap=%.9g "
                "valid_w_gate=%u preserve_surface=%u "
+               "class_config=opaque/epsilon/cap:%.9g/%.9g "
+               "semitrans/epsilon/cap:%.9g/%.9g "
                "candidates=%llu expanded=%llu degenerate=%llu "
                "nonfinite=%llu capped=vertex/scale:%llu/%llu remainder=%llu "
                "surface=preserved/rejected:%llu/%llu "
                "surface_delta=vertices/uv_mean/uv_max/w_ratio_mean/w_ratio_max:"
                "%llu/%.9g/%.9g/%.9g/%.9g "
                "provenance=valid/invalid/mixed/rejected:%llu/%llu/%llu/%llu "
+               "class_stats=opaque/seen/candidates/expanded/capped/rejected_w/"
+               "move_mean/move_max/edge_mean:"
+               "%llu/%llu/%llu/%llu/%llu/%.9g/%.9g/%.9g "
+               "semitrans/seen/candidates/expanded/capped/rejected_w/"
+               "move_mean/move_max/edge_mean:"
+               "%llu/%llu/%llu/%llu/%llu/%.9g/%.9g/%.9g mixed=%llu "
                "conservative_batches=%llu probe_triangles=ot/st/ut/mixed:"
                "%llu/%llu/%llu/%llu move_mean=%.9g move_max=%.9g "
                "edge_mean=%.9g edge_min=%.9g edge_max=%.9g "
@@ -7076,6 +7195,8 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                   renderer->pgxp_coverage_mode) ? 1u : 0u,
                gl_pgxp_coverage_preserves_surface(
                   renderer->pgxp_coverage_mode) ? 1u : 0u,
+               (double)class_epsilon[0], (double)class_vertex_cap[0],
+               (double)class_epsilon[1], (double)class_vertex_cap[1],
                (unsigned long long)renderer->pgxp_coverage_candidates,
                (unsigned long long)renderer->pgxp_coverage_expanded,
                (unsigned long long)renderer->pgxp_coverage_degenerate,
@@ -7098,6 +7219,37 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                (unsigned long long)renderer->pgxp_coverage_invalid_w,
                (unsigned long long)renderer->pgxp_coverage_mixed_w,
                (unsigned long long)renderer->pgxp_coverage_rejected_w,
+               (unsigned long long)renderer->pgxp_coverage_class_seen[0],
+               (unsigned long long)
+                  renderer->pgxp_coverage_class_candidates[0],
+               (unsigned long long)renderer->pgxp_coverage_class_expanded[0],
+               (unsigned long long)renderer->pgxp_coverage_class_capped[0],
+               (unsigned long long)
+                  renderer->pgxp_coverage_class_rejected_w[0],
+               renderer->pgxp_coverage_class_expanded[0] ?
+                  renderer->pgxp_coverage_class_move_sum[0] /
+                     (double)(renderer->pgxp_coverage_class_expanded[0] *
+                        3u) : 0.0,
+               (double)renderer->pgxp_coverage_class_move_max[0],
+               renderer->pgxp_coverage_class_expanded[0] ?
+                  renderer->pgxp_coverage_class_edge_sum[0] /
+                     (double)renderer->pgxp_coverage_class_expanded[0] : 0.0,
+               (unsigned long long)renderer->pgxp_coverage_class_seen[1],
+               (unsigned long long)
+                  renderer->pgxp_coverage_class_candidates[1],
+               (unsigned long long)renderer->pgxp_coverage_class_expanded[1],
+               (unsigned long long)renderer->pgxp_coverage_class_capped[1],
+               (unsigned long long)
+                  renderer->pgxp_coverage_class_rejected_w[1],
+               renderer->pgxp_coverage_class_expanded[1] ?
+                  renderer->pgxp_coverage_class_move_sum[1] /
+                     (double)(renderer->pgxp_coverage_class_expanded[1] *
+                        3u) : 0.0,
+               (double)renderer->pgxp_coverage_class_move_max[1],
+               renderer->pgxp_coverage_class_expanded[1] ?
+                  renderer->pgxp_coverage_class_edge_sum[1] /
+                     (double)renderer->pgxp_coverage_class_expanded[1] : 0.0,
+               (unsigned long long)renderer->pgxp_coverage_class_mixed,
                (unsigned long long)renderer->pgxp_conservative_batches,
                (unsigned long long)renderer->pgxp_probe_opaque_textured,
                (unsigned long long)renderer->pgxp_probe_semitrans_textured,

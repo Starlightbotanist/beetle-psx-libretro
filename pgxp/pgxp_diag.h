@@ -134,6 +134,12 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1,
 	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1,
 	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1,
+	/* Separate opaque and semi-transparent textured coverage.  The latter is
+	 * composited in two OpenGL passes, so expanding it can change overdraw
+	 * even when the original homogeneous surface is preserved exactly. */
+	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE,
+	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS,
+	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
