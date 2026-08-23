@@ -4903,6 +4903,14 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12;
          else if (strcmp(var.value, "coverage valid w four cap14") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14;
+         else if (strcmp(var.value, "coverage preserve cap8") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8;
+         else if (strcmp(var.value, "coverage preserve cap12") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12;
+         else if (strcmp(var.value, "coverage preserve cap14") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14;
+         else if (strcmp(var.value, "coverage preserve cap16") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

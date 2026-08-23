@@ -715,6 +715,12 @@ struct gl_command_vertex {
    /* Decoder provenance for renderer-side PGXP coverage handling.  This is
     * not a shader attribute: the CPU consumes it before unmapping. */
    uint8_t pgxp_valid_w;
+   /* Diagnostic coverage expansion can move a vertex while preserving the
+    * original homogeneous surface.  Integer PSX UV inputs cannot represent
+    * the extrapolated coordinate, so this float sidecar becomes the shader
+    * source only when coverage_preserve is set. */
+   float coverage_texture_coord[2];
+   uint8_t coverage_preserve;
    /* Depth-cue sidecar: far colour (1.0 == 0xFF) in [0..2], blend factor in
     * [3]. t == 0 makes the shader mix the identity, so vertices without a
     * recovered cue cost nothing. KEEP LAST -- positional initializers above
@@ -1017,6 +1023,9 @@ struct gl_renderer {
    uint64_t pgxp_coverage_nonfinite;
    uint64_t pgxp_coverage_capped;
    uint64_t pgxp_coverage_scale_capped;
+   uint64_t pgxp_coverage_preserved;
+   uint64_t pgxp_coverage_preserve_rejected;
+   uint64_t pgxp_coverage_surface_vertices;
    uint64_t pgxp_coverage_remainder;
    uint64_t pgxp_coverage_valid_w;
    uint64_t pgxp_coverage_invalid_w;
@@ -1032,6 +1041,10 @@ struct gl_renderer {
    double pgxp_coverage_edge_sum;
    float pgxp_coverage_edge_min;
    float pgxp_coverage_edge_max;
+   double pgxp_coverage_surface_uv_sum;
+   float pgxp_coverage_surface_uv_max;
+   double pgxp_coverage_surface_w_ratio_sum;
+   float pgxp_coverage_surface_w_ratio_max;
    uint64_t pgxp_coverage_inradius_bins[8];
    uint64_t pgxp_coverage_radius_bins[8];
    uint64_t pgxp_coverage_aspect_bins[8];
@@ -1123,6 +1136,10 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
@@ -1143,7 +1160,11 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_32 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12 ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1161,12 +1182,26 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_SCALE_16:
          return 16.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12:
          return 12.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14:
          return 14.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16:
+         return 16.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8:
+         return 8.0f;
       default:
          return gl_pgxp_coverage_subpixel_units(mode) > 0.0f ? 8.0f : 0.0f;
    }
+}
+
+static bool gl_pgxp_coverage_preserves_surface(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16;
 }
 
 /* Scaling about the incenter multiplies every side length by
@@ -1242,6 +1277,9 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_coverage_nonfinite = 0;
    renderer->pgxp_coverage_capped = 0;
    renderer->pgxp_coverage_scale_capped = 0;
+   renderer->pgxp_coverage_preserved = 0;
+   renderer->pgxp_coverage_preserve_rejected = 0;
+   renderer->pgxp_coverage_surface_vertices = 0;
    renderer->pgxp_coverage_remainder = 0;
    renderer->pgxp_coverage_valid_w = 0;
    renderer->pgxp_coverage_invalid_w = 0;
@@ -1257,6 +1295,10 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_coverage_edge_sum = 0.0;
    renderer->pgxp_coverage_edge_min = 0.0f;
    renderer->pgxp_coverage_edge_max = 0.0f;
+   renderer->pgxp_coverage_surface_uv_sum = 0.0;
+   renderer->pgxp_coverage_surface_uv_max = 0.0f;
+   renderer->pgxp_coverage_surface_w_ratio_sum = 0.0;
+   renderer->pgxp_coverage_surface_w_ratio_max = 0.0f;
    memset(renderer->pgxp_coverage_inradius_bins, 0,
          sizeof(renderer->pgxp_coverage_inradius_bins));
    memset(renderer->pgxp_coverage_radius_bins, 0,
@@ -1320,13 +1362,131 @@ static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
    }
 }
 
+/* Evaluate the original homogeneous attribute planes at vertices displaced
+ * by a uniform scale about the incenter.  OpenGL perspective interpolation
+ * is affine in q=1/w and attribute*q, so supplying those extrapolated values
+ * makes every point inside the original triangle retain its exact texture,
+ * colour and fog mapping after coverage expansion. */
+static bool gl_pgxp_preserve_expanded_surface(gl_renderer *renderer,
+      gl_command_vertex *v, const float opposite[3], float perimeter,
+      float scale_delta)
+{
+   double q[3];
+   double uvq[3][2];
+   double colorq[3][3];
+   double fogq[3][4];
+   double center_q = 0.0;
+   double center_uvq[2] = { 0.0, 0.0 };
+   double center_colorq[3] = { 0.0, 0.0, 0.0 };
+   double center_fogq[4] = { 0.0, 0.0, 0.0, 0.0 };
+   float new_w[3];
+   float new_uv[3][2];
+   float new_color[3][3];
+   float new_fog[3][4];
+   double scale = 1.0 + (double)scale_delta;
+   unsigned i;
+   unsigned c;
+
+   if (!renderer || !v || !isfinite(perimeter) || perimeter <= 0.0f ||
+       !isfinite(scale) || scale < 1.0)
+      return false;
+
+   for (i = 0; i < 3u; i++)
+   {
+      double weight;
+      double w = (double)v[i].position[3];
+      if (!isfinite(w) || w <= 1.0e-20)
+         return false;
+      q[i] = 1.0 / w;
+      weight = (double)opposite[i] / (double)perimeter;
+      center_q += weight * q[i];
+      for (c = 0; c < 2u; c++)
+      {
+         uvq[i][c] = (double)v[i].texture_coord[c] * q[i];
+         center_uvq[c] += weight * uvq[i][c];
+      }
+      for (c = 0; c < 3u; c++)
+      {
+         colorq[i][c] = (double)v[i].color[c] * q[i];
+         center_colorq[c] += weight * colorq[i][c];
+      }
+      for (c = 0; c < 4u; c++)
+      {
+         fogq[i][c] = (double)v[i].fog[c] * q[i];
+         center_fogq[c] += weight * fogq[i][c];
+      }
+   }
+
+   for (i = 0; i < 3u; i++)
+   {
+      double new_q = center_q + scale * (q[i] - center_q);
+      double w;
+      if (!isfinite(new_q) || new_q <= 1.0e-20)
+         return false;
+      w = 1.0 / new_q;
+      new_w[i] = (float)w;
+      if (!isfinite(new_w[i]) || new_w[i] <= 0.0f)
+         return false;
+      for (c = 0; c < 2u; c++)
+      {
+         double aq = center_uvq[c] +
+            scale * (uvq[i][c] - center_uvq[c]);
+         new_uv[i][c] = (float)(aq / new_q);
+         if (!isfinite(new_uv[i][c]))
+            return false;
+      }
+      for (c = 0; c < 3u; c++)
+      {
+         double aq = center_colorq[c] +
+            scale * (colorq[i][c] - center_colorq[c]);
+         new_color[i][c] = (float)(aq / new_q);
+         if (!isfinite(new_color[i][c]))
+            return false;
+      }
+      for (c = 0; c < 4u; c++)
+      {
+         double aq = center_fogq[c] +
+            scale * (fogq[i][c] - center_fogq[c]);
+         new_fog[i][c] = (float)(aq / new_q);
+         if (!isfinite(new_fog[i][c]))
+            return false;
+      }
+   }
+
+   for (i = 0; i < 3u; i++)
+   {
+      float uv_delta = hypotf(new_uv[i][0] - (float)v[i].texture_coord[0],
+            new_uv[i][1] - (float)v[i].texture_coord[1]);
+      float old_w = v[i].position[3];
+      float w_ratio = new_w[i] > old_w ?
+         new_w[i] / old_w : old_w / new_w[i];
+      renderer->pgxp_coverage_surface_uv_sum += (double)uv_delta;
+      if (uv_delta > renderer->pgxp_coverage_surface_uv_max)
+         renderer->pgxp_coverage_surface_uv_max = uv_delta;
+      renderer->pgxp_coverage_surface_w_ratio_sum += (double)w_ratio;
+      if (w_ratio > renderer->pgxp_coverage_surface_w_ratio_max)
+         renderer->pgxp_coverage_surface_w_ratio_max = w_ratio;
+      renderer->pgxp_coverage_surface_vertices++;
+      v[i].position[3] = new_w[i];
+      v[i].coverage_texture_coord[0] = new_uv[i][0];
+      v[i].coverage_texture_coord[1] = new_uv[i][1];
+      v[i].coverage_preserve = 1u;
+      for (c = 0; c < 3u; c++)
+         v[i].color[c] = new_color[i][c];
+      for (c = 0; c < 4u; c++)
+         v[i].fog[c] = new_fog[i][c];
+   }
+   return true;
+}
+
 /* Expand each final OpenGL triangle by a small, renderer-subpixel-sized
  * amount.  Scaling about the incenter offsets all three infinite edge lines
  * equally; unlike the native-coordinate controls this never selects one side
  * of a shared edge or changes PGXP provenance.  The selected vertex-motion
  * cap keeps acute/sliver triangles from growing long spikes. */
 static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
-      float vertex_cap, float scale_cap, bool require_valid_w)
+      float vertex_cap, float scale_cap, bool require_valid_w,
+      bool preserve_surface)
 {
    static const float inradius_limits[7] =
       { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f };
@@ -1471,6 +1631,16 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, float epsilon,
          {
             scale_delta = scale_cap;
             renderer->pgxp_coverage_scale_capped++;
+         }
+         if (preserve_surface)
+         {
+            if (!gl_pgxp_preserve_expanded_surface(renderer, v, opposite,
+                     perimeter, scale_delta))
+            {
+               renderer->pgxp_coverage_preserve_rejected++;
+               continue;
+            }
+            renderer->pgxp_coverage_preserved++;
          }
 
          achieved_epsilon = inradius * scale_delta;
@@ -3435,7 +3605,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
          gl_pgxp_expand_coverage(renderer, subpixel_units / raster_grid,
                gl_pgxp_coverage_vertex_cap(raster_requested),
                gl_pgxp_coverage_scale_cap(raster_requested),
-               gl_pgxp_coverage_requires_valid_w(raster_requested));
+               gl_pgxp_coverage_requires_valid_w(raster_requested),
+               gl_pgxp_coverage_preserves_surface(raster_requested));
    }
 
    /* Bind and unmap the command buffer */
@@ -5828,6 +5999,10 @@ static const struct gl_attribute gl_command_vertex_attribs[] = {
    { "color",              offsetof(gl_command_vertex, color),              GL_FLOAT,          3 },
    { "fog",                offsetof(gl_command_vertex, fog),                GL_FLOAT,          4 },
    { "texture_coord",      offsetof(gl_command_vertex, texture_coord),      GL_UNSIGNED_SHORT, 2 },
+   { "coverage_texture_coord",
+      offsetof(gl_command_vertex, coverage_texture_coord), GL_FLOAT, 2 },
+   { "coverage_preserve",
+      offsetof(gl_command_vertex, coverage_preserve), GL_UNSIGNED_BYTE, 1 },
    { "texture_page",       offsetof(gl_command_vertex, texture_page),       GL_UNSIGNED_SHORT, 2 },
    { "clut",               offsetof(gl_command_vertex, clut),               GL_UNSIGNED_SHORT, 2 },
    { "texture_blend_mode", offsetof(gl_command_vertex, texture_blend_mode), GL_UNSIGNED_BYTE,  1 },
@@ -6857,9 +7032,12 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                "[pgxp_gl_coverage] frames=%u mode=%u active=%u "
                "texture_probe=%s subpixel_bits=%u scale=%u "
                "units=%.2f epsilon=%.9g vertex_cap=%.1f scale_cap=%.9g "
-               "valid_w_gate=%u "
+               "valid_w_gate=%u preserve_surface=%u "
                "candidates=%llu expanded=%llu degenerate=%llu "
                "nonfinite=%llu capped=vertex/scale:%llu/%llu remainder=%llu "
+               "surface=preserved/rejected:%llu/%llu "
+               "surface_delta=vertices/uv_mean/uv_max/w_ratio_mean/w_ratio_max:"
+               "%llu/%.9g/%.9g/%.9g/%.9g "
                "provenance=valid/invalid/mixed/rejected:%llu/%llu/%llu/%llu "
                "conservative_batches=%llu probe_triangles=ot/st/ut/mixed:"
                "%llu/%llu/%llu/%llu move_mean=%.9g move_max=%.9g "
@@ -6881,6 +7059,8 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                (double)cap, (double)scale_cap,
                gl_pgxp_coverage_requires_valid_w(
                   renderer->pgxp_coverage_mode) ? 1u : 0u,
+               gl_pgxp_coverage_preserves_surface(
+                  renderer->pgxp_coverage_mode) ? 1u : 0u,
                (unsigned long long)renderer->pgxp_coverage_candidates,
                (unsigned long long)renderer->pgxp_coverage_expanded,
                (unsigned long long)renderer->pgxp_coverage_degenerate,
@@ -6888,6 +7068,17 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                (unsigned long long)renderer->pgxp_coverage_capped,
                (unsigned long long)renderer->pgxp_coverage_scale_capped,
                (unsigned long long)renderer->pgxp_coverage_remainder,
+               (unsigned long long)renderer->pgxp_coverage_preserved,
+               (unsigned long long)renderer->pgxp_coverage_preserve_rejected,
+               (unsigned long long)renderer->pgxp_coverage_surface_vertices,
+               renderer->pgxp_coverage_surface_vertices ?
+                  renderer->pgxp_coverage_surface_uv_sum /
+                     (double)renderer->pgxp_coverage_surface_vertices : 0.0,
+               (double)renderer->pgxp_coverage_surface_uv_max,
+               renderer->pgxp_coverage_surface_vertices ?
+                  renderer->pgxp_coverage_surface_w_ratio_sum /
+                     (double)renderer->pgxp_coverage_surface_vertices : 0.0,
+               (double)renderer->pgxp_coverage_surface_w_ratio_max,
                (unsigned long long)renderer->pgxp_coverage_valid_w,
                (unsigned long long)renderer->pgxp_coverage_invalid_w,
                (unsigned long long)renderer->pgxp_coverage_mixed_w,

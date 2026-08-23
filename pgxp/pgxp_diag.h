@@ -123,6 +123,12 @@ enum PGXP_diag_gl_test_mode
 	 * controls, retaining the four-subpixel target. */
 	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP12,
 	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP14,
+	/* Preserve the original homogeneous interpolation planes while testing
+	 * the known cap-8/12/14/16 coverage geometries. */
+	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8,
+	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12,
+	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14,
+	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

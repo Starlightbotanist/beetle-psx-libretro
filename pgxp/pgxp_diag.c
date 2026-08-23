@@ -830,7 +830,11 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_valid_w_four_scale_32",
 		"coverage_valid_w_four_scale_16",
 		"coverage_valid_w_four_cap12",
-		"coverage_valid_w_four_cap14"
+		"coverage_valid_w_four_cap14",
+		"coverage_preserve_cap8",
+		"coverage_preserve_cap12",
+		"coverage_preserve_cap14",
+		"coverage_preserve_cap16"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

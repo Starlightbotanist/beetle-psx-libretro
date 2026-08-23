@@ -14,6 +14,8 @@ in vec3 color;
 in vec4 fog;
 in uvec2 texture_page;
 in uvec2 texture_coord;
+in vec2 coverage_texture_coord;
+in uint coverage_preserve;
 in uvec2 clut;
 in uint texture_blend_mode;
 in uint depth_shift;
@@ -116,7 +118,9 @@ void main() {
    frag_fog = fog;
 
    // Let OpenGL interpolate the texel position
-   frag_texture_coord = vec2(texture_coord) + vec2(0.001, 0.001);
+   frag_texture_coord = (coverage_preserve != 0U ?
+         coverage_texture_coord : vec2(texture_coord)) +
+      vec2(0.001, 0.001);
 
    frag_texture_page = texture_page;
    frag_clut = clut;
