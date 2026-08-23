@@ -860,12 +860,12 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "disabled"
    },
-#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN))
    {
       BEETLE_OPT(pgxp_gl_test),
-      "PGXP OpenGL Seam Test",
+      "PGXP Raster Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for OpenGL/OpenGLES PGXP seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-56 extend coverage and compare acute-triangle caps; 57-59 restrict expansion to valid-W PGXP geometry.",
+      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-56 compare expansion and acute-triangle caps; 57-61 restrict OpenGL expansion to valid-W PGXP geometry; 62-63 approximate a 4-bit input grid on Vulkan.",
       NULL,
       "pgxp",
       {
@@ -929,6 +929,10 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "coverage valid w two", "57: GL Coverage Expand - 2 Subpixels (Valid PGXP W)" },
          { "coverage valid w three", "58: GL Coverage Expand - 3 Subpixels (Valid PGXP W)" },
          { "coverage valid w four", "59: GL Coverage Expand - 4 Subpixels (Valid PGXP W)" },
+         { "coverage valid w five", "60: GL Coverage Expand - 5 Subpixels (Valid PGXP W)" },
+         { "coverage valid w four cap16", "61: GL Coverage Expand - 4 Subpixels (Valid W, Cap 16x)" },
+         { "vk valid w snap nearest 4bit", "62: Vulkan Valid-W Snap to 4-bit (Nearest)" },
+         { "vk valid w snap floor 4bit", "63: Vulkan Valid-W Snap to 4-bit (Floor)" },
          { NULL, NULL },
       },
       "off"

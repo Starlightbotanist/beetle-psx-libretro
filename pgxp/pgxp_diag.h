@@ -105,6 +105,15 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO,
 	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE,
 	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR,
+	/* Follow the valid-W result to its plateau and separate requested edge
+	 * growth from the acute-triangle displacement cap. */
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE,
+	PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16,
+	/* Vulkan's raster precision is a read-only device limit.  These controls
+	 * snap valid-W PGXP inputs to OpenGL's observed 4-bit framebuffer grid;
+	 * Vulkan still evaluates edges with its advertised native precision. */
+	PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_NEAREST_4BIT,
+	PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_FLOOR_4BIT,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

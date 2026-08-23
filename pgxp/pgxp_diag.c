@@ -714,6 +714,9 @@ static uint32_t gl_native_window_samples;
 static unsigned gl_repair_mode = PGXP_DIAG_GL_REPAIR_APPLY ?
 	PGXP_DIAG_GL_TEST_BROAD_REPLAY : PGXP_DIAG_GL_TEST_OFF;
 static uint64_t gl_repair_mode_mask;
+/* gl_repair_mode_mask records every selected runtime mode by bit index. */
+typedef char pgxp_diag_gl_mode_mask_must_fit_u64[
+	PGXP_DIAG_GL_TEST_COUNT <= 64 ? 1 : -1];
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -818,7 +821,10 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_expand_three", "coverage_expand_four",
 		"coverage_expand_two_cap4", "coverage_expand_three_cap4",
 		"coverage_expand_four_cap4", "coverage_valid_w_two",
-		"coverage_valid_w_three", "coverage_valid_w_four"
+		"coverage_valid_w_three", "coverage_valid_w_four",
+		"coverage_valid_w_five", "coverage_valid_w_four_cap16",
+		"vk_valid_w_snap_nearest_4bit",
+		"vk_valid_w_snap_floor_4bit"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

@@ -12,6 +12,7 @@
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
 #include "rhi_defer.h"
 #include "tt_trace.h"
+#include "pgxp/pgxp_diag.h"
 #include <retro_inline.h>
 #include <math.h>
 #include "rhi_tt.h"
@@ -19564,6 +19565,130 @@ static ScanoutMode get_scanout_mode(bool bpp24)
       return ScanoutMode_ABGR1555_555;
 }
 
+#if PGXP_DIAG
+struct pgxp_vk_snap_stats
+{
+   unsigned mode;
+   unsigned frames;
+   uint64_t primitives;
+   uint64_t accepted_primitives;
+   uint64_t rejected_primitives;
+   uint64_t vertices;
+   uint64_t changed_coordinates;
+   double movement_sum_px;
+   float movement_max_px;
+};
+
+static struct pgxp_vk_snap_stats pgxp_vk_snap;
+
+static bool pgxp_vk_snap_mode(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_NEAREST_4BIT ||
+      mode == PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_FLOOR_4BIT;
+}
+
+static void pgxp_vk_snap_reset(unsigned mode)
+{
+   memset(&pgxp_vk_snap, 0, sizeof(pgxp_vk_snap));
+   pgxp_vk_snap.mode = mode;
+}
+
+/* Vulkan exposes subPixelPrecisionBits as a read-only physical-device limit,
+ * so a pipeline cannot actually request OpenGL's four-bit rasterizer.  Snap
+ * the final valid-W PGXP inputs to that framebuffer grid instead.  The native
+ * Vulkan rasterizer retains its advertised precision; this is deliberately an
+ * approximation that isolates vertex quantization from edge-equation rules. */
+static void pgxp_vk_snap_vertices(Vertex *vertices, unsigned count,
+      bool pgxp_valid_w)
+{
+   unsigned mode = PGXP_DiagGLGetMode();
+   float scale;
+   float grid;
+   unsigned i;
+
+   if (pgxp_vk_snap.mode != mode)
+      pgxp_vk_snap_reset(mode);
+   if (!pgxp_vk_snap_mode(mode) || renderer == NULL)
+      return;
+
+   pgxp_vk_snap.primitives++;
+   if (!pgxp_valid_w)
+   {
+      pgxp_vk_snap.rejected_primitives++;
+      return;
+   }
+
+   pgxp_vk_snap.accepted_primitives++;
+   pgxp_vk_snap.vertices += count;
+   scale = (float)renderer->scaling;
+   grid = scale * 16.0f;
+   if (!(grid > 0.0f) || !isfinite(grid))
+      return;
+
+   for (i = 0; i < count; i++)
+   {
+      float *coord[2] = { &vertices[i].x, &vertices[i].y };
+      unsigned axis;
+      for (axis = 0; axis < 2; axis++)
+      {
+         float before = *coord[axis];
+         float scaled = before * grid;
+         float snapped;
+         float movement_px;
+
+         if (!isfinite(scaled))
+            continue;
+         if (mode == PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_NEAREST_4BIT)
+            snapped = floorf(scaled + 0.5f) / grid;
+         else
+            snapped = floorf(scaled) / grid;
+         movement_px = fabsf(snapped - before) * scale;
+         *coord[axis] = snapped;
+         pgxp_vk_snap.movement_sum_px += (double)movement_px;
+         if (movement_px > 0.0f)
+            pgxp_vk_snap.changed_coordinates++;
+         if (movement_px > pgxp_vk_snap.movement_max_px)
+            pgxp_vk_snap.movement_max_px = movement_px;
+      }
+   }
+}
+
+static void pgxp_vk_snap_finalize(void)
+{
+   unsigned mode = PGXP_DiagGLGetMode();
+   const VkPhysicalDeviceProperties *props;
+   double mean_px;
+
+   if (pgxp_vk_snap.mode != mode)
+      pgxp_vk_snap_reset(mode);
+   if (!pgxp_vk_snap_mode(mode))
+      return;
+   if (++pgxp_vk_snap.frames < 60u)
+      return;
+
+   props = device_get_gpu_properties(device);
+   mean_px = pgxp_vk_snap.vertices
+      ? pgxp_vk_snap.movement_sum_px /
+            (double)(pgxp_vk_snap.vertices * 2u)
+      : 0.0;
+   if (log_cb)
+      log_cb(RETRO_LOG_INFO,
+            "[pgxp_vk_4bit_snap] frames=%u mode=%u native_subpixel_bits=%u "
+            "scale=%u primitives=all/accepted/rejected:%llu/%llu/%llu "
+            "vertices=%llu changed_coordinates=%llu "
+            "move_mean_px=%.9g move_max_px=%.9g\n",
+            pgxp_vk_snap.frames, mode,
+            props->limits.subPixelPrecisionBits, renderer->scaling,
+            (unsigned long long)pgxp_vk_snap.primitives,
+            (unsigned long long)pgxp_vk_snap.accepted_primitives,
+            (unsigned long long)pgxp_vk_snap.rejected_primitives,
+            (unsigned long long)pgxp_vk_snap.vertices,
+            (unsigned long long)pgxp_vk_snap.changed_coordinates,
+            mean_px, (double)pgxp_vk_snap.movement_max_px);
+   pgxp_vk_snap_reset(mode);
+}
+#endif
+
 void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
                                unsigned height, unsigned pitch)
 {
@@ -19582,6 +19707,9 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
    if (!inside_frame)
       return;
 
+#if PGXP_DIAG
+   pgxp_vk_snap_finalize();
+#endif
    tt_frame_advance();
 
    if (frame_duping_enabled && !GPU_get_display_change_count())
@@ -19935,7 +20063,8 @@ void rhi_vulkan_push_triangle(
       uint8_t depth_shift,
       bool dither,
       int blend_mode,
-      bool mask_test, bool set_mask)
+      bool mask_test, bool set_mask,
+      bool pgxp_valid_w)
 {
    if (!renderer)
       return;
@@ -19959,6 +20088,9 @@ void rhi_vulkan_push_triangle(
          { p1x, p1y, p1w, c1, t1x, t1y },
          { p2x, p2y, p2w, c2, t2x, t2y },
       };
+#if PGXP_DIAG
+      pgxp_vk_snap_vertices(vertices, 3, pgxp_valid_w);
+#endif
       vertices_set_cf(vertices, 3, precise_rgb);
       vertices_set_fog(vertices, 3, fog);
       renderer_draw_triangle(renderer, vertices);
@@ -19986,6 +20118,7 @@ void rhi_vulkan_push_quad(
       bool dither,
       int blend_mode,
       bool mask_test, bool set_mask,
+      bool pgxp_valid_w,
       bool is_sprite, bool may_be_2d)
 {
    if (!renderer)
@@ -20017,6 +20150,9 @@ void rhi_vulkan_push_quad(
          { p3x, p3y, p3w, c3, t3x, t3y },
       };
 
+#if PGXP_DIAG
+      pgxp_vk_snap_vertices(vertices, 4, pgxp_valid_w);
+#endif
       vertices_set_cf(vertices, 4, precise_rgb);
       vertices_set_fog(vertices, 4, fog);
       renderer_draw_quad(renderer, vertices);

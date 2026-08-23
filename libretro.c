@@ -4759,7 +4759,7 @@ static void check_variables(bool startup)
    else
       psx_pgxp_nclip = PGXP_MODE_NONE;
 
-#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN))
    {
       unsigned gl_test_mode = PGXP_DIAG_GL_TEST_OFF;
       var.key = BEETLE_OPT(pgxp_gl_test);
@@ -4883,6 +4883,14 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE;
          else if (strcmp(var.value, "coverage valid w four") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR;
+         else if (strcmp(var.value, "coverage valid w five") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE;
+         else if (strcmp(var.value, "coverage valid w four cap16") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16;
+         else if (strcmp(var.value, "vk valid w snap nearest 4bit") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_NEAREST_4BIT;
+         else if (strcmp(var.value, "vk valid w snap floor 4bit") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_VK_VALID_W_SNAP_FLOOR_4BIT;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }
@@ -5870,7 +5878,7 @@ bool retro_load_game(const struct retro_game_info *info)
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
          option_display.key = BEETLE_OPT(pgxp_vertex);
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
-#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN))
          option_display.key = BEETLE_OPT(pgxp_gl_test);
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
 #endif
@@ -5932,9 +5940,11 @@ bool retro_load_game(const struct retro_game_info *info)
          option_display.key = BEETLE_OPT(depth);
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
 
-#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES))
+#if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN))
+         option_display.visible = true;
          option_display.key = BEETLE_OPT(pgxp_gl_test);
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+         option_display.visible = false;
 #endif
 
          option_display.key = BEETLE_OPT(image_offset);

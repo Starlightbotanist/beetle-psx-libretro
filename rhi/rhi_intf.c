@@ -826,7 +826,7 @@ void rhi_intf_push_triangle(
                texture_blend_mode,
                depth_shift,
                dither,
-               blend_mode, mask_test, set_mask);
+               blend_mode, mask_test, set_mask, pgxp_valid_w);
 #endif
          break;
    }
@@ -903,7 +903,8 @@ void rhi_intf_push_quad(
                texture_blend_mode,
                depth_shift,
                dither,
-               blend_mode, mask_test, set_mask, is_sprite, may_be_2d);
+               blend_mode, mask_test, set_mask, pgxp_valid_w,
+               is_sprite, may_be_2d);
 #endif
          break;
    }

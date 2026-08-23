@@ -1111,7 +1111,10 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR:
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16:
          return 4.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
+         return 5.0f;
       default:
          return 0.0f;
    }
@@ -1121,7 +1124,9 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
 {
    return mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1132,6 +1137,8 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
          return 4.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FOUR_CAP16:
+         return 16.0f;
       default:
          return gl_pgxp_coverage_subpixel_units(mode) > 0.0f ? 8.0f : 0.0f;
    }
