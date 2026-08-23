@@ -346,6 +346,7 @@ typedef struct
 	int32_t native_y[2];
 	int32_t line_dx;
 	int32_t line_dy;
+	int32_t line_bin;
 	int32_t interval[2];
 	float precise_x[2];
 	float precise_y[2];
@@ -749,6 +750,9 @@ static float gl_partial_gap_max;
 static uint64_t gl_partial_fitted_edges;
 static double gl_partial_fitted_sum;
 static float gl_partial_fitted_max;
+static uint64_t gl_partial_native_distance_bins[4];
+static double gl_partial_native_distance_sum;
+static float gl_partial_native_distance_max;
 static uint32_t gl_partial_samples;
 static uint32_t gl_partial_window_samples;
 static uint64_t gl_repair_buffers;
@@ -874,6 +878,10 @@ static void pgxp_diag_gl_reset_window(void)
 	gl_partial_fitted_edges = 0;
 	gl_partial_fitted_sum = 0.0;
 	gl_partial_fitted_max = 0.0f;
+	memset(gl_partial_native_distance_bins, 0,
+		sizeof(gl_partial_native_distance_bins));
+	gl_partial_native_distance_sum = 0.0;
+	gl_partial_native_distance_max = 0.0f;
 	gl_partial_window_samples = 0;
 	gl_repair_buffers = 0;
 	gl_repair_vertices = 0;
@@ -997,7 +1005,10 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"partial_both_mixed_four", "partial_both_gap_mixed_four",
 		"partial_both_overlap_one", "partial_both_overlap_two",
 		"partial_both_overlap_three", "partial_both_any_one",
-		"partial_both_any_two", "partial_both_any_three"
+		"partial_both_any_two", "partial_both_any_three",
+		"parallel_gap_fit_quarter", "parallel_gap_fit_half",
+		"parallel_gap_fit_one", "parallel_gap_fit_two",
+		"parallel_gap_four_one"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -1014,10 +1025,17 @@ static int pgxp_diag_gl_mode_is_partial_adjacency(unsigned mode)
 		mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE;
 }
 
+static int pgxp_diag_gl_mode_is_parallel_adjacency(unsigned mode)
+{
+	return mode >= PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER &&
+		mode <= PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE;
+}
+
 static int pgxp_diag_gl_mode_is_adjacency(unsigned mode)
 {
 	return pgxp_diag_gl_mode_is_exact_adjacency(mode) ||
-		pgxp_diag_gl_mode_is_partial_adjacency(mode);
+		pgxp_diag_gl_mode_is_partial_adjacency(mode) ||
+		pgxp_diag_gl_mode_is_parallel_adjacency(mode);
 }
 
 void PGXP_DiagGLSetMode(unsigned mode)
@@ -4205,7 +4223,8 @@ static int pgxp_diag_gl_partial_marks_both(unsigned mode)
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_THREE ||
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_ONE ||
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_TWO ||
-		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE;
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE ||
+		pgxp_diag_gl_mode_is_parallel_adjacency(mode);
 }
 
 static int pgxp_diag_gl_partial_marks_long(unsigned mode)
@@ -4242,7 +4261,27 @@ static int pgxp_diag_gl_partial_fits_gap(unsigned mode)
 {
 	return mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT ||
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT ||
-		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4;
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4 ||
+		(mode >= PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER &&
+		 mode <= PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO);
+}
+
+static float pgxp_diag_gl_parallel_distance_limit(unsigned mode)
+{
+	switch (mode)
+	{
+		case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER:
+			return 0.25f;
+		case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_HALF:
+			return 0.5f;
+		case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE:
+		case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE:
+			return 1.0f;
+		case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO:
+			return 2.0f;
+		default:
+			return 0.0f;
+	}
 }
 
 static int pgxp_diag_gl_partial_allows_crossing_overlap(unsigned mode)
@@ -4374,13 +4413,21 @@ static unsigned pgxp_diag_gl_adj_mark(uint32_t triangle_start,
  * short-edge form of a T-junction); mode 99 additionally admits positive
  * crossing overlap.  Modes 101-105 distinguish a real empty precise gap from
  * an already-overlapping pair.  Only a non-zero perpendicular separation
- * between the recovered PGXP edge lines is eligible for a repair skirt. */
+ * between the recovered PGXP edge lines is eligible for a repair skirt.
+ * Modes 117-121 use the same interval/topology machinery but query nearby
+ * parallel native lines instead of requiring an identical line equation;
+ * this covers PS1-native overlaps that mode 23 can restore but every earlier
+ * exact-line adjacency mode necessarily misses. */
 static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 		unsigned count, unsigned stride_bytes, unsigned mode)
 {
 	static const uint8_t edge_vertices[3][3] = {
 		{ 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }
 	};
+	int parallel_mode = pgxp_diag_gl_mode_is_parallel_adjacency(mode);
+	float parallel_limit = pgxp_diag_gl_parallel_distance_limit(mode);
+	int parallel_search_radius = parallel_mode ?
+		(int)ceilf(parallel_limit) + 1 : 0;
 	uint32_t start;
 
 	if (gl_adj_frame != mode_frame || gl_adj_mode != mode ||
@@ -4435,6 +4482,8 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 			unsigned abs_dx;
 			unsigned abs_dy;
 			unsigned steps;
+			float line_length;
+			int search_offset;
 			uint32_t bucket;
 			uint32_t previous_index;
 
@@ -4492,6 +4541,12 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 			candidate.line_c = (int64_t)candidate.line_dx *
 				candidate.native_y[0] -
 				(int64_t)candidate.line_dy * candidate.native_x[0];
+			line_length = hypotf((float)candidate.line_dx,
+				(float)candidate.line_dy);
+			if (!isfinite(line_length) || line_length <= 0.0f)
+				continue;
+			candidate.line_bin = (int32_t)floor(
+				(double)candidate.line_c / (double)line_length);
 			if (candidate.line_dx)
 			{
 				candidate.interval[0] = candidate.native_x[0];
@@ -4518,12 +4573,18 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 				continue;
 
 			gl_adj_edges_seen++;
-			bucket = pgxp_diag_gl_adj_line_hash(candidate.line_dx,
-				candidate.line_dy, candidate.line_c);
-			previous_index = gl_adj_hash_heads[bucket];
-			while (previous_index != UINT32_MAX &&
-			       previous_index < gl_adj_edge_count)
+			for (search_offset = -parallel_search_radius;
+			     search_offset <= parallel_search_radius; search_offset++)
 			{
+				int64_t search_line = parallel_mode ?
+					(int64_t)candidate.line_bin + search_offset :
+					candidate.line_c;
+				bucket = pgxp_diag_gl_adj_line_hash(candidate.line_dx,
+					candidate.line_dy, search_line);
+				previous_index = gl_adj_hash_heads[bucket];
+				while (previous_index != UINT32_MAX &&
+				       previous_index < gl_adj_edge_count)
+				{
 				const PGXP_diag_gl_adj_edge* previous =
 					&gl_adj_edges[previous_index];
 				int32_t overlap_start;
@@ -4539,24 +4600,37 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 				float previous_y[2];
 				float current_x[2];
 				float current_y[2];
-				float line_length;
 				float scale;
 				float raw_normal_gap = 0.0f;
 				float normal_gap;
+				float native_line_distance = 0.0f;
 				float fitted_expansion = 0.0f;
 				unsigned marked_edges = 0;
 				unsigned topology;
 				int pair_available = 0;
 				unsigned endpoint;
+				unsigned native_distance_bin;
 
 				previous_index = previous->next;
 				if (previous->line_dx != candidate.line_dx ||
 				    previous->line_dy != candidate.line_dy ||
-				    previous->line_c != candidate.line_c ||
+				    (parallel_mode ?
+				     (int64_t)previous->line_bin != search_line :
+				     previous->line_c != candidate.line_c) ||
 				    (previous->generation == gl_adj_generation &&
 				     previous->triangle_start == start) ||
 				    previous->upscale_shift != candidate.upscale_shift)
 					continue;
+				if (parallel_mode)
+				{
+					native_line_distance = (float)(fabs(
+						(double)previous->line_c - candidate.line_c) /
+						(double)line_length);
+					if (!isfinite(native_line_distance) ||
+					    native_line_distance <= 1.0e-6f ||
+					    native_line_distance > parallel_limit)
+						continue;
+				}
 				gl_partial_line_pairs++;
 				if ((previous->side < 0) == (candidate.side < 0))
 					continue;
@@ -4565,7 +4639,8 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 				    previous->interval[1] == candidate.interval[1])
 				{
 					gl_partial_exact_intervals++;
-					continue;
+					if (!parallel_mode)
+						continue;
 				}
 				overlap_start = previous->interval[0] >
 					candidate.interval[0] ? previous->interval[0] :
@@ -4591,7 +4666,7 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 					gl_partial_containment_pairs++;
 				else
 					gl_partial_overlap_pairs++;
-				if (!containment &&
+				if (!containment && !parallel_mode &&
 				    !pgxp_diag_gl_partial_allows_crossing_overlap(mode))
 					continue;
 
@@ -4603,10 +4678,6 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 						&current_x[0], &current_y[0]) ||
 				    !pgxp_diag_gl_adj_eval(&candidate, overlap_end,
 						&current_x[1], &current_y[1]))
-					continue;
-				line_length = hypotf((float)candidate.line_dx,
-					(float)candidate.line_dy);
-				if (!isfinite(line_length) || line_length <= 0.0f)
 					continue;
 				for (endpoint = 0; endpoint < 2u; endpoint++)
 				{
@@ -4661,6 +4732,18 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 				if (pgxp_diag_gl_partial_requires_material(mode) &&
 				    !material_same)
 					continue;
+				if (parallel_mode)
+				{
+					if (topology != 1u)
+						continue;
+					native_distance_bin = native_line_distance <= 0.25f ? 0u :
+						(native_line_distance <= 0.5f ? 1u :
+						 (native_line_distance <= 1.0f ? 2u : 3u));
+					gl_partial_native_distance_bins[native_distance_bin]++;
+					gl_partial_native_distance_sum += native_line_distance;
+					if (native_line_distance > gl_partial_native_distance_max)
+						gl_partial_native_distance_max = native_line_distance;
+				}
 				if (!pgxp_diag_gl_partial_allows_topology(mode, topology))
 					continue;
 				gl_partial_eligible_pairs++;
@@ -4739,19 +4822,22 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 				{
 					log_cb(RETRO_LOG_INFO,
 						"[pgxp_gl_partial_edge] n=%u mf=%u mode=%u "
-						"prev=%llu curr=%llu line=%d/%d/%lld "
+						"prev=%llu curr=%llu line=%d/%d/%lld/%lld "
 						"interval=prev:%d/%d curr:%d/%d overlap=%d/%d "
-						"containment=%u topology=%u gap=%.6f raw_gap=%.6f "
+						"containment=%u topology=%u native_distance=%.6f "
+						"gap=%.6f raw_gap=%.6f "
 						"ratio=%.6f packet_gap=%llu material=%u fit=%.6f "
 						"marked=%u available=%u cross_buffer=%u\n",
 						gl_partial_samples + 1, mode_frame, mode,
 						(unsigned long long)previous->packet,
 						(unsigned long long)candidate.packet,
 						candidate.line_dx, candidate.line_dy,
+						(long long)previous->line_c,
 						(long long)candidate.line_c,
 						previous->interval[0], previous->interval[1],
 						candidate.interval[0], candidate.interval[1],
 						overlap_start, overlap_end, containment, topology,
+						native_line_distance,
 						normal_gap, raw_normal_gap,
 						(double)(previous_length > current_length ?
 							previous_length : current_length) /
@@ -4765,12 +4851,16 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 					gl_partial_window_samples++;
 				}
 			}
+			}
 
 			if (gl_adj_edge_count >= PGXP_DIAG_GL_ADJ_EDGE_CAPACITY)
 			{
 				gl_adj_overflow++;
 				continue;
 			}
+			bucket = pgxp_diag_gl_adj_line_hash(candidate.line_dx,
+				candidate.line_dy, parallel_mode ? candidate.line_bin :
+				candidate.line_c);
 			candidate.next = gl_adj_hash_heads[bucket];
 			gl_adj_edges[gl_adj_edge_count] = candidate;
 			gl_adj_hash_heads[bucket] = gl_adj_edge_count++;
@@ -4860,7 +4950,8 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		pgxp_diag_gl_reset_stream();
 		return;
 	}
-	if (pgxp_diag_gl_mode_is_partial_adjacency(gl_repair_mode))
+	if (pgxp_diag_gl_mode_is_partial_adjacency(gl_repair_mode) ||
+	    pgxp_diag_gl_mode_is_parallel_adjacency(gl_repair_mode))
 	{
 		pgxp_diag_gl_classify_partial_adjacency(vertices, count,
 			stride_bytes, gl_repair_mode);
@@ -7321,6 +7412,8 @@ void PGXP_DiagFrame(int backend)
 		"selected=pairs/edges/unavailable_previous:%llu/%llu/%llu "
 		"gap=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
 		"mean=%.6f max=%.6f fitted=edges/mean/max:%llu/%.6f/%.6f "
+		"selected_native_distance=le.25/le.5/le1/le2:%llu/%llu/%llu/%llu "
+		"mean=%.6f max=%.6f "
 		"samples=%u\n",
 		(unsigned long long)frame_number, gl_repair_mode,
 		pgxp_diag_gl_mode_name(gl_repair_mode),
@@ -7366,7 +7459,21 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)gl_partial_fitted_edges,
 		gl_partial_fitted_edges ? gl_partial_fitted_sum /
 			(double)gl_partial_fitted_edges : 0.0,
-		gl_partial_fitted_max, gl_partial_samples);
+		gl_partial_fitted_max,
+		(unsigned long long)gl_partial_native_distance_bins[0],
+		(unsigned long long)gl_partial_native_distance_bins[1],
+		(unsigned long long)gl_partial_native_distance_bins[2],
+		(unsigned long long)gl_partial_native_distance_bins[3],
+		(gl_partial_native_distance_bins[0] +
+		 gl_partial_native_distance_bins[1] +
+		 gl_partial_native_distance_bins[2] +
+		 gl_partial_native_distance_bins[3]) ?
+			gl_partial_native_distance_sum /
+			(double)(gl_partial_native_distance_bins[0] +
+				gl_partial_native_distance_bins[1] +
+				gl_partial_native_distance_bins[2] +
+				gl_partial_native_distance_bins[3]) : 0.0,
+		gl_partial_native_distance_max, gl_partial_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gl_native_handoff] f=%llu mode=%u name=%s "
 		"triangles=%llu class=FT/FQ/GT/GQ:%llu/%llu/%llu/%llu "

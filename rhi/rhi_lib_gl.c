@@ -722,7 +722,7 @@ struct gl_command_vertex {
    /* Decoder provenance for renderer-side PGXP coverage handling.  This is
     * not a shader attribute: the CPU consumes it before unmapping. */
    uint8_t pgxp_valid_w;
-   /* CPU-only marker for union modes 88-105's second copy. The baseline copy
+   /* CPU-only marker for union modes 88-121's second copy. The baseline copy
     * remains byte-for-byte unchanged while expansion consumes only this one. */
    uint8_t coverage_repair_copy;
    /* Absolute command-stream vertex supplying native adjacency metadata for
@@ -1138,7 +1138,7 @@ typedef struct gl_renderer gl_renderer;
 static bool gl_pgxp_adjacency_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
-      mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE;
+      mode <= PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1220,6 +1220,7 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE:
          return 5.0f;
@@ -1228,6 +1229,10 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT:
       case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_HALF:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO:
          /* One hardware subpixel of guard is added to the measured gap. */
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
@@ -1341,9 +1346,15 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT:
       case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_HALF:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE:
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO:
          /* 1 subpixel * cap 32 retains mode 98's absolute movement bound
           * (4 subpixels * cap 8) while allowing a gap-sized edge offset. */
          return 32.0f;
+      case PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE:
+         return 8.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR:

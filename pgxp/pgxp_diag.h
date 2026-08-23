@@ -205,6 +205,16 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_ONE,
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_TWO,
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE,
+	/* Same-line adjacency cannot see a PS1-native overlap represented by two
+	 * parallel edge equations a fraction of a pixel apart.  Measure those
+	 * pairs directly, require a recovered precise gap, and add only a bounded
+	 * surface-preserving repair skirt.  The first four fit the measured gap;
+	 * the last retains the ordinary four-subpixel width as a control. */
+	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER,
+	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_HALF,
+	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE,
+	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO,
+	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

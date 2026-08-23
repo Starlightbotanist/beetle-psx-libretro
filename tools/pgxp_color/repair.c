@@ -585,6 +585,27 @@ static void test_partial_edge_adjacency(void)
 	static const float short_precise_mixed[3][2] = {
 		{ 5.0f, 0.125f }, { 0.0f, -0.125f }, { 5.0f, -5.0f }
 	};
+	static const int32_t parallel_one_native[3][2] = {
+		{ 5, -1 }, { 0, -1 }, { 5, -5 }
+	};
+	static const float parallel_one_precise[3][2] = {
+		{ 5.0f, -0.125f }, { 0.0f, -0.125f }, { 5.0f, -5.0f }
+	};
+	static const int32_t parallel_two_native[3][2] = {
+		{ 5, -2 }, { 0, -2 }, { 5, -5 }
+	};
+	static const int32_t parallel_fraction_long_native[3][2] = {
+		{ 0, 0 }, { 3, 4 }, { -4, 3 }
+	};
+	static const float parallel_fraction_long_precise[3][2] = {
+		{ 0.0f, 0.0f }, { 3.0f, 4.0f }, { -4.0f, 3.0f }
+	};
+	static const int32_t parallel_fraction_peer_native[3][2] = {
+		{ 1, 1 }, { 4, 5 }, { 6, 0 }
+	};
+	static const float parallel_fraction_peer_precise[3][2] = {
+		{ 0.94f, 1.045f }, { 3.94f, 5.045f }, { 6.0f, 0.0f }
+	};
 	static const int32_t short_same_side[3][2] = {
 		{ 5, 0 }, { 0, 0 }, { 5, 5 }
 	};
@@ -872,6 +893,97 @@ static void test_partial_edge_adjacency(void)
 			PGXP_DiagGLSharedEdgeMask(3), 1u);
 		PGXP_DiagFrame(0);
 	}
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER);
+	submit_triangle(&stream[0], parallel_fraction_long_native,
+		parallel_fraction_long_precise, 0x24);
+	submit_triangle(&stream[3], parallel_fraction_peer_native,
+		parallel_fraction_peer_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("parallel quarter selects fractional native neighbor long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("parallel quarter selects fractional native neighbor peer",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	expect_near("parallel quarter fits half precise gap long",
+		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.0625f);
+	expect_near("parallel quarter fits half precise gap peer",
+		PGXP_DiagGLSharedEdgeExpansion(3, 0), 0.0625f);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_HALF);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], parallel_one_native,
+		parallel_one_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("parallel half rejects one-pixel native distance long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("parallel half rejects one-pixel native distance peer",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], parallel_one_native,
+		parallel_one_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("parallel one selects native neighbor long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("parallel one selects native neighbor peer",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	expect_near("parallel one fits half precise gap long",
+		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.0625f);
+	expect_near("parallel one fits half precise gap peer",
+		PGXP_DiagGLSharedEdgeExpansion(3, 0), 0.0625f);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], parallel_two_native,
+		parallel_one_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("parallel one rejects two-pixel native distance long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("parallel one rejects two-pixel native distance peer",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], parallel_two_native,
+		parallel_one_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("parallel two selects native neighbor long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("parallel two selects native neighbor peer",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	expect_near("parallel two fits half precise gap long",
+		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.0625f);
+	expect_near("parallel two fits half precise gap peer",
+		PGXP_DiagGLSharedEdgeExpansion(3, 0), 0.0625f);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], parallel_one_native,
+		parallel_one_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("parallel fixed-four selects native neighbor long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("parallel fixed-four selects native neighbor peer",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	expect_near("parallel fixed-four has no fitted extra",
+		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.0f);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("parallel family excludes same-line long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("parallel family excludes same-line peer",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
 
 	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR);
 	submit_triangle(&stream[0], long_native, long_precise, 0x24);

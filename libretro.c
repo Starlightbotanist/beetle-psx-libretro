@@ -5096,6 +5096,21 @@ static void check_variables(bool startup)
          else if (strcmp(var.value, "partial both any three") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE;
+         else if (strcmp(var.value, "parallel gap fit quarter") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_QUARTER;
+         else if (strcmp(var.value, "parallel gap fit half") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_HALF;
+         else if (strcmp(var.value, "parallel gap fit one") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE;
+         else if (strcmp(var.value, "parallel gap fit two") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO;
+         else if (strcmp(var.value, "parallel gap four one") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }
