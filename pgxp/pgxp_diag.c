@@ -642,6 +642,7 @@ static uint32_t submit_pending_triangle;
 static uint8_t submit_pending_vertices;
 static uint8_t submit_pending_valid;
 static unsigned submit_gl_subpixel_bits;
+static unsigned submit_gl_internal_scale = 1u;
 static uint64_t submit_primitives;
 static uint64_t submit_quads;
 static uint64_t submit_triangle_overflow;
@@ -993,7 +994,10 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"partial_both_overlap_four", "partial_both_gap_fit",
 		"partial_long_gap_fit", "partial_both_gap_five",
 		"partial_both_gap_six", "partial_both_gap_fit_floor4",
-		"partial_both_mixed_four", "partial_both_gap_mixed_four"
+		"partial_both_mixed_four", "partial_both_gap_mixed_four",
+		"partial_both_overlap_one", "partial_both_overlap_two",
+		"partial_both_overlap_three", "partial_both_any_one",
+		"partial_both_any_two", "partial_both_any_three"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -1007,7 +1011,7 @@ static int pgxp_diag_gl_mode_is_exact_adjacency(unsigned mode)
 static int pgxp_diag_gl_mode_is_partial_adjacency(unsigned mode)
 {
 	return mode >= PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR &&
-		mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR;
+		mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE;
 }
 
 static int pgxp_diag_gl_mode_is_adjacency(unsigned mode)
@@ -4195,7 +4199,13 @@ static int pgxp_diag_gl_partial_marks_both(unsigned mode)
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX ||
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4 ||
 		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR ||
-		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR;
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_ONE ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_TWO ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_THREE ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_ONE ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_TWO ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE;
 }
 
 static int pgxp_diag_gl_partial_marks_long(unsigned mode)
@@ -4216,7 +4226,10 @@ static int pgxp_diag_gl_partial_allows_topology(unsigned mode,
 	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_SIX ||
 	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4)
 		return topology == 1u;
-	if (mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR)
+	if (mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR ||
+	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_ONE ||
+	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_TWO ||
+	    mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_THREE)
 		return topology == 2u;
 	if (mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR)
 		return topology == 0u;
@@ -4658,7 +4671,7 @@ static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
 					if (mode ==
 					    PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4)
 					{
-						float raster_grid = scale *
+						float raster_grid = (float)submit_gl_internal_scale *
 							(float)(UINT32_C(1) << submit_gl_subpixel_bits);
 						float floor_expansion = raster_grid > 0.0f ?
 							3.0f / raster_grid : 0.0f;
@@ -5308,6 +5321,11 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits)
 {
 	submit_gl_subpixel_bits = subpixel_bits > 16u ? 16u : subpixel_bits;
+}
+
+void PGXP_DiagGLRasterScale(unsigned internal_scale)
+{
+	submit_gl_internal_scale = internal_scale ? internal_scale : 1u;
 }
 
 static PGXP_diag_edge* pgxp_diag_find_edge(int32_t x0, int32_t y0,

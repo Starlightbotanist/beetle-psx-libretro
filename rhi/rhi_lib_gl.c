@@ -218,8 +218,8 @@ static void gl_diag_errors(const char *site)
    }
 }
 
-/* Normalise the pixel-transfer state this renderer inherits from the
- * frontend. The glsm shim used to reset all of this around every core
+/* Normalise mutable state this renderer inherits from the frontend.
+ * The glsm shim used to reset all of this around every core
  * entry; the rhi port dropped the shim for its unused state mirror and
  * with it, silently, the incoming-state normalisation that was doing
  * real work. RetroArch legitimately uploads its own UI textures between
@@ -236,6 +236,13 @@ static void gl_diag_errors(const char *site)
  * point that touches the context after the frontend may have. */
 static void gl_normalize_inherited_state(void)
 {
+   /* PSX polygons are two-sided. Vulkan pins every primitive pipeline to
+    * VK_CULL_MODE_NONE, while an OpenGL core shares mutable raster state with
+    * its frontend. The R4 field build proved RetroArch currently hands this
+    * device culling disabled, so this is not the tunnel fix; still make the
+    * backend contract explicit so a different frontend cannot silently cull
+    * PGXP triangles according to stale GL state. */
+   glDisable(GL_CULL_FACE);
    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
    glPixelStorei(GL_UNPACK_ALIGNMENT,   4);
@@ -1131,7 +1138,7 @@ typedef struct gl_renderer gl_renderer;
 static bool gl_pgxp_adjacency_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
-      mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR;
+      mode <= PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1155,6 +1162,8 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_ONE:
       case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_ONE:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_ONE:
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4:
@@ -1162,12 +1171,16 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_TWO:
       case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_TWO:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_TWO:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_TWO:
          return 2.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_THREE:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE:
          return 3.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
@@ -1310,6 +1323,15 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR:
          return 8.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_ONE:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_ONE:
+         return 32.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_TWO:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_TWO:
+         return 16.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_THREE:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE:
+         return 32.0f / 3.0f;
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIVE:
          /* Preserve mode 101's one-pixel absolute movement ceiling. */
          return 32.0f / 5.0f;
@@ -4204,6 +4226,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
     * topology classifier before GL consumes it.  Live projection is disabled
     * by default after the broad 3b1b8013 experiment proved screen-coordinate
     * coincidence alone is not safe mutation provenance. */
+   PGXP_DiagGLRasterScale(renderer->internal_upscaling);
    PGXP_DiagGLRepair(renderer->command_buffer->map,
          (unsigned)renderer->command_buffer->map_index,
          (unsigned)sizeof(gl_command_vertex));
@@ -6677,6 +6700,7 @@ static void cleanup_gl_state(void)
    glDisable(GL_SCISSOR_TEST);
    glDisable(GL_DEPTH_TEST);
    glDisable(GL_STENCIL_TEST);
+   glDisable(GL_CULL_FACE);
    glBlendColor(0.0, 0.0, 0.0, 0.0);
    glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
    glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);

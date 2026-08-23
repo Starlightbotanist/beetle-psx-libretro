@@ -194,6 +194,17 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT_FLOOR4,
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MIXED_FOUR,
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_MIXED_FOUR,
+	/* Mode 98's improvement survived neither the true-gap nor the mixed
+	 * subsets, leaving the continuously-overlapping class as the decisive
+	 * discriminator. Sweep that class and the original all-topology set at
+	 * one through three GL subpixels; modes 103 and 98 remain their respective
+	 * four-subpixel references. */
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_ONE,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_TWO,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_THREE,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_ONE,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_TWO,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_THREE,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
@@ -266,6 +277,7 @@ float PGXP_DiagGLSharedEdgeExpansion(unsigned triangle_start, unsigned edge);
 void PGXP_DiagGLSetMode(unsigned mode);
 unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
+void PGXP_DiagGLRasterScale(unsigned internal_scale);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned quad_part, int invalid_w, unsigned upscale_shift);
 void PGXP_DiagLineHack(int32_t average_y, int rejected_w,
@@ -335,6 +347,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagGLSetMode(mode) ((void)0)
 #define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
+#define PGXP_DiagGLRasterScale(internal_scale) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagLineHack(average_y, rejected_w, w0, w1, w2) ((void)0)
 #define PGXP_DiagVertex(source, slot, value, shadow, x, y, w, native_x, native_y, valid_w, valid_xy, value_match) ((void)0)
