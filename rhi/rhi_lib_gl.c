@@ -1131,7 +1131,7 @@ typedef struct gl_renderer gl_renderer;
 static bool gl_pgxp_adjacency_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
-      mode <= PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR;
+      mode <= PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1196,6 +1196,11 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR:
       case PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR:
       case PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_SHORT_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
@@ -1278,6 +1283,11 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR:
       case PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR:
       case PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_SHORT_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR:
          return 8.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR:
          return 4.0f;

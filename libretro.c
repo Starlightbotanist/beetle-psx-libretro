@@ -5026,6 +5026,23 @@ static void check_variables(bool startup)
          else if (strcmp(var.value, "adjacency uv four") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR;
+         else if (strcmp(var.value,
+                  "partial short material four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR;
+         else if (strcmp(var.value, "partial short any four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_SHORT_ANY_FOUR;
+         else if (strcmp(var.value,
+                  "partial both material four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR;
+         else if (strcmp(var.value, "partial both any four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR;
+         else if (strcmp(var.value, "overlap both any four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

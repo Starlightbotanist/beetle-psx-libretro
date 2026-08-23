@@ -167,6 +167,15 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR,
 	PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR,
 	PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR,
+	/* Generalize exact whole-edge adjacency to native-collinear partial
+	 * coverage.  Containment modes target the short edge alone or both sides
+	 * of a long-edge/short-edge T-junction; the final mode also admits
+	 * positive partial overlaps where neither interval contains the other. */
+	PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_SHORT_ANY_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR,
+	PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

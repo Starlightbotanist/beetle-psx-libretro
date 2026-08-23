@@ -562,6 +562,208 @@ static void test_exact_edge_adjacency(void)
 	PGXP_DiagFrame(0);
 }
 
+static void test_partial_edge_adjacency(void)
+{
+	static const int32_t long_native[3][2] = {
+		{ 0, 0 }, { 10, 0 }, { 0, 10 }
+	};
+	static const float long_precise[3][2] = {
+		{ 0.0f, 0.0f }, { 10.0f, 0.0f }, { 0.0f, 10.0f }
+	};
+	static const int32_t short_native[3][2] = {
+		{ 5, 0 }, { 0, 0 }, { 5, -5 }
+	};
+	static const float short_precise[3][2] = {
+		{ 5.0f, -0.125f }, { 0.0f, -0.125f }, { 5.0f, -5.0f }
+	};
+	static const float short_precise_consistent[3][2] = {
+		{ 5.0f, 0.0f }, { 0.0f, 0.0f }, { 5.0f, -5.0f }
+	};
+	static const int32_t short_same_side[3][2] = {
+		{ 5, 0 }, { 0, 0 }, { 5, 5 }
+	};
+	static const int32_t crossing_native[3][2] = {
+		{ 15, 0 }, { 5, 0 }, { 15, -5 }
+	};
+	static const float crossing_precise[3][2] = {
+		{ 15.0f, -0.125f }, { 5.0f, -0.125f }, { 15.0f, -5.0f }
+	};
+	static const int32_t touch_native[3][2] = {
+		{ 15, 0 }, { 10, 0 }, { 15, -5 }
+	};
+	static const float touch_precise[3][2] = {
+		{ 15.0f, -0.125f }, { 10.0f, -0.125f }, { 15.0f, -5.0f }
+	};
+	static const int32_t equal_native[3][2] = {
+		{ 10, 0 }, { 0, 0 }, { 10, -10 }
+	};
+	static const float equal_precise[3][2] = {
+		{ 10.0f, -0.125f }, { 0.0f, -0.125f }, { 10.0f, -10.0f }
+	};
+	static const int32_t diagonal_long_native[3][2] = {
+		{ 0, 0 }, { 10, 10 }, { 0, 10 }
+	};
+	static const float diagonal_long_precise[3][2] = {
+		{ 0.0f, 0.0f }, { 10.0f, 10.0f }, { 0.0f, 10.0f }
+	};
+	static const int32_t diagonal_short_native[3][2] = {
+		{ 5, 5 }, { 0, 0 }, { 5, 0 }
+	};
+	static const float diagonal_short_precise[3][2] = {
+		{ 5.0f, 4.875f }, { 0.0f, -0.125f }, { 5.0f, 0.0f }
+	};
+	static const int32_t vertical_long_native[3][2] = {
+		{ 0, 0 }, { 0, 10 }, { -10, 0 }
+	};
+	static const float vertical_long_precise[3][2] = {
+		{ 0.0f, 0.0f }, { 0.0f, 10.0f }, { -10.0f, 0.0f }
+	};
+	static const int32_t vertical_short_native[3][2] = {
+		{ 0, 5 }, { 0, 0 }, { 5, 5 }
+	};
+	static const float vertical_short_precise[3][2] = {
+		{ 0.125f, 5.0f }, { 0.125f, 0.0f }, { 5.0f, 5.0f }
+	};
+	test_vertex stream[6];
+
+	puts("[R8] partial native edge masks distinguish containment and overlap");
+	PGXP_DiagGLSetMode(
+		PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("containment leaves long edge clear",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("containment selects short edge",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(
+		PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_material_key = 2;
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("partial material gate rejects long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("partial material gate rejects short",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_SHORT_ANY_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_material_key = 2;
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("partial any keeps long clear",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("partial any selects short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("partial both selects long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("partial both selects short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], crossing_native, crossing_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("containment mode rejects crossing long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("containment mode rejects crossing peer",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], crossing_native, crossing_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("overlap mode selects first edge",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("overlap mode selects crossing edge",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], touch_native, touch_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("point touch leaves first edge clear",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("point touch leaves peer edge clear",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], equal_native, equal_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("equal span stays in exact-edge family (first)",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("equal span stays in exact-edge family (peer)",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], diagonal_long_native,
+		diagonal_long_precise, 0x24);
+	submit_triangle(&stream[3], diagonal_short_native,
+		diagonal_short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("diagonal containment selects long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("diagonal containment selects short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], vertical_long_native,
+		vertical_long_precise, 0x24);
+	submit_triangle(&stream[3], vertical_short_native,
+		vertical_short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("vertical containment selects long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("vertical containment selects short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_same_side, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("partial same-side leaves long clear",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("partial same-side leaves short clear",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native,
+		short_precise_consistent, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("partial consistent long stays clear",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("partial consistent short stays clear",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+
+	submit_material_key = 1;
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OFF);
+	PGXP_DiagFrame(0);
+}
+
 int main(void)
 {
 	PGXP_Init();
@@ -572,6 +774,7 @@ int main(void)
 	test_pgxp_off_is_untouched();
 	test_runtime_mode_matrix();
 	test_exact_edge_adjacency();
+	test_partial_edge_adjacency();
 	PGXP_Shutdown();
 	printf("\nFAIL count %d\n", failures);
 	if (failures)

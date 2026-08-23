@@ -332,19 +332,24 @@ typedef struct
 	uint32_t linked;
 } PGXP_diag_gl_pair;
 
-/* Exact native-edge identity at the final GL handoff.  Records live for one
- * emulated frame rather than one command-buffer flush, so a later primitive
- * can still identify adjacency to geometry that OpenGL has already consumed.
- * Only the current buffer's triangle can be marked in that case, which is
- * sufficient for its outside repair skirt to claim the shared boundary. */
+/* Native edge identity at the final GL handoff.  Exact modes hash endpoints;
+ * partial modes hash the normalized infinite native line and retain its 1-D
+ * interval.  Records live for one emulated frame rather than one command-
+ * buffer flush, so a later primitive can still identify adjacency to geometry
+ * that OpenGL has already consumed.  Only the current buffer's triangle can
+ * be marked in that case. */
 typedef struct
 {
 	int32_t native_x[2];
 	int32_t native_y[2];
+	int32_t line_dx;
+	int32_t line_dy;
+	int32_t interval[2];
 	float precise_x[2];
 	float precise_y[2];
 	uint64_t material_key;
 	uint64_t packet;
+	int64_t line_c;
 	int64_t side;
 	uint32_t triangle_start;
 	uint32_t next;
@@ -717,6 +722,23 @@ static double gl_adj_delta_sum;
 static float gl_adj_delta_max;
 static uint32_t gl_adj_samples;
 static uint32_t gl_adj_window_samples;
+static uint64_t gl_partial_line_pairs;
+static uint64_t gl_partial_opposite_pairs;
+static uint64_t gl_partial_exact_intervals;
+static uint64_t gl_partial_touch_pairs;
+static uint64_t gl_partial_containment_pairs;
+static uint64_t gl_partial_overlap_pairs;
+static uint64_t gl_partial_mismatch_pairs;
+static uint64_t gl_partial_material_pairs[2];
+static uint64_t gl_partial_eligible_pairs;
+static uint64_t gl_partial_selected_pairs;
+static uint64_t gl_partial_selected_edges;
+static uint64_t gl_partial_unavailable_previous;
+static uint64_t gl_partial_gap_bins[PGXP_DIAG_EDGE_DELTA_BINS];
+static double gl_partial_gap_sum;
+static float gl_partial_gap_max;
+static uint32_t gl_partial_samples;
+static uint32_t gl_partial_window_samples;
 static uint64_t gl_repair_buffers;
 static uint64_t gl_repair_vertices;
 static uint64_t gl_repair_metadata_mismatch;
@@ -818,6 +840,23 @@ static void pgxp_diag_gl_reset_window(void)
 	gl_adj_delta_sum = 0.0;
 	gl_adj_delta_max = 0.0f;
 	gl_adj_window_samples = 0;
+	gl_partial_line_pairs = 0;
+	gl_partial_opposite_pairs = 0;
+	gl_partial_exact_intervals = 0;
+	gl_partial_touch_pairs = 0;
+	gl_partial_containment_pairs = 0;
+	gl_partial_overlap_pairs = 0;
+	gl_partial_mismatch_pairs = 0;
+	memset(gl_partial_material_pairs, 0,
+		sizeof(gl_partial_material_pairs));
+	gl_partial_eligible_pairs = 0;
+	gl_partial_selected_pairs = 0;
+	gl_partial_selected_edges = 0;
+	gl_partial_unavailable_previous = 0;
+	memset(gl_partial_gap_bins, 0, sizeof(gl_partial_gap_bins));
+	gl_partial_gap_sum = 0.0;
+	gl_partial_gap_max = 0.0f;
+	gl_partial_window_samples = 0;
 	gl_repair_buffers = 0;
 	gl_repair_vertices = 0;
 	gl_repair_metadata_mismatch = 0;
@@ -929,15 +968,30 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_union_skirt_opaque",
 		"adjacency_material_one", "adjacency_material_two",
 		"adjacency_material_four", "adjacency_any_four",
-		"adjacency_near_four", "adjacency_uv_four"
+		"adjacency_near_four", "adjacency_uv_four",
+		"partial_short_material_four", "partial_short_any_four",
+		"partial_both_material_four", "partial_both_any_four",
+		"overlap_both_any_four"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
 
-static int pgxp_diag_gl_mode_is_adjacency(unsigned mode)
+static int pgxp_diag_gl_mode_is_exact_adjacency(unsigned mode)
 {
 	return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
 		mode <= PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR;
+}
+
+static int pgxp_diag_gl_mode_is_partial_adjacency(unsigned mode)
+{
+	return mode >= PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR &&
+		mode <= PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR;
+}
+
+static int pgxp_diag_gl_mode_is_adjacency(unsigned mode)
+{
+	return pgxp_diag_gl_mode_is_exact_adjacency(mode) ||
+		pgxp_diag_gl_mode_is_partial_adjacency(mode);
 }
 
 void PGXP_DiagGLSetMode(unsigned mode)
@@ -1345,6 +1399,7 @@ void PGXP_DiagInit(void)
 	gl_adj_generation = 0;
 	gl_adj_mask_count = 0;
 	gl_adj_samples = 0;
+	gl_partial_samples = 0;
 	gl_repair_samples = 0;
 	gl_native_samples = 0;
 	gpu_quad_native_sign = 0;
@@ -4084,6 +4139,395 @@ static void pgxp_diag_gl_classify_adjacency(void* vertices, unsigned count,
 	}
 }
 
+static uint32_t pgxp_diag_gl_adj_line_hash(int32_t dx, int32_t dy,
+		int64_t c)
+{
+	uint32_t hash = UINT32_C(2166136261);
+#define PGXP_GL_ADJ_LINE_HASH_VALUE(value) do { \
+	hash = (hash ^ (uint32_t)(value)) * UINT32_C(16777619); \
+} while (0)
+	PGXP_GL_ADJ_LINE_HASH_VALUE(dx);
+	PGXP_GL_ADJ_LINE_HASH_VALUE(dy);
+	PGXP_GL_ADJ_LINE_HASH_VALUE((uint64_t)c);
+	PGXP_GL_ADJ_LINE_HASH_VALUE((uint64_t)c >> 32);
+#undef PGXP_GL_ADJ_LINE_HASH_VALUE
+	return hash & (PGXP_DIAG_GL_ADJ_HASH_BUCKETS - 1u);
+}
+
+static int pgxp_diag_gl_partial_requires_material(unsigned mode)
+{
+	return mode == PGXP_DIAG_GL_TEST_PARTIAL_SHORT_MATERIAL_FOUR ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR;
+}
+
+static int pgxp_diag_gl_partial_marks_both(unsigned mode)
+{
+	return mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR ||
+		mode == PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR ||
+		mode == PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR;
+}
+
+static int pgxp_diag_gl_partial_allows_crossing_overlap(unsigned mode)
+{
+	return mode == PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR;
+}
+
+static int pgxp_diag_gl_adj_eval(const PGXP_diag_gl_adj_edge* edge,
+		int32_t t, float* x, float* y)
+{
+	double denominator;
+	double alpha;
+	if (!edge || !x || !y || edge->interval[1] <= edge->interval[0])
+		return 0;
+	denominator = (double)edge->interval[1] - edge->interval[0];
+	alpha = ((double)t - edge->interval[0]) / denominator;
+	*x = (float)((double)edge->precise_x[0] + alpha *
+		((double)edge->precise_x[1] - edge->precise_x[0]));
+	*y = (float)((double)edge->precise_y[0] + alpha *
+		((double)edge->precise_y[1] - edge->precise_y[0]));
+	return isfinite(*x) && isfinite(*y);
+}
+
+static unsigned pgxp_diag_gl_adj_mark(uint32_t triangle_start,
+		unsigned edge)
+{
+	uint8_t bit;
+	if (triangle_start >= gl_adj_mask_count || edge >= 3u)
+		return 0;
+	bit = (uint8_t)(1u << edge);
+	if (gl_adj_shared_mask[triangle_start] & bit)
+		return 0;
+	gl_adj_shared_mask[triangle_start] |= bit;
+	return 1;
+}
+
+/* Detect native-collinear partial edge relationships without moving either
+ * original triangle.  Equal endpoint spans are left to modes 89-94.  Modes
+ * 95-98 require strict interval containment (the long-edge/short-edge form
+ * of a T-junction); mode 99 additionally admits positive crossing overlap.
+ * Only a non-zero perpendicular separation between the recovered PGXP edge
+ * lines is eligible for a repair skirt. */
+static void pgxp_diag_gl_classify_partial_adjacency(void* vertices,
+		unsigned count, unsigned stride_bytes, unsigned mode)
+{
+	static const uint8_t edge_vertices[3][3] = {
+		{ 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }
+	};
+	uint32_t start;
+
+	if (gl_adj_frame != mode_frame || gl_adj_mode != mode ||
+	    gl_adj_generation == UINT32_MAX)
+	{
+		memset(gl_adj_hash_heads, 0xff, sizeof(gl_adj_hash_heads));
+		gl_adj_frame = mode_frame;
+		gl_adj_mode = mode;
+		gl_adj_edge_count = 0;
+		gl_adj_generation = 0;
+	}
+	gl_adj_generation++;
+	gl_adj_mask_count = count < PGXP_DIAG_GL_VERTEX_CAPACITY ? count :
+		PGXP_DIAG_GL_VERTEX_CAPACITY;
+	memset(gl_adj_shared_mask, 0, gl_adj_mask_count);
+	gl_adj_buffers++;
+
+	for (start = 0; start < count; start++)
+	{
+		const PGXP_diag_gl_vertex* triangle;
+		unsigned edge_index;
+		if (!pgxp_diag_gl_triangle_valid(start, count) ||
+		    gl_vertices[start].vertex != 0)
+			continue;
+		triangle = &gl_vertices[start];
+		if (!triangle->textured || triangle->semi_transparent ||
+		    triangle->invalid_w)
+			continue;
+		gl_adj_triangles++;
+
+		for (edge_index = 0; edge_index < 3u; edge_index++)
+		{
+			unsigned first = edge_vertices[edge_index][0];
+			unsigned second = edge_vertices[edge_index][1];
+			unsigned third = edge_vertices[edge_index][2];
+			const PGXP_diag_gl_vertex* first_vertex =
+				&gl_vertices[start + first];
+			const PGXP_diag_gl_vertex* second_vertex =
+				&gl_vertices[start + second];
+			const float* first_position = pgxp_diag_gl_position(vertices,
+				stride_bytes, start + first);
+			const float* second_position = pgxp_diag_gl_position(vertices,
+				stride_bytes, start + second);
+			PGXP_diag_gl_adj_edge candidate;
+			int64_t native_dx;
+			int64_t native_dy;
+			unsigned abs_dx;
+			unsigned abs_dy;
+			unsigned steps;
+			uint32_t bucket;
+			uint32_t previous_index;
+
+			memset(&candidate, 0, sizeof(candidate));
+			candidate.native_x[0] = first_vertex->native_x;
+			candidate.native_y[0] = first_vertex->native_y;
+			candidate.native_x[1] = second_vertex->native_x;
+			candidate.native_y[1] = second_vertex->native_y;
+			candidate.precise_x[0] = first_position[0];
+			candidate.precise_y[0] = first_position[1];
+			candidate.precise_x[1] = second_position[0];
+			candidate.precise_y[1] = second_position[1];
+			if ((candidate.native_x[0] == candidate.native_x[1] &&
+			     candidate.native_y[0] == candidate.native_y[1]) ||
+			    !isfinite(candidate.precise_x[0]) ||
+			    !isfinite(candidate.precise_y[0]) ||
+			    !isfinite(candidate.precise_x[1]) ||
+			    !isfinite(candidate.precise_y[1]))
+				continue;
+			if (candidate.native_x[1] < candidate.native_x[0] ||
+			    (candidate.native_x[1] == candidate.native_x[0] &&
+			     candidate.native_y[1] < candidate.native_y[0]))
+			{
+				int32_t temp_i;
+				float temp_f;
+				temp_i = candidate.native_x[0];
+				candidate.native_x[0] = candidate.native_x[1];
+				candidate.native_x[1] = temp_i;
+				temp_i = candidate.native_y[0];
+				candidate.native_y[0] = candidate.native_y[1];
+				candidate.native_y[1] = temp_i;
+				temp_f = candidate.precise_x[0];
+				candidate.precise_x[0] = candidate.precise_x[1];
+				candidate.precise_x[1] = temp_f;
+				temp_f = candidate.precise_y[0];
+				candidate.precise_y[0] = candidate.precise_y[1];
+				candidate.precise_y[1] = temp_f;
+			}
+
+			native_dx = (int64_t)candidate.native_x[1] -
+				candidate.native_x[0];
+			native_dy = (int64_t)candidate.native_y[1] -
+				candidate.native_y[0];
+			abs_dx = (unsigned)(native_dx < 0 ? -native_dx : native_dx);
+			abs_dy = (unsigned)(native_dy < 0 ? -native_dy : native_dy);
+			steps = pgxp_diag_tj_gcd(abs_dx, abs_dy);
+			if (!steps)
+				continue;
+			candidate.line_dx = (int32_t)(native_dx / steps);
+			candidate.line_dy = (int32_t)(native_dy / steps);
+			candidate.line_c = (int64_t)candidate.line_dx *
+				candidate.native_y[0] -
+				(int64_t)candidate.line_dy * candidate.native_x[0];
+			if (candidate.line_dx)
+			{
+				candidate.interval[0] = candidate.native_x[0];
+				candidate.interval[1] = candidate.native_x[1];
+			}
+			else
+			{
+				candidate.interval[0] = candidate.native_y[0];
+				candidate.interval[1] = candidate.native_y[1];
+			}
+			candidate.material_key = triangle->material_key;
+			candidate.packet = triangle->packet;
+			candidate.side = pgxp_diag_tj_native_cross(
+				candidate.native_x[0], candidate.native_y[0],
+				candidate.native_x[1], candidate.native_y[1],
+				gl_vertices[start + third].native_x,
+				gl_vertices[start + third].native_y);
+			candidate.triangle_start = start;
+			candidate.generation = gl_adj_generation;
+			candidate.edge = (uint8_t)edge_index;
+			candidate.upscale_shift = triangle->upscale_shift;
+			if (!candidate.side ||
+			    candidate.interval[1] <= candidate.interval[0])
+				continue;
+
+			gl_adj_edges_seen++;
+			bucket = pgxp_diag_gl_adj_line_hash(candidate.line_dx,
+				candidate.line_dy, candidate.line_c);
+			previous_index = gl_adj_hash_heads[bucket];
+			while (previous_index != UINT32_MAX &&
+			       previous_index < gl_adj_edge_count)
+			{
+				const PGXP_diag_gl_adj_edge* previous =
+					&gl_adj_edges[previous_index];
+				int32_t overlap_start;
+				int32_t overlap_end;
+				int current_contained;
+				int previous_contained;
+				int containment;
+				int material_same;
+				float previous_x[2];
+				float previous_y[2];
+				float current_x[2];
+				float current_y[2];
+				float line_length;
+				float scale;
+				float normal_gap = 0.0f;
+				unsigned marked_edges = 0;
+				int pair_available = 0;
+				unsigned endpoint;
+
+				previous_index = previous->next;
+				if (previous->line_dx != candidate.line_dx ||
+				    previous->line_dy != candidate.line_dy ||
+				    previous->line_c != candidate.line_c ||
+				    (previous->generation == gl_adj_generation &&
+				     previous->triangle_start == start) ||
+				    previous->upscale_shift != candidate.upscale_shift)
+					continue;
+				gl_partial_line_pairs++;
+				if ((previous->side < 0) == (candidate.side < 0))
+					continue;
+				gl_partial_opposite_pairs++;
+				if (previous->interval[0] == candidate.interval[0] &&
+				    previous->interval[1] == candidate.interval[1])
+				{
+					gl_partial_exact_intervals++;
+					continue;
+				}
+				overlap_start = previous->interval[0] >
+					candidate.interval[0] ? previous->interval[0] :
+					candidate.interval[0];
+				overlap_end = previous->interval[1] <
+					candidate.interval[1] ? previous->interval[1] :
+					candidate.interval[1];
+				if (overlap_end < overlap_start)
+					continue;
+				if (overlap_end == overlap_start)
+				{
+					gl_partial_touch_pairs++;
+					continue;
+				}
+				current_contained =
+					candidate.interval[0] >= previous->interval[0] &&
+					candidate.interval[1] <= previous->interval[1];
+				previous_contained =
+					previous->interval[0] >= candidate.interval[0] &&
+					previous->interval[1] <= candidate.interval[1];
+				containment = current_contained || previous_contained;
+				if (containment)
+					gl_partial_containment_pairs++;
+				else
+					gl_partial_overlap_pairs++;
+				if (!containment &&
+				    !pgxp_diag_gl_partial_allows_crossing_overlap(mode))
+					continue;
+
+				if (!pgxp_diag_gl_adj_eval(previous, overlap_start,
+						&previous_x[0], &previous_y[0]) ||
+				    !pgxp_diag_gl_adj_eval(previous, overlap_end,
+						&previous_x[1], &previous_y[1]) ||
+				    !pgxp_diag_gl_adj_eval(&candidate, overlap_start,
+						&current_x[0], &current_y[0]) ||
+				    !pgxp_diag_gl_adj_eval(&candidate, overlap_end,
+						&current_x[1], &current_y[1]))
+					continue;
+				line_length = hypotf((float)candidate.line_dx,
+					(float)candidate.line_dy);
+				if (!isfinite(line_length) || line_length <= 0.0f)
+					continue;
+				for (endpoint = 0; endpoint < 2u; endpoint++)
+				{
+					float difference_x = current_x[endpoint] -
+						previous_x[endpoint];
+					float difference_y = current_y[endpoint] -
+						previous_y[endpoint];
+					float gap = fabsf(
+						-(float)candidate.line_dy * difference_x +
+						(float)candidate.line_dx * difference_y) /
+						line_length;
+					if (gap > normal_gap)
+						normal_gap = gap;
+				}
+				scale = (float)(1u << candidate.upscale_shift);
+				normal_gap /= scale;
+				if (!isfinite(normal_gap) || normal_gap <= 1.0e-6f)
+					continue;
+				gl_partial_mismatch_pairs++;
+				gl_partial_gap_bins[
+					pgxp_diag_edge_delta_bin(normal_gap)]++;
+				gl_partial_gap_sum += normal_gap;
+				if (normal_gap > gl_partial_gap_max)
+					gl_partial_gap_max = normal_gap;
+				material_same = previous->material_key ==
+					candidate.material_key;
+				gl_partial_material_pairs[
+					material_same ? 1u : 0u]++;
+				if (pgxp_diag_gl_partial_requires_material(mode) &&
+				    !material_same)
+					continue;
+				gl_partial_eligible_pairs++;
+
+				if (pgxp_diag_gl_partial_marks_both(mode))
+				{
+					marked_edges += pgxp_diag_gl_adj_mark(start,
+						edge_index);
+					pair_available = 1;
+					if (previous->generation == gl_adj_generation)
+					{
+						marked_edges += pgxp_diag_gl_adj_mark(
+							previous->triangle_start, previous->edge);
+					}
+					else
+						gl_partial_unavailable_previous++;
+				}
+				else if (current_contained)
+				{
+					marked_edges += pgxp_diag_gl_adj_mark(start,
+						edge_index);
+					pair_available = 1;
+				}
+				else if (previous_contained &&
+				         previous->generation == gl_adj_generation)
+				{
+					marked_edges += pgxp_diag_gl_adj_mark(
+						previous->triangle_start, previous->edge);
+					pair_available = 1;
+				}
+				else
+					gl_partial_unavailable_previous++;
+				if (pair_available)
+					gl_partial_selected_pairs++;
+				gl_partial_selected_edges += marked_edges;
+
+				if (log_cb &&
+				    gl_partial_samples < PGXP_DIAG_SUBMIT_SAMPLES &&
+				    gl_partial_window_samples <
+					PGXP_DIAG_GL_WINDOW_SAMPLES)
+				{
+					log_cb(RETRO_LOG_INFO,
+						"[pgxp_gl_partial_edge] n=%u mf=%u mode=%u "
+						"prev=%llu curr=%llu line=%d/%d/%lld "
+						"interval=prev:%d/%d curr:%d/%d overlap=%d/%d "
+						"containment=%u gap=%.6f material=%u "
+						"marked=%u available=%u cross_buffer=%u\n",
+						gl_partial_samples + 1, mode_frame, mode,
+						(unsigned long long)previous->packet,
+						(unsigned long long)candidate.packet,
+						candidate.line_dx, candidate.line_dy,
+						(long long)candidate.line_c,
+						previous->interval[0], previous->interval[1],
+						candidate.interval[0], candidate.interval[1],
+						overlap_start, overlap_end, containment,
+						normal_gap, material_same, marked_edges,
+						pair_available,
+						previous->generation != gl_adj_generation);
+					gl_partial_samples++;
+					gl_partial_window_samples++;
+				}
+			}
+
+			if (gl_adj_edge_count >= PGXP_DIAG_GL_ADJ_EDGE_CAPACITY)
+			{
+				gl_adj_overflow++;
+				continue;
+			}
+			candidate.next = gl_adj_hash_heads[bucket];
+			gl_adj_edges[gl_adj_edge_count] = candidate;
+			gl_adj_hash_heads[bucket] = gl_adj_edge_count++;
+		}
+	}
+}
+
 unsigned PGXP_DiagGLSharedEdgeMask(unsigned triangle_start)
 {
 	return pgxp_diag_gl_mode_is_adjacency(gl_adj_mode) &&
@@ -4141,7 +4585,14 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		pgxp_diag_gl_reset_stream();
 		return;
 	}
-	if (pgxp_diag_gl_mode_is_adjacency(gl_repair_mode))
+	if (pgxp_diag_gl_mode_is_partial_adjacency(gl_repair_mode))
+	{
+		pgxp_diag_gl_classify_partial_adjacency(vertices, count,
+			stride_bytes, gl_repair_mode);
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
+	if (pgxp_diag_gl_mode_is_exact_adjacency(gl_repair_mode))
 	{
 		pgxp_diag_gl_classify_adjacency(vertices, count, stride_bytes,
 			gl_repair_mode);
@@ -6578,6 +7029,40 @@ void PGXP_DiagFrame(int backend)
 		gl_adj_mismatch_pairs ? gl_adj_delta_sum /
 			(double)gl_adj_mismatch_pairs : 0.0,
 		gl_adj_delta_max, gl_adj_samples);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gl_partial_adjacency] f=%llu mode=%u name=%s enabled=%u "
+		"line=%llu opposite=%llu intervals=exact/touch/containment/overlap:"
+		"%llu/%llu/%llu/%llu mismatch=%llu "
+		"material=different/same:%llu/%llu eligible=%llu "
+		"selected=pairs/edges/unavailable_previous:%llu/%llu/%llu "
+		"gap=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"mean=%.6f max=%.6f samples=%u\n",
+		(unsigned long long)frame_number, gl_repair_mode,
+		pgxp_diag_gl_mode_name(gl_repair_mode),
+		PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ? 1u : 0u,
+		(unsigned long long)gl_partial_line_pairs,
+		(unsigned long long)gl_partial_opposite_pairs,
+		(unsigned long long)gl_partial_exact_intervals,
+		(unsigned long long)gl_partial_touch_pairs,
+		(unsigned long long)gl_partial_containment_pairs,
+		(unsigned long long)gl_partial_overlap_pairs,
+		(unsigned long long)gl_partial_mismatch_pairs,
+		(unsigned long long)gl_partial_material_pairs[0],
+		(unsigned long long)gl_partial_material_pairs[1],
+		(unsigned long long)gl_partial_eligible_pairs,
+		(unsigned long long)gl_partial_selected_pairs,
+		(unsigned long long)gl_partial_selected_edges,
+		(unsigned long long)gl_partial_unavailable_previous,
+		(unsigned long long)gl_partial_gap_bins[0],
+		(unsigned long long)gl_partial_gap_bins[1],
+		(unsigned long long)gl_partial_gap_bins[2],
+		(unsigned long long)gl_partial_gap_bins[3],
+		(unsigned long long)gl_partial_gap_bins[4],
+		(unsigned long long)gl_partial_gap_bins[5],
+		(unsigned long long)gl_partial_gap_bins[6],
+		gl_partial_mismatch_pairs ? gl_partial_gap_sum /
+			(double)gl_partial_mismatch_pairs : 0.0,
+		gl_partial_gap_max, gl_partial_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gl_native_handoff] f=%llu mode=%u name=%s "
 		"triangles=%llu class=FT/FQ/GT/GQ:%llu/%llu/%llu/%llu "
