@@ -1127,6 +1127,9 @@ typedef struct gl_renderer gl_renderer;
 
 static float gl_pgxp_coverage_subpixel_units(unsigned mode)
 {
+   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+       !PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE))
+      return 0.0f;
    switch (mode)
    {
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_QUARTER:
@@ -1374,7 +1377,8 @@ static unsigned gl_pgxp_texture_probe(unsigned mode)
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return 4u;
-   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE)
+   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+       PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE))
       return 5u;
    return 0u;
 }
@@ -1393,7 +1397,8 @@ static const char *gl_pgxp_texture_probe_name(unsigned mode)
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return "snap8_triangle_inside_clip";
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE)
-      return "baseline_plus_outside_skirt";
+      return PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ?
+         "baseline_plus_outside_skirt" : "disabled_by_stack_toggle";
    return "off";
 }
 
@@ -8014,6 +8019,7 @@ void rhi_gl_push_triangle(
             semi_transparency_mode, mask_test, set_mask);
       if (PGXP_DiagGLGetMode() ==
                PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+          PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
           gl_pgxp_geometry_active() && pgxp_valid_w &&
           texture_blend_mode && !semi_transparent)
       {
@@ -8182,6 +8188,7 @@ void rhi_gl_push_quad(
                semi_transparency_mode, mask_test, set_mask);
          if (PGXP_DiagGLGetMode() ==
                   PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+             PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
              gl_pgxp_geometry_active() && pgxp_valid_w &&
              texture_blend_mode && !semi_transparent)
          {

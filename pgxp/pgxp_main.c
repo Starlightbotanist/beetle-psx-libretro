@@ -12,6 +12,7 @@
  * setup at every site - while keeping all writes routed through
  * apply_modes() here so the vertex-cache free still happens. */
 uint32_t gMode = 0;
+uint32_t gExperimentMask = PGXP_FEATURE_ALL;
 
 void PGXP_Init(void)
 {
@@ -57,4 +58,19 @@ void PGXP_EnableModes(uint32_t modes)
 void PGXP_DisableModes(uint32_t modes)
 {
 	apply_modes(gMode & ~modes);
+}
+
+void PGXP_SetExperimentMask(uint32_t mask)
+{
+	uint32_t new_mask = mask & PGXP_FEATURE_ALL;
+	uint32_t changed = gExperimentMask ^ new_mask;
+	gExperimentMask = new_mask;
+
+	/* Runtime option changes must not make stale, feature-specific history
+	 * eligible when a layer is re-enabled.  These resets do not disturb the
+	 * ordinary PGXP shadow registers or vertex cache. */
+	if (changed & PGXP_FEATURE_MFC2_SHIFT)
+		PGXP_CPU_ResetMFC2ShiftTracking();
+	if (changed & PGXP_FEATURE_RECENT_RECOVERY)
+		PGXP_DiagResetRecovery();
 }

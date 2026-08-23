@@ -451,6 +451,7 @@ static uint64_t frame_number;
 static uint32_t mode_frame;
 static int last_backend = -1;
 static unsigned last_mode = ~0u;
+static uint32_t last_feature_mask = ~UINT32_C(0);
 static uint32_t load_samples[PGXP_DIAG_MEMORY_STATES];
 static uint32_t dispatch_samples;
 static uint32_t vertex_samples;
@@ -490,6 +491,7 @@ static PGXP_diag_recovery_vertex recovery_vertices
 	[PGXP_DIAG_RECOVERY_BUCKETS][PGXP_DIAG_RECOVERY_WAYS];
 static uint64_t recovery_attempts;
 static uint64_t recovery_hits;
+static uint64_t recovery_disabled;
 static uint64_t recovery_ambiguous;
 static uint64_t recovery_ambiguous_used;
 static uint64_t recovery_misses;
@@ -1074,6 +1076,21 @@ static uint32_t invalid_register_mask(void)
 	return mask;
 }
 
+void PGXP_DiagResetRecovery(void)
+{
+	memset(recovery_vertices, 0, sizeof(recovery_vertices));
+	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
+	recovery_disabled = 0;
+	recovery_ambiguous_used = 0;
+	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
+	memset(recovery_old_age, 0, sizeof(recovery_old_age));
+	recovery_too_old = 0;
+	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
+	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
+	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
+	recovery_evictions = 0;
+}
+
 void PGXP_DiagInit(void)
 {
 	memset(&window, 0, sizeof(window));
@@ -1082,6 +1099,7 @@ void PGXP_DiagInit(void)
 	mode_frame = 0;
 	last_backend = -1;
 	last_mode = ~0u;
+	last_feature_mask = ~UINT32_C(0);
 	memset(load_samples, 0, sizeof(load_samples));
 	memset(fifo_provenance, 0, sizeof(fifo_provenance));
 	memset(store8_provenance, 0, sizeof(store8_provenance));
@@ -1113,17 +1131,8 @@ void PGXP_DiagInit(void)
 	trace_write = 0;
 	trace_chain_samples = 0;
 	trace_tracked_samples = 0;
-	memset(recovery_vertices, 0, sizeof(recovery_vertices));
+	PGXP_DiagResetRecovery();
 	memset(mem_writers, 0, sizeof(mem_writers));
-	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
-	recovery_ambiguous_used = 0;
-	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
-	memset(recovery_old_age, 0, sizeof(recovery_old_age));
-	recovery_too_old = 0;
-	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
-	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
-	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
-	recovery_evictions = 0;
 	memset(writer_writes, 0, sizeof(writer_writes));
 	memset(writer_native, 0, sizeof(writer_native));
 	memset(writer_native_reason, 0, sizeof(writer_native_reason));
@@ -1548,6 +1557,11 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 		PGXP_TRACE_NONE;
 
 	recovery_attempts++;
+	if (!PGXP_FeatureEnabled(PGXP_FEATURE_RECENT_RECOVERY))
+	{
+		recovery_disabled++;
+		return 0;
+	}
 	if (stage >= PGXP_DIAG_TRACE_STAGES)
 		stage = PGXP_TRACE_NONE;
 	recovery_stage_attempts[stage]++;
@@ -5293,6 +5307,7 @@ void PGXP_DiagFrame(int backend)
 	uint64_t gte_data_hash = UINT64_C(1469598103934665603);
 	uint64_t gte_ctrl_hash = UINT64_C(1469598103934665603);
 	unsigned mode = PGXP_GetModes();
+	uint32_t feature_mask = PGXP_GetExperimentMask();
 	uint32_t vc[7];
 
 	/* Primitive observation is frame-local.  Complete the prior frame before
@@ -5300,15 +5315,19 @@ void PGXP_DiagFrame(int backend)
 	pgxp_diag_tj_finish_frame();
 	pgxp_diag_submit_finish_frame();
 	frame_number++;
-	if (backend != last_backend || mode != last_mode)
+	if (backend != last_backend || mode != last_mode ||
+	    feature_mask != last_feature_mask)
 	{
 		mode_frame = 0;
 		if (log_cb)
 			log_cb(RETRO_LOG_INFO,
-				"[pgxp_frame] backend=\"%s\" mode=0x%02x window=%u\n",
-				backend_name(backend), mode, PGXP_DIAG_WINDOW);
+				"[pgxp_frame] backend=\"%s\" mode=0x%02x stack=%02x "
+				"window=%u\n",
+				backend_name(backend), mode, feature_mask,
+				PGXP_DIAG_WINDOW);
 		last_backend = backend;
 		last_mode = mode;
+		last_feature_mask = feature_mask;
 	}
 	mode_frame++;
 
@@ -6398,7 +6417,7 @@ void PGXP_DiagFrame(int backend)
 	}
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
-		"age=%llu/%llu/%llu/%llu/%llu ambiguous=%llu used=%llu "
+		"age=%llu/%llu/%llu/%llu/%llu disabled=%llu ambiguous=%llu used=%llu "
 		"misses=%llu "
 		"too_old=%llu\n",
 		(unsigned long long)frame_number,
@@ -6409,6 +6428,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_age_hits[2],
 		(unsigned long long)recovery_age_hits[3],
 		(unsigned long long)recovery_age_hits[4],
+		(unsigned long long)recovery_disabled,
 		(unsigned long long)recovery_ambiguous,
 		(unsigned long long)recovery_ambiguous_used,
 		(unsigned long long)recovery_misses,
@@ -6728,6 +6748,7 @@ void PGXP_DiagFrame(int backend)
 	submit_window_samples = 0;
 	pgxp_diag_gl_reset_window();
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
+	recovery_disabled = 0;
 	recovery_ambiguous_used = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
 	memset(recovery_old_age, 0, sizeof(recovery_old_age));

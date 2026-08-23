@@ -862,6 +862,118 @@ struct retro_core_option_v2_definition option_defs_us[] = {
    },
 #if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN))
    {
+      BEETLE_OPT(pgxp_stack_cpu_invariants),
+      "PGXP Stack A: CPU Shadow Comparisons",
+      NULL,
+      "Ablation control for aef86ba0. Enabled uses corrected full-word SLT/SLTU shadow comparisons. Disabled restores the earlier comparison rule, while retaining deterministic initialization because reintroducing undefined stack data would not be a valid test.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_mfc2_shift),
+      "PGXP Stack B: MFC2 Shift Preservation",
+      NULL,
+      "Ablation control for d85d3347. Preserves precise GTE coordinates through the common MFC2 to SLL5 to SRA5 vertex-packing sequence.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_recovery),
+      "PGXP Stack C: Four-Frame Vertex Recovery",
+      NULL,
+      "Recovers an exact native vertex word from GTE results observed within the last four frames when ordinary PGXP provenance fails. This was the principal Spyro 3 sky completion layer.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_coord_wrap),
+      "PGXP Stack D: Coordinate Wrap Ordering",
+      NULL,
+      "Ablation control for c7fa4bdf. Enabled wraps the transformed signed 11-bit coordinate before applying the drawing offset; disabled applies the historical offset-then-wrap ordering.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_w_normalize),
+      "PGXP Stack E: Homogeneous W Normalization",
+      NULL,
+      "Ablation control for bf292f2b. Divides every recovered homogeneous W by the common 32768 scale before host rasterization without changing perspective division.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_w_provenance),
+      "PGXP Stack F: W Provenance Gate",
+      NULL,
+      "Ablation control for 2719e0cd. Rejects perspective W when its diagnostic lineage is not demonstrably attached to a transform, while retaining precise X/Y.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_nclip_sign),
+      "PGXP Stack G: NCLIP Sign-Only Application",
+      NULL,
+      "Ablation control for 9237cba0. With PGXP Primitive Culling enabled, borrows PGXP's orientation sign while preserving the native MAC0 magnitude. Disabled applies the older full PGXP NCLIP value.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      BEETLE_OPT(pgxp_stack_gl_coverage),
+      "PGXP Stack H: OpenGL Coverage Repair",
+      NULL,
+      "Ablation control for raster seam mode 88. Enabled adds the opaque valid-W outside repair skirt; disabled makes mode 88 render the ordinary baseline stream only.",
+      NULL,
+      "pgxp",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,

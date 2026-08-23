@@ -176,6 +176,7 @@ typedef struct PGXP_diag_primitive_vertex_Tag
 #if PGXP_DIAG
 
 void PGXP_DiagInit(void);
+void PGXP_DiagResetRecovery(void);
 void PGXP_DiagFrame(int backend);
 void PGXP_DiagMemoryRead(uint32_t addr, uint32_t value, int valid_address);
 void PGXP_DiagMemoryWrite(uint32_t addr, const PGXP_value* value,
@@ -260,6 +261,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #else
 
 #define PGXP_DiagInit() ((void)0)
+#define PGXP_DiagResetRecovery() ((void)0)
 #define PGXP_DiagFrame(backend) ((void)0)
 #define PGXP_DiagMemoryRead(addr, value, valid_address) ((void)0)
 #define PGXP_DiagMemoryWrite(addr, value, valid_address, full_word) ((void)0)

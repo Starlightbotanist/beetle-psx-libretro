@@ -5,6 +5,7 @@
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
 #include "pgxp_diag.h"
+#include "pgxp_main.h"
 
 
 #include "limits.h"
@@ -32,12 +33,19 @@ void PGXP_InitCPU()
 {
 	memset(CPU_reg_mem, 0, sizeof(CPU_reg_mem));
 	memset(CP0_reg_mem, 0, sizeof(CP0_reg_mem));
+	PGXP_CPU_ResetMFC2ShiftTracking();
+}
+
+void PGXP_CPU_ResetMFC2ShiftTracking(void)
+{
 	memset(CPU_reg_mfc2, 0, sizeof(CPU_reg_mfc2));
 	memset(CPU_reg_mfc2_sll5, 0, sizeof(CPU_reg_mfc2_sll5));
 }
 
 void PGXP_CPU_MarkMFC2(uint32_t reg)
 {
+	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
+		return;
 	if (reg < 34)
 	{
 		CPU_reg_mfc2[reg] = 1;
@@ -52,6 +60,8 @@ int PGXP_CPU_TryMFC2SLL5(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 	uint32_t destReg = rd(instr);
 
 	CPU_reg_mfc2_sll5[destReg] = 0;
+	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
+		return 0;
 	if (sa(instr) != 5 || !CPU_reg_mfc2[sourceReg])
 		return 0;
 
@@ -74,6 +84,11 @@ int PGXP_CPU_TryMFC2SLL5SRA5(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 	uint32_t sourceReg = rt(instr);
 	uint32_t destReg = rd(instr);
 
+	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
+	{
+		CPU_reg_mfc2_sll5[destReg] = 0;
+		return 0;
+	}
 	if (sa(instr) != 5 || destReg != sourceReg ||
 		!CPU_reg_mfc2_sll5[sourceReg])
 		return 0;
@@ -553,10 +568,15 @@ void PGXP_CPU_SLT(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 	ret.y = 0.f;
 	ret.compFlags[1] = VALID;
 
-	ret.x = (CPU_reg[rs(instr)].y < CPU_reg[rt(instr)].y) ? 1.f :
-		(CPU_reg[rs(instr)].y > CPU_reg[rt(instr)].y) ? 0.f :
-		(f16Unsign(CPU_reg[rs(instr)].x) <
-		 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	if (PGXP_FeatureEnabled(PGXP_FEATURE_CPU_SHADOW_INVARIANTS))
+		ret.x = (CPU_reg[rs(instr)].y < CPU_reg[rt(instr)].y) ? 1.f :
+			(CPU_reg[rs(instr)].y > CPU_reg[rt(instr)].y) ? 0.f :
+			(f16Unsign(CPU_reg[rs(instr)].x) <
+			 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	else
+		ret.x = (CPU_reg[rs(instr)].y < CPU_reg[rt(instr)].y) ? 1.f :
+			(f16Unsign(CPU_reg[rs(instr)].x) <
+			 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
@@ -580,12 +600,18 @@ void PGXP_CPU_SLTU(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVa
 	ret.y = 0.f;
 	ret.compFlags[1] = VALID;
 
-	ret.x = (f16Unsign(CPU_reg[rs(instr)].y) <
-		 f16Unsign(CPU_reg[rt(instr)].y)) ? 1.f :
-		(f16Unsign(CPU_reg[rs(instr)].y) >
-		 f16Unsign(CPU_reg[rt(instr)].y)) ? 0.f :
-		(f16Unsign(CPU_reg[rs(instr)].x) <
-		 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	if (PGXP_FeatureEnabled(PGXP_FEATURE_CPU_SHADOW_INVARIANTS))
+		ret.x = (f16Unsign(CPU_reg[rs(instr)].y) <
+			 f16Unsign(CPU_reg[rt(instr)].y)) ? 1.f :
+			(f16Unsign(CPU_reg[rs(instr)].y) >
+			 f16Unsign(CPU_reg[rt(instr)].y)) ? 0.f :
+			(f16Unsign(CPU_reg[rs(instr)].x) <
+			 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	else
+		ret.x = (f16Unsign(CPU_reg[rs(instr)].y) <
+			 f16Unsign(CPU_reg[rt(instr)].y)) ? 1.f :
+			(f16Unsign(CPU_reg[rs(instr)].x) <
+			 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;

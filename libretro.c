@@ -4761,6 +4761,48 @@ static void check_variables(bool startup)
 
 #if PGXP_DIAG && (defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN))
    {
+      uint32_t stack_mask = PGXP_FEATURE_ALL;
+      static uint32_t logged_stack_mask = UINT32_MAX;
+
+#define PGXP_STACK_OPTION(option_name, feature_bit) do { \
+      var.key = BEETLE_OPT(option_name); \
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && \
+          strcmp(var.value, "disabled") == 0) \
+         stack_mask &= ~(feature_bit); \
+   } while (0)
+
+      PGXP_STACK_OPTION(pgxp_stack_cpu_invariants,
+            PGXP_FEATURE_CPU_SHADOW_INVARIANTS);
+      PGXP_STACK_OPTION(pgxp_stack_mfc2_shift, PGXP_FEATURE_MFC2_SHIFT);
+      PGXP_STACK_OPTION(pgxp_stack_recovery, PGXP_FEATURE_RECENT_RECOVERY);
+      PGXP_STACK_OPTION(pgxp_stack_coord_wrap, PGXP_FEATURE_COORD_WRAP);
+      PGXP_STACK_OPTION(pgxp_stack_w_normalize, PGXP_FEATURE_W_NORMALIZE);
+      PGXP_STACK_OPTION(pgxp_stack_w_provenance, PGXP_FEATURE_W_PROVENANCE);
+      PGXP_STACK_OPTION(pgxp_stack_nclip_sign, PGXP_FEATURE_NCLIP_SIGN_ONLY);
+      PGXP_STACK_OPTION(pgxp_stack_gl_coverage, PGXP_FEATURE_GL_COVERAGE);
+#undef PGXP_STACK_OPTION
+
+      PGXP_SetExperimentMask(stack_mask);
+      if (stack_mask != logged_stack_mask)
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[pgxp_stack] mask=%02x cpu_invariants=%u mfc2_shift=%u "
+               "recovery=%u coord_wrap=%u w_normalize=%u w_provenance=%u "
+               "nclip_sign=%u gl_coverage=%u\n",
+               stack_mask,
+               (stack_mask & PGXP_FEATURE_CPU_SHADOW_INVARIANTS) != 0,
+               (stack_mask & PGXP_FEATURE_MFC2_SHIFT) != 0,
+               (stack_mask & PGXP_FEATURE_RECENT_RECOVERY) != 0,
+               (stack_mask & PGXP_FEATURE_COORD_WRAP) != 0,
+               (stack_mask & PGXP_FEATURE_W_NORMALIZE) != 0,
+               (stack_mask & PGXP_FEATURE_W_PROVENANCE) != 0,
+               (stack_mask & PGXP_FEATURE_NCLIP_SIGN_ONLY) != 0,
+               (stack_mask & PGXP_FEATURE_GL_COVERAGE) != 0);
+         logged_stack_mask = stack_mask;
+      }
+   }
+
+   {
       unsigned gl_test_mode = PGXP_DIAG_GL_TEST_OFF;
       var.key = BEETLE_OPT(pgxp_gl_test);
       if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)

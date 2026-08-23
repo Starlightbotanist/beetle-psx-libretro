@@ -40,6 +40,7 @@ extern PGXP_value* CP0_reg;
 #define CPU_Lo CPU_reg[34]
 
 void PGXP_InitCPU();
+void PGXP_CPU_ResetMFC2ShiftTracking(void);
 void PGXP_CPU_MarkMFC2(uint32_t reg);
 int PGXP_CPU_TryMFC2SLL5(uint32_t instr, uint32_t rdVal, uint32_t rtVal);
 int PGXP_CPU_TryMFC2SLL5SRA5(uint32_t instr, uint32_t rdVal,

@@ -601,6 +601,25 @@ static inline float PGXP_TruncateVertexPosition(float position)
 	return (float)wrapped + (position - (float)integer);
 }
 
+/* Deterministic form of the pre-c7fa4bdf ordering: apply the drawing offset
+ * first, then wrap the 16.16 result to signed 11-bit screen space. */
+static inline float PGXP_LegacyVertexPosition(float position, int offset)
+{
+	float fixed = (position + (float)offset) * 65536.0f;
+	int32_t value = (int32_t)fixed;
+	uint32_t low = (uint32_t)value & UINT32_C(0x07ffffff);
+	int32_t wrapped = (low & UINT32_C(0x04000000)) ?
+		(int32_t)(low | ~UINT32_C(0x07ffffff)) : (int32_t)low;
+	return (float)wrapped * (1.0f / 65536.0f);
+}
+
+static inline float PGXP_ApplyVertexPosition(float position, int offset)
+{
+	if (PGXP_FeatureEnabled(PGXP_FEATURE_COORD_WRAP))
+		return PGXP_TruncateVertexPosition(position) + (float)offset;
+	return PGXP_LegacyVertexPosition(position, offset);
+}
+
 /* PGXP stores projected Z in 15-bit fixed-point scale.  Clip-space W is
  * homogeneous, so this common scale cancels after perspective division, but
  * retaining the raw value sends coordinates in the tens of thousands to the
@@ -609,7 +628,8 @@ static inline float PGXP_TruncateVertexPosition(float position)
  * range without changing the resulting NDC position. */
 static inline float PGXP_NormalizeVertexW(float z)
 {
-	return z * (1.0f / 32768.0f);
+	return PGXP_FeatureEnabled(PGXP_FEATURE_W_NORMALIZE) ?
+		z * (1.0f / 32768.0f) : z;
 }
 
 int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutput, int xOffs, int yOffs)
@@ -633,8 +653,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	{
 		source = PGXP_DIAG_VERTEX_TRACKED;
 		/* There is a value here with valid X and Y coordinates */
-		pOutput->x = PGXP_TruncateVertexPosition(vert->x) + xOffs;
-		pOutput->y = PGXP_TruncateVertexPosition(vert->y) + yOffs;
+		pOutput->x = PGXP_ApplyVertexPosition(vert->x, xOffs);
+		pOutput->y = PGXP_ApplyVertexPosition(vert->y, yOffs);
 		pOutput->z = 0.95f;
 		pOutput->w = PGXP_NormalizeVertexW(vert->z);
 		pOutput->valid_w = 1;
@@ -644,7 +664,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			/* This value does not have a valid W coordinate */
 			pOutput->valid_w = 0;
 		}
-		else if (!PGXP_DiagVertexWEligible(offset, vert))
+		else if (PGXP_FeatureEnabled(PGXP_FEATURE_W_PROVENANCE) &&
+			!PGXP_DiagVertexWEligible(offset, vert))
 		{
 			/* SwanStation only enables perspective W for vertices whose
 			 * precision is still demonstrably attached to a transform.  Keep
@@ -668,8 +689,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		    &recovered_y, &recovered_z))
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
-			pOutput->x = PGXP_TruncateVertexPosition(recovered_x) + xOffs;
-			pOutput->y = PGXP_TruncateVertexPosition(recovered_y) + yOffs;
+			pOutput->x = PGXP_ApplyVertexPosition(recovered_x, xOffs);
+			pOutput->y = PGXP_ApplyVertexPosition(recovered_y, yOffs);
 			pOutput->z = 0.95f;
 			pOutput->w = PGXP_NormalizeVertexW(recovered_z);
 			pOutput->valid_w = 1;
@@ -678,8 +699,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
 			/* a value is found, it is from the current session and is unambiguous (there was only one value recorded at that position) */
-			pOutput->x = PGXP_TruncateVertexPosition(cache_vert->x) + xOffs;
-			pOutput->y = PGXP_TruncateVertexPosition(cache_vert->y) + yOffs;
+			pOutput->x = PGXP_ApplyVertexPosition(cache_vert->x, xOffs);
+			pOutput->y = PGXP_ApplyVertexPosition(cache_vert->y, yOffs);
 			pOutput->z = 0.95f;
 			pOutput->w = PGXP_NormalizeVertexW(cache_vert->z);
 			pOutput->valid_w = 0;	/* iCB: Getting the wrong w component causes too great an error when using perspective correction so disable it */
@@ -688,8 +709,16 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		{
 			/* Native packed coordinates are already signed values; the
 			 * drawing offset is applied afterward and is not re-wrapped. */
-			pOutput->x = (float)(psxX + xOffs);
-			pOutput->y = (float)(psxY + yOffs);
+			if (PGXP_FeatureEnabled(PGXP_FEATURE_COORD_WRAP))
+			{
+				pOutput->x = (float)(psxX + xOffs);
+				pOutput->y = (float)(psxY + yOffs);
+			}
+			else
+			{
+				pOutput->x = PGXP_LegacyVertexPosition((float)psxX, xOffs);
+				pOutput->y = PGXP_LegacyVertexPosition((float)psxY, yOffs);
+			}
 			pOutput->valid_w = 0;
 		}
 	}

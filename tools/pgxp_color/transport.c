@@ -384,6 +384,83 @@ static void test_nclip_sign_only(void)
       fail("NCLIP native zero lost precise sign", PGXP_NCLIP_sign_only(0, -88), -1);
 }
 
+static void test_stack_ablation_gates(void)
+{
+   const uint32_t packed = 0x00200400u;
+   PGXP_value shadow = PGXP_value_zero;
+   OGLVertex out;
+   uint32_t instr;
+   float x, y, z;
+
+   /* The deterministic half of aef86ba0 can be restored independently. */
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL &
+         ~PGXP_FEATURE_CPU_SHADOW_INVARIANTS);
+   set_cpu_value(1, 0x00010000u);
+   set_cpu_value(2, 0x0000FFFFu);
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Au;
+   PGXP_CPU_SLT(instr, 0, 0x00010000u, 0x0000FFFFu);
+   if (CPU_reg[3].x != 1.f)
+      fail("CPU invariant ablation inactive", (uint32_t)CPU_reg[3].x, 1);
+
+   /* Disabling the MFC2 layer clears its lineage and refuses a new chain. */
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_MFC2_SHIFT);
+   PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
+   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   if (PGXP_CPU_TryMFC2SLL5(instr, packed << 5, packed))
+      fail("MFC2 shift ablation inactive", 1, 0);
+
+   /* Current ordering keeps the post-wrap drawing offset; legacy ordering
+    * wraps the offset result. W normalization is independently reversible. */
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+   shadow.x = 1023.75f;
+   shadow.y = 0.0f;
+   shadow.z = 4096.0f;
+   shadow.value = packed;
+   shadow.flags = VALID_012;
+   PGXP_DiagTraceGTE(&shadow);
+   PGXP_WriteCB(&shadow, 0);
+   memset(&out, 0, sizeof(out));
+   PGXP_GetVertex(0, &packed, &out, 1, 0);
+   if (out.x != 1024.75f || out.w != 0.125f)
+      fail("all-on coordinate/W behavior", (uint32_t)out.valid_w, 1);
+
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL &
+         ~(PGXP_FEATURE_COORD_WRAP | PGXP_FEATURE_W_NORMALIZE));
+   PGXP_WriteCB(&shadow, 0);
+   memset(&out, 0, sizeof(out));
+   PGXP_GetVertex(0, &packed, &out, 1, 0);
+   if (out.x != -1023.25f || out.w != 4096.0f)
+      fail("coordinate/W ablation inactive", (uint32_t)out.valid_w, 1);
+
+   /* Stage-zero W is accepted only when the provenance layer is disabled. */
+   shadow = PGXP_value_zero;
+   shadow.x = 12.25f;
+   shadow.y = -3.5f;
+   shadow.z = 2048.0f;
+   shadow.value = packed;
+   shadow.flags = VALID_012;
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_W_PROVENANCE);
+   PGXP_WriteCB(&shadow, 0);
+   memset(&out, 0, sizeof(out));
+   PGXP_GetVertex(0, &packed, &out, 0, 0);
+   if (!out.valid_w)
+      fail("W provenance ablation inactive", 0, 1);
+
+   /* Recovery history is reset at both transitions and the off state refuses
+    * an otherwise exact, age-zero native-word match. */
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_RECENT_RECOVERY);
+   PGXP_DiagTraceGTE(&shadow);
+   if (PGXP_DiagRecoverVertex(packed, NULL, 0, &x, &y, &z))
+      fail("recovery ablation inactive", 1, 0);
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+   PGXP_DiagTraceGTE(&shadow);
+   if (!PGXP_DiagRecoverVertex(packed, NULL, 0, &x, &y, &z))
+      fail("recovery did not re-enable", 0, 1);
+
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -417,6 +494,9 @@ int main(void)
 
    printf("[T9] NCLIP precise sign preserves native magnitude\n");
    test_nclip_sign_only();
+
+   printf("[T10] runtime PGXP stack ablation gates\n");
+   test_stack_ablation_gates();
 
    if (failures)
    {
