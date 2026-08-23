@@ -720,6 +720,10 @@ struct gl_command_vertex {
     * the extrapolated coordinate, so this float sidecar becomes the shader
     * source only when coverage_preserve is set. */
    float coverage_texture_coord[2];
+   /* Original-triangle screen barycentrics at an expanded vertex.  The
+    * vertex shader multiplies these by clip W so the fragment shader can
+    * recover affine barycentrics and identify only newly covered pixels. */
+   float coverage_original_barycentric[2];
    uint8_t coverage_preserve;
    /* Depth-cue sidecar: far colour (1.0 == 0xFF) in [0..2], blend factor in
     * [3]. t == 0 makes the shader mix the identity, so vertices without a
@@ -1128,16 +1132,19 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
          return 0.5f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_ONE:
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_TWO:
          return 2.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE:
          return 3.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
@@ -1156,6 +1163,9 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SKIRT_MARKER:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
@@ -1186,7 +1196,13 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SKIRT_MARKER ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_ONE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_TWO ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1215,7 +1231,15 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SKIRT_MARKER:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_ONE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_TWO:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE:
          return 8.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR:
+         return 4.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR:
+         return 2.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1:
          return 32.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1:
@@ -1238,7 +1262,13 @@ static bool gl_pgxp_coverage_preserves_surface(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_SEMITRANS ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SEMI_ONE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SKIRT_MARKER ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_ONE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_TWO ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR;
 }
 
 /* Coverage can safely retain one geometry policy for ordinary opaque
@@ -1257,7 +1287,14 @@ static void gl_pgxp_coverage_class_config(unsigned mode, float raster_grid,
    epsilon[0] = epsilon[1] = units / raster_grid;
    vertex_cap[0] = vertex_cap[1] = cap;
 
-   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE)
+   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE ||
+       mode ==
+          PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SKIRT_MARKER ||
+       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_ONE ||
+       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_TWO ||
+       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE ||
+       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR ||
+       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR)
    {
       epsilon[1] = 0.0f;
       vertex_cap[1] = 0.0f;
@@ -1313,6 +1350,9 @@ static unsigned gl_pgxp_texture_probe(unsigned mode)
       return 1u;
    if (mode == PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER)
       return 2u;
+   if (mode ==
+         PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SKIRT_MARKER)
+      return 3u;
    return 0u;
 }
 
@@ -1322,6 +1362,9 @@ static const char *gl_pgxp_texture_probe_name(unsigned mode)
       return "solid_opaque_textured";
    if (mode == PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER)
       return "transparent_texel_marker";
+   if (mode ==
+         PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_SKIRT_MARKER)
+      return "expanded_skirt_transparent_marker";
    return "off";
 }
 
@@ -1467,6 +1510,7 @@ static bool gl_pgxp_preserve_expanded_surface(gl_renderer *renderer,
    double center_uvq[2] = { 0.0, 0.0 };
    double center_colorq[3] = { 0.0, 0.0, 0.0 };
    double center_fogq[4] = { 0.0, 0.0, 0.0, 0.0 };
+   double incenter_weight[3];
    float new_w[3];
    float new_uv[3][2];
    float new_color[3][3];
@@ -1481,27 +1525,27 @@ static bool gl_pgxp_preserve_expanded_surface(gl_renderer *renderer,
 
    for (i = 0; i < 3u; i++)
    {
-      double weight;
       double w = (double)v[i].position[3];
       if (!isfinite(w) || w <= 1.0e-20)
          return false;
       q[i] = 1.0 / w;
-      weight = (double)opposite[i] / (double)perimeter;
-      center_q += weight * q[i];
+      incenter_weight[i] =
+         (double)opposite[i] / (double)perimeter;
+      center_q += incenter_weight[i] * q[i];
       for (c = 0; c < 2u; c++)
       {
          uvq[i][c] = (double)v[i].texture_coord[c] * q[i];
-         center_uvq[c] += weight * uvq[i][c];
+         center_uvq[c] += incenter_weight[i] * uvq[i][c];
       }
       for (c = 0; c < 3u; c++)
       {
          colorq[i][c] = (double)v[i].color[c] * q[i];
-         center_colorq[c] += weight * colorq[i][c];
+         center_colorq[c] += incenter_weight[i] * colorq[i][c];
       }
       for (c = 0; c < 4u; c++)
       {
          fogq[i][c] = (double)v[i].fog[c] * q[i];
-         center_fogq[c] += weight * fogq[i][c];
+         center_fogq[c] += incenter_weight[i] * fogq[i][c];
       }
    }
 
@@ -1558,6 +1602,12 @@ static bool gl_pgxp_preserve_expanded_surface(gl_renderer *renderer,
       v[i].position[3] = new_w[i];
       v[i].coverage_texture_coord[0] = new_uv[i][0];
       v[i].coverage_texture_coord[1] = new_uv[i][1];
+      v[i].coverage_original_barycentric[0] = (float)(
+            (i == 0u ? scale : 0.0) +
+            (1.0 - scale) * incenter_weight[0]);
+      v[i].coverage_original_barycentric[1] = (float)(
+            (i == 1u ? scale : 0.0) +
+            (1.0 - scale) * incenter_weight[1]);
       v[i].coverage_preserve = 1u;
       for (c = 0; c < 3u; c++)
          v[i].color[c] = new_color[i][c];
@@ -3718,7 +3768,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
          gl_pgxp_coverage_subpixel_units(raster_requested);
       float class_epsilon[2];
       float class_vertex_cap[2];
-      if (texture_probe)
+      /* Standalone probes use the classifier for counts.  Combined
+       * coverage+probe modes are already classified by expansion itself;
+       * counting here as well would double the candidate total. */
+      if (texture_probe && subpixel_units <= 0.0f)
          gl_pgxp_count_texture_probe(renderer);
       if (subpixel_units > 0.0f)
       {
@@ -6123,6 +6176,9 @@ static const struct gl_attribute gl_command_vertex_attribs[] = {
    { "texture_coord",      offsetof(gl_command_vertex, texture_coord),      GL_UNSIGNED_SHORT, 2 },
    { "coverage_texture_coord",
       offsetof(gl_command_vertex, coverage_texture_coord), GL_FLOAT, 2 },
+   { "coverage_original_barycentric",
+      offsetof(gl_command_vertex, coverage_original_barycentric),
+      GL_FLOAT, 2 },
    { "coverage_preserve",
       offsetof(gl_command_vertex, coverage_preserve), GL_UNSIGNED_BYTE, 1 },
    { "texture_page",       offsetof(gl_command_vertex, texture_page),       GL_UNSIGNED_SHORT, 2 },

@@ -15,6 +15,7 @@ in vec4 fog;
 in uvec2 texture_page;
 in uvec2 texture_coord;
 in vec2 coverage_texture_coord;
+in vec2 coverage_original_barycentric;
 in uint coverage_preserve;
 in uvec2 clut;
 in uint texture_blend_mode;
@@ -36,6 +37,7 @@ out vec3 frag_shading_color;
 out vec4 frag_fog;
 flat out uvec2 frag_texture_page;
 out vec2 frag_texture_coord;
+out vec2 frag_coverage_original_barycentric;
 flat out uvec2 frag_clut;
 flat out uint frag_texture_blend_mode;
 flat out uint frag_depth_shift;
@@ -121,6 +123,11 @@ void main() {
    frag_texture_coord = (coverage_preserve != 0U ?
          coverage_texture_coord : vec2(texture_coord)) +
       vec2(0.001, 0.001);
+   // Smooth interpolation divides attributes by clip W.  Pre-multiply the
+   // original-triangle barycentrics so multiplying by gl_FragCoord.w in the
+   // fragment shader recovers their affine screen-space values exactly.
+   frag_coverage_original_barycentric =
+      coverage_original_barycentric * position.w;
 
    frag_texture_page = texture_page;
    frag_clut = clut;

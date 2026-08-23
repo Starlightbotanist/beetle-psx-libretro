@@ -865,7 +865,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound; 77-79 separate opaque and semi-transparent coverage.",
+      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound; 77-79 separate opaque and semi-transparent coverage; 80-85 probe opaque skirts and cap/edge tradeoffs.",
       NULL,
       "pgxp",
       {
@@ -949,6 +949,12 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "coverage preserve cap8 opaque", "77: GL Preserve Surface - Mode 70 Opaque Only" },
          { "coverage preserve cap8 semitrans", "78: GL Preserve Surface - Mode 70 Semitransparent Only" },
          { "coverage preserve cap8 opaque semi one", "79: GL Preserve Surface - Mode 70 Opaque + 1-Subpixel Semitransparent" },
+         { "coverage preserve cap8 opaque skirt marker", "80: GL Mode 77 - Mark Transparent Discards in New Skirt" },
+         { "coverage preserve cap8 opaque one", "81: GL Opaque Preserve - 1 Subpixel, Cap 8x (Max 0.25)" },
+         { "coverage preserve cap8 opaque two", "82: GL Opaque Preserve - 2 Subpixels, Cap 8x (Max 0.50)" },
+         { "coverage preserve cap8 opaque three", "83: GL Opaque Preserve - 3 Subpixels, Cap 8x (Max 0.75)" },
+         { "coverage preserve cap4 opaque four", "84: GL Opaque Preserve - 4 Subpixels, Cap 4x (Max 0.50)" },
+         { "coverage preserve cap2 opaque four", "85: GL Opaque Preserve - 4 Subpixels, Cap 2x (Max 0.25)" },
          { NULL, NULL },
       },
       "off"

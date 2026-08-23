@@ -840,7 +840,13 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_preserve_three_max1",
 		"coverage_preserve_cap8_opaque",
 		"coverage_preserve_cap8_semitrans",
-		"coverage_preserve_cap8_opaque_semi_one"
+		"coverage_preserve_cap8_opaque_semi_one",
+		"coverage_preserve_cap8_opaque_skirt_marker",
+		"coverage_preserve_cap8_opaque_one",
+		"coverage_preserve_cap8_opaque_two",
+		"coverage_preserve_cap8_opaque_three",
+		"coverage_preserve_cap4_opaque_four",
+		"coverage_preserve_cap2_opaque_four"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

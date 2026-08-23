@@ -44,7 +44,8 @@ uniform uint pgxp_fog;
 uniform uint force_zero;
 
 // Fragment diagnostic: 0 normal, 1 solid opaque-textured coverage,
-// 2 mark opaque-textured fragments that would discard a transparent texel.
+// 2 mark opaque-textured fragments that would discard a transparent texel,
+// 3 mark such discards only in coverage outside the original triangle.
 uniform uint coverage_probe;
 
 // 0: Only draw opaque pixels, 1: only draw semi-transparent pixels
@@ -91,6 +92,8 @@ vec3 pgxp_shading() {
 flat in uvec2 frag_texture_page;
 // Texel coordinates within the page. Interpolated by OpenGL.
 in vec2 frag_texture_coord;
+// Original-triangle affine screen barycentrics, pre-multiplied by clip W.
+in vec2 frag_coverage_original_barycentric;
 // Clut coordinates in VRAM
 flat in uvec2 frag_clut;
 // 0: no texture, 1: raw-texture, 2: blended
@@ -1117,9 +1120,19 @@ STRINGIZE(
          // draw commands)
          // if (is_transparent(texel0)) {
          if (opacity < 0.5) {
-            // Mode 2 marks the exact opaque-textured fragments the normal
-            // path would discard.  It does not color absent raster coverage.
-            if (coverage_probe == 2U && frag_semi_transparent == 0U) {
+            vec2 original_barycentric =
+               frag_coverage_original_barycentric * gl_FragCoord.w;
+            float original_barycentric_z = 1.0 -
+               original_barycentric.x - original_barycentric.y;
+            bool expanded_skirt =
+               min(min(original_barycentric.x, original_barycentric.y),
+                  original_barycentric_z) < -0.00001;
+            // Mode 2 marks every exact opaque-textured discard. Mode 3 marks
+            // only discards in pixels added outside the original triangle;
+            // neither can color a location lacking raster coverage.
+            if ((coverage_probe == 2U ||
+                  (coverage_probe == 3U && expanded_skirt)) &&
+                frag_semi_transparent == 0U) {
                frag_color = vec4(1.0, 0.0, 1.0,
                      float(force_mask_bit));
                return;
