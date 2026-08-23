@@ -5008,6 +5008,24 @@ static void check_variables(bool startup)
                   "coverage union skirt opaque") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE;
+         else if (strcmp(var.value, "adjacency material one") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE;
+         else if (strcmp(var.value, "adjacency material two") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_TWO;
+         else if (strcmp(var.value, "adjacency material four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_FOUR;
+         else if (strcmp(var.value, "adjacency any four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR;
+         else if (strcmp(var.value, "adjacency near four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR;
+         else if (strcmp(var.value, "adjacency uv four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

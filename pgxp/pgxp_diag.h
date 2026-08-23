@@ -156,6 +156,17 @@ enum PGXP_diag_gl_test_mode
 	/* Preserve the ordinary GL draw, then add only the outside portion of a
 	 * second opaque, valid-W, surface-preserving coverage copy. */
 	PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE,
+	/* Restrict that outside repair copy to edges which have an exact native
+	 * endpoint-pair match on the opposite side of another opaque PGXP
+	 * triangle.  Modes 89-91 measure the required subpixel width with a
+	 * same-material gate; 92 relaxes material continuity, while 93 and 94
+	 * tighten it with packet proximity and endpoint UV continuity. */
+	PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE,
+	PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_TWO,
+	PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_FOUR,
+	PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR,
+	PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR,
+	PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
@@ -223,6 +234,7 @@ void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
 		unsigned stride_bytes, uint64_t material_key);
 void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		unsigned stride_bytes);
+unsigned PGXP_DiagGLSharedEdgeMask(unsigned triangle_start);
 void PGXP_DiagGLSetMode(unsigned mode);
 unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
@@ -290,6 +302,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagSubmitPrimitive(vertices, count, invalid_w, upscale_shift) ((void)0)
 #define PGXP_DiagGLPrimitive(vertices, count, stride_bytes, material_key) ((void)0)
 #define PGXP_DiagGLRepair(vertices, count, stride_bytes) ((void)0)
+#define PGXP_DiagGLSharedEdgeMask(triangle_start) 0u
 #define PGXP_DiagGLSetMode(mode) ((void)0)
 #define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)

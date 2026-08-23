@@ -71,6 +71,16 @@ static void expect_near(const char* name, float actual, float expected)
 	}
 }
 
+static void expect_mask(const char* name, unsigned actual, unsigned expected)
+{
+	if (actual != expected)
+	{
+		fprintf(stderr, "FAIL %-38s got=0x%x want=0x%x\n",
+			name, actual, expected);
+		failures++;
+	}
+}
+
 static void test_opposing_tjunction_closes(void)
 {
 	static const int32_t long_native[3][2] = {
@@ -455,6 +465,103 @@ static void test_runtime_mode_matrix(void)
 	PGXP_DiagFrame(0);
 }
 
+static void test_exact_edge_adjacency(void)
+{
+	static const int32_t upper_native[3][2] = {
+		{ 0, 0 }, { 10, 0 }, { 0, 10 }
+	};
+	static const float upper_precise[3][2] = {
+		{ 0.0f, 0.0f }, { 10.0f, 0.0f }, { 0.0f, 10.0f }
+	};
+	static const int32_t lower_native[3][2] = {
+		{ 10, 0 }, { 0, 0 }, { 10, -10 }
+	};
+	static const float lower_precise[3][2] = {
+		{ 10.0f, -0.125f }, { 0.0f, -0.125f }, { 10.0f, -10.0f }
+	};
+	static const float lower_precise_consistent[3][2] = {
+		{ 10.0f, 0.0f }, { 0.0f, 0.0f }, { 10.0f, -10.0f }
+	};
+	static const int32_t same_side_native[3][2] = {
+		{ 10, 0 }, { 0, 0 }, { 10, 10 }
+	};
+	test_vertex stream[6];
+
+	puts("[R7] exact native shared-edge masks honor topology and material");
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], upper_native, upper_precise, 0x24);
+	submit_triangle(&stream[3], lower_native, lower_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("same-material upper shared edge",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("same-material lower shared edge",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], upper_native, upper_precise, 0x24);
+	submit_material_key = 2;
+	submit_triangle(&stream[3], lower_native, lower_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("material gate rejects upper",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("material gate rejects lower",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], upper_native, upper_precise, 0x24);
+	submit_material_key = 2;
+	submit_triangle(&stream[3], lower_native, lower_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("any-material accepts upper",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("any-material accepts lower",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], upper_native, upper_precise, 0x24);
+	submit_triangle(&stream[3], same_side_native, lower_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("same-side overlap rejected upper",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("same-side overlap rejected lower",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR);
+	submit_triangle(&stream[0], upper_native, upper_precise, 0x24);
+	submit_triangle(&stream[3], lower_native, lower_precise_consistent, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("already-consistent upper stays clear",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("already-consistent lower stays clear",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	/* The frame-local hash deliberately spans command-buffer flushes.  Only
+	 * the later buffer can be marked, because the earlier one has already
+	 * been submitted to GL. */
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_FOUR);
+	submit_material_key = 1;
+	submit_triangle(&stream[0], upper_native, upper_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 3, (unsigned)sizeof(stream[0]));
+	expect_mask("first cross-buffer side initially clear",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	submit_triangle(&stream[0], lower_native, lower_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 3, (unsigned)sizeof(stream[0]));
+	expect_mask("later cross-buffer side selected",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	submit_material_key = 1;
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OFF);
+	PGXP_DiagFrame(0);
+}
+
 int main(void)
 {
 	PGXP_Init();
@@ -464,6 +571,7 @@ int main(void)
 	test_conflicting_targets_are_atomic();
 	test_pgxp_off_is_untouched();
 	test_runtime_mode_matrix();
+	test_exact_edge_adjacency();
 	PGXP_Shutdown();
 	printf("\nFAIL count %d\n", failures);
 	if (failures)

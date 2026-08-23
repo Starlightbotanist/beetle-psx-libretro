@@ -715,9 +715,13 @@ struct gl_command_vertex {
    /* Decoder provenance for renderer-side PGXP coverage handling.  This is
     * not a shader attribute: the CPU consumes it before unmapping. */
    uint8_t pgxp_valid_w;
-   /* CPU-only marker for mode 88's second copy.  The baseline copy remains
-    * byte-for-byte unchanged while expansion consumes only this one. */
+   /* CPU-only marker for union modes 88-94's second copy.  The baseline copy
+    * remains byte-for-byte unchanged while expansion consumes only this one. */
    uint8_t coverage_repair_copy;
+   /* Absolute command-stream vertex supplying native adjacency metadata for
+    * this repair-copy vertex.  It is CPU-only and valid only while the
+    * current mapped command buffer is being finalized. */
+   uint32_t coverage_repair_source;
    /* Diagnostic coverage expansion can move a vertex while preserving the
     * original homogeneous surface.  Integer PSX UV inputs cannot represent
     * the extrapolated coordinate, so this float sidecar becomes the shader
@@ -1124,10 +1128,21 @@ struct gl_renderer {
 };
 typedef struct gl_renderer gl_renderer;
 
+static bool gl_pgxp_adjacency_mode(unsigned mode)
+{
+   return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
+      mode <= PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR;
+}
+
+static bool gl_pgxp_coverage_union_mode(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE ||
+      gl_pgxp_adjacency_mode(mode);
+}
 
 static float gl_pgxp_coverage_subpixel_units(unsigned mode)
 {
-   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+   if (gl_pgxp_coverage_union_mode(mode) &&
        !PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE))
       return 0.0f;
    switch (mode)
@@ -1139,12 +1154,14 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_ONE:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE:
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1:
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_TWO:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_TWO:
          return 2.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
@@ -1175,6 +1192,10 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_FOUR:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
@@ -1214,7 +1235,8 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE ||
+      gl_pgxp_adjacency_mode(mode);
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1250,6 +1272,12 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_TWO:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_FOUR:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR:
+      case PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR:
          return 8.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR:
          return 4.0f;
@@ -1286,7 +1314,8 @@ static bool gl_pgxp_coverage_preserves_surface(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE ||
+      gl_pgxp_adjacency_mode(mode);
 }
 
 /* Coverage can safely retain one geometry policy for ordinary opaque
@@ -1315,7 +1344,7 @@ static void gl_pgxp_coverage_class_config(unsigned mode, float raster_grid,
        mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
-       mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE)
+       gl_pgxp_coverage_union_mode(mode))
    {
       epsilon[1] = 0.0f;
       vertex_cap[1] = 0.0f;
@@ -1377,7 +1406,7 @@ static unsigned gl_pgxp_texture_probe(unsigned mode)
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return 4u;
-   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+   if (gl_pgxp_coverage_union_mode(mode) &&
        PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE))
       return 5u;
    return 0u;
@@ -1396,9 +1425,11 @@ static const char *gl_pgxp_texture_probe_name(unsigned mode)
       return "original_triangle_inside_clip";
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return "snap8_triangle_inside_clip";
-   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE)
+   if (gl_pgxp_coverage_union_mode(mode))
       return PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ?
-         "baseline_plus_outside_skirt" : "disabled_by_stack_toggle";
+         (gl_pgxp_adjacency_mode(mode) ?
+            "baseline_plus_shared_edge_skirt" :
+            "baseline_plus_outside_skirt") : "disabled_by_stack_toggle";
    return "off";
 }
 
@@ -1717,6 +1748,239 @@ static bool gl_pgxp_preserve_expanded_surface(gl_renderer *renderer,
    return true;
 }
 
+/* General form of the homogeneous-plane preservation above.  Adjacency
+ * repair offsets only selected edge equations, so its three new vertices are
+ * not related to the originals by one uniform scale.  Evaluating q=1/w and
+ * every attribute*q plane at the requested screen position preserves the
+ * original texture, colour and fog surface exactly while permitting that
+ * edge-local coverage geometry. */
+static bool gl_pgxp_preserve_surface_at(gl_renderer *renderer,
+      gl_command_vertex *v, const float target_x[3],
+      const float target_y[3])
+{
+   double x[3];
+   double y[3];
+   double q[3];
+   double uvq[3][2];
+   double colorq[3][3];
+   double fogq[3][4];
+   float barycentric[3][2];
+   float new_w[3];
+   float new_uv[3][2];
+   float new_color[3][3];
+   float new_fog[3][4];
+   unsigned i;
+   unsigned c;
+
+   if (!renderer || !v || !target_x || !target_y)
+      return false;
+   for (i = 0; i < 3u; i++)
+   {
+      double w = (double)v[i].position[3];
+      if (!isfinite(v[i].position[0]) || !isfinite(v[i].position[1]) ||
+          !isfinite(target_x[i]) || !isfinite(target_y[i]) ||
+          !isfinite(w) || w <= 1.0e-20)
+         return false;
+      x[i] = v[i].position[0];
+      y[i] = v[i].position[1];
+      q[i] = 1.0 / w;
+      for (c = 0; c < 2u; c++)
+         uvq[i][c] = (double)v[i].texture_coord[c] * q[i];
+      for (c = 0; c < 3u; c++)
+         colorq[i][c] = (double)v[i].color[c] * q[i];
+      for (c = 0; c < 4u; c++)
+         fogq[i][c] = (double)v[i].fog[c] * q[i];
+   }
+
+   for (i = 0; i < 3u; i++)
+   {
+      double b[3];
+      double new_q;
+      if (!gl_pgxp_coverage_barycentric_at(x, y, target_x[i],
+               target_y[i], barycentric[i]))
+         return false;
+      b[0] = barycentric[i][0];
+      b[1] = barycentric[i][1];
+      b[2] = 1.0 - b[0] - b[1];
+      new_q = b[0] * q[0] + b[1] * q[1] + b[2] * q[2];
+      if (!isfinite(new_q) || new_q <= 1.0e-20)
+         return false;
+      new_w[i] = (float)(1.0 / new_q);
+      if (!isfinite(new_w[i]) || new_w[i] <= 0.0f)
+         return false;
+      for (c = 0; c < 2u; c++)
+      {
+         double aq = b[0] * uvq[0][c] + b[1] * uvq[1][c] +
+            b[2] * uvq[2][c];
+         new_uv[i][c] = (float)(aq / new_q);
+         if (!isfinite(new_uv[i][c]))
+            return false;
+      }
+      for (c = 0; c < 3u; c++)
+      {
+         double aq = b[0] * colorq[0][c] + b[1] * colorq[1][c] +
+            b[2] * colorq[2][c];
+         new_color[i][c] = (float)(aq / new_q);
+         if (!isfinite(new_color[i][c]))
+            return false;
+      }
+      for (c = 0; c < 4u; c++)
+      {
+         double aq = b[0] * fogq[0][c] + b[1] * fogq[1][c] +
+            b[2] * fogq[2][c];
+         new_fog[i][c] = (float)(aq / new_q);
+         if (!isfinite(new_fog[i][c]))
+            return false;
+      }
+   }
+
+   for (i = 0; i < 3u; i++)
+   {
+      float uv_delta = hypotf(new_uv[i][0] - (float)v[i].texture_coord[0],
+            new_uv[i][1] - (float)v[i].texture_coord[1]);
+      float old_w = v[i].position[3];
+      float w_ratio = new_w[i] > old_w ?
+         new_w[i] / old_w : old_w / new_w[i];
+      renderer->pgxp_coverage_surface_uv_sum += (double)uv_delta;
+      if (uv_delta > renderer->pgxp_coverage_surface_uv_max)
+         renderer->pgxp_coverage_surface_uv_max = uv_delta;
+      renderer->pgxp_coverage_surface_w_ratio_sum += (double)w_ratio;
+      if (w_ratio > renderer->pgxp_coverage_surface_w_ratio_max)
+         renderer->pgxp_coverage_surface_w_ratio_max = w_ratio;
+      renderer->pgxp_coverage_surface_vertices++;
+      v[i].position[3] = new_w[i];
+      v[i].coverage_texture_coord[0] = new_uv[i][0];
+      v[i].coverage_texture_coord[1] = new_uv[i][1];
+      v[i].coverage_original_barycentric[0] = barycentric[i][0];
+      v[i].coverage_original_barycentric[1] = barycentric[i][1];
+      v[i].coverage_preserve = 1u;
+      for (c = 0; c < 3u; c++)
+         v[i].color[c] = new_color[i][c];
+      for (c = 0; c < 4u; c++)
+         v[i].fog[c] = new_fog[i][c];
+   }
+   return true;
+}
+
+/* Offset only selected triangle edge lines.  Unselected line equations stay
+ * unchanged, so unmatched silhouettes do not receive mode 88's global
+ * growth.  Each new vertex is the intersection of its two incident (possibly
+ * offset) lines; the familiar cap-8 bound is then applied linearly to avoid
+ * acute-corner spikes. */
+static bool gl_pgxp_expand_shared_edges(gl_renderer *renderer,
+      gl_command_vertex *v, unsigned edge_mask, float epsilon,
+      float vertex_cap, unsigned coverage_class)
+{
+   float x[3];
+   float y[3];
+   float nx[3];
+   float ny[3];
+   float line_c[3];
+   float target_x[3];
+   float target_y[3];
+   float max_move = 0.0f;
+   float cap_scale = 1.0f;
+   unsigned i;
+
+   if (!renderer || !v || !(edge_mask & 7u) || epsilon <= 0.0f ||
+       vertex_cap <= 0.0f)
+      return false;
+   for (i = 0; i < 3u; i++)
+   {
+      unsigned second = (i + 1u) % 3u;
+      unsigned third = (i + 2u) % 3u;
+      float dx;
+      float dy;
+      float length;
+      float third_side;
+      x[i] = v[i].position[0];
+      y[i] = v[i].position[1];
+      if (!isfinite(x[i]) || !isfinite(y[i]))
+         return false;
+      dx = v[second].position[0] - x[i];
+      dy = v[second].position[1] - y[i];
+      length = hypotf(dx, dy);
+      if (!isfinite(length) || length <= 1.0e-12f)
+         return false;
+      nx[i] = dy / length;
+      ny[i] = -dx / length;
+      third_side = nx[i] * (v[third].position[0] - x[i]) +
+         ny[i] * (v[third].position[1] - y[i]);
+      if (!isfinite(third_side) || fabsf(third_side) <= 1.0e-12f)
+         return false;
+      if (third_side > 0.0f)
+      {
+         nx[i] = -nx[i];
+         ny[i] = -ny[i];
+      }
+      line_c[i] = nx[i] * x[i] + ny[i] * y[i] +
+         ((edge_mask & (1u << i)) ? epsilon : 0.0f);
+   }
+
+   for (i = 0; i < 3u; i++)
+   {
+      unsigned previous = (i + 2u) % 3u;
+      float determinant = nx[previous] * ny[i] -
+         ny[previous] * nx[i];
+      float move;
+      if (!isfinite(determinant) || fabsf(determinant) <= 1.0e-12f)
+         return false;
+      target_x[i] = (line_c[previous] * ny[i] -
+            ny[previous] * line_c[i]) / determinant;
+      target_y[i] = (nx[previous] * line_c[i] -
+            line_c[previous] * nx[i]) / determinant;
+      if (!isfinite(target_x[i]) || !isfinite(target_y[i]))
+         return false;
+      move = hypotf(target_x[i] - x[i], target_y[i] - y[i]);
+      if (move > max_move)
+         max_move = move;
+   }
+   if (!isfinite(max_move) || max_move <= 0.0f)
+      return false;
+   if (max_move > vertex_cap * epsilon)
+   {
+      cap_scale = (vertex_cap * epsilon) / max_move;
+      for (i = 0; i < 3u; i++)
+      {
+         target_x[i] = x[i] + (target_x[i] - x[i]) * cap_scale;
+         target_y[i] = y[i] + (target_y[i] - y[i]) * cap_scale;
+      }
+      renderer->pgxp_coverage_capped++;
+      renderer->pgxp_coverage_class_capped[coverage_class]++;
+   }
+   if (!gl_pgxp_preserve_surface_at(renderer, v, target_x, target_y))
+   {
+      renderer->pgxp_coverage_preserve_rejected++;
+      return false;
+   }
+
+   renderer->pgxp_coverage_preserved++;
+   renderer->pgxp_coverage_edge_sum += (double)(epsilon * cap_scale);
+   renderer->pgxp_coverage_class_edge_sum[coverage_class] +=
+      (double)(epsilon * cap_scale);
+   if (!renderer->pgxp_coverage_expanded ||
+       epsilon * cap_scale < renderer->pgxp_coverage_edge_min)
+      renderer->pgxp_coverage_edge_min = epsilon * cap_scale;
+   if (epsilon * cap_scale > renderer->pgxp_coverage_edge_max)
+      renderer->pgxp_coverage_edge_max = epsilon * cap_scale;
+   for (i = 0; i < 3u; i++)
+   {
+      float move = hypotf(target_x[i] - x[i], target_y[i] - y[i]);
+      v[i].position[0] = target_x[i];
+      v[i].position[1] = target_y[i];
+      renderer->pgxp_coverage_move_sum += (double)move;
+      renderer->pgxp_coverage_class_move_sum[coverage_class] +=
+         (double)move;
+      if (move > renderer->pgxp_coverage_move_max)
+         renderer->pgxp_coverage_move_max = move;
+      if (move > renderer->pgxp_coverage_class_move_max[coverage_class])
+         renderer->pgxp_coverage_class_move_max[coverage_class] = move;
+   }
+   renderer->pgxp_coverage_expanded++;
+   renderer->pgxp_coverage_class_expanded[coverage_class]++;
+   return true;
+}
+
 /* Expand each final OpenGL triangle by a small, renderer-subpixel-sized
  * amount.  Scaling about the incenter offsets all three infinite edge lines
  * equally; unlike the native-coordinate controls this never selects one side
@@ -1787,10 +2051,10 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, unsigned mode,
          unsigned coverage_class;
          unsigned j;
 
-         /* Mode 88 interleaves an untouched baseline triangle with a second
-          * repair triangle.  Expanding only the marked copy makes coverage a
-          * union; the ordinary OpenGL raster set can no longer be removed. */
-         if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+         /* Union modes interleave an untouched baseline triangle with a
+          * second repair triangle.  Expanding only the marked copy makes
+          * coverage monotonic; adjacency modes further restrict its edges. */
+         if (gl_pgxp_coverage_union_mode(mode) &&
              (!v[0].coverage_repair_copy ||
               !v[1].coverage_repair_copy ||
               !v[2].coverage_repair_copy))
@@ -1867,6 +2131,20 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, unsigned mode,
             float radius = hypotf(x[j] - incenter_x, y[j] - incenter_y);
             if (radius > max_radius)
                max_radius = radius;
+         }
+         if (gl_pgxp_adjacency_mode(mode))
+         {
+            unsigned source = v[0].coverage_repair_source;
+            unsigned edge_mask;
+            if (v[1].coverage_repair_source != source + 1u ||
+                v[2].coverage_repair_source != source + 2u)
+               continue;
+            edge_mask = PGXP_DiagGLSharedEdgeMask(source);
+            if (!edge_mask)
+               continue;
+            gl_pgxp_expand_shared_edges(renderer, v, edge_mask,
+                  class_epsilon, class_vertex_cap, coverage_class);
+            continue;
          }
          max_move = max_radius * scale_delta;
          if (!isfinite(scale_delta) || !isfinite(max_move))
@@ -7928,6 +8206,16 @@ void rhi_gl_push_triangle(
    if (!renderer)
       return;
 
+   /* Keep the untouched triangle and its repair copy in one mapped stream so
+    * adjacency masks can refer to the baseline by absolute vertex index. */
+   if (gl_pgxp_adjacency_mode(PGXP_DiagGLGetMode()) &&
+       PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
+       gl_pgxp_geometry_active() && pgxp_valid_w &&
+       texture_blend_mode && blend_mode == -1 &&
+       gl_draw_buffer_remaining_capacity(renderer->command_buffer) < 6u &&
+       !gl_draw_buffer_is_empty(renderer->command_buffer))
+      gl_renderer_draw(renderer);
+
    switch (blend_mode)
    {
       case -1:
@@ -8017,15 +8305,18 @@ void rhi_gl_push_triangle(
       gl_vram_sync_primitive(renderer, v, 3);
       push_primitive(renderer, v, 3, GL_TRIANGLES,
             semi_transparency_mode, mask_test, set_mask);
-      if (PGXP_DiagGLGetMode() ==
-               PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+      if (gl_pgxp_coverage_union_mode(PGXP_DiagGLGetMode()) &&
           PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
           gl_pgxp_geometry_active() && pgxp_valid_w &&
           texture_blend_mode && !semi_transparent)
       {
+         unsigned _source = renderer->vertex_index_pos - 3u;
          int _fi;
          for (_fi = 0; _fi < 3; _fi++)
+         {
             v[_fi].coverage_repair_copy = 1u;
+            v[_fi].coverage_repair_source = _source + (unsigned)_fi;
+         }
          push_primitive(renderer, v, 3, GL_TRIANGLES,
                semi_transparency_mode, mask_test, set_mask);
       }
@@ -8068,6 +8359,16 @@ void rhi_gl_push_quad(
    renderer = static_renderer.state_data;
    if (!renderer)
       return;
+
+   /* The six baseline vertices and six repair vertices must share one mapped
+    * stream for exact source-index lookup. */
+   if (gl_pgxp_adjacency_mode(PGXP_DiagGLGetMode()) &&
+       PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
+       gl_pgxp_geometry_active() && pgxp_valid_w &&
+       texture_blend_mode && blend_mode == -1 &&
+       gl_draw_buffer_remaining_capacity(renderer->command_buffer) < 12u &&
+       !gl_draw_buffer_is_empty(renderer->command_buffer))
+      gl_renderer_draw(renderer);
 
    switch (blend_mode)
    {
@@ -8186,15 +8487,19 @@ void rhi_gl_push_quad(
          renderer->submission_quads++;
          push_primitive(renderer, expanded, 6, GL_TRIANGLES,
                semi_transparency_mode, mask_test, set_mask);
-         if (PGXP_DiagGLGetMode() ==
-                  PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+         if (gl_pgxp_coverage_union_mode(PGXP_DiagGLGetMode()) &&
              PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
              gl_pgxp_geometry_active() && pgxp_valid_w &&
              texture_blend_mode && !semi_transparent)
          {
+            unsigned _source = renderer->vertex_index_pos - 6u;
             int _fi;
             for (_fi = 0; _fi < 6; _fi++)
+            {
                expanded[_fi].coverage_repair_copy = 1u;
+               expanded[_fi].coverage_repair_source =
+                  _source + (unsigned)_fi;
+            }
             push_primitive(renderer, expanded, 6, GL_TRIANGLES,
                   semi_transparency_mode, mask_test, set_mask);
          }

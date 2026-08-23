@@ -59,6 +59,8 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_GL_VERTEX_CAPACITY 16384u
 #define PGXP_DIAG_GL_HASH_BUCKETS 32768u
 #define PGXP_DIAG_GL_PAIR_CAPACITY 65536u
+#define PGXP_DIAG_GL_ADJ_EDGE_CAPACITY PGXP_DIAG_GL_PAIR_CAPACITY
+#define PGXP_DIAG_GL_ADJ_HASH_BUCKETS 65536u
 #define PGXP_DIAG_GL_WINDOW_SAMPLES 16u
 #define PGXP_DIAG_GL_NATIVE_SAMPLES 4096u
 #define PGXP_DIAG_GL_NATIVE_WINDOW_SAMPLES 16u
@@ -329,6 +331,29 @@ typedef struct
 	uint32_t point;
 	uint32_t linked;
 } PGXP_diag_gl_pair;
+
+/* Exact native-edge identity at the final GL handoff.  Records live for one
+ * emulated frame rather than one command-buffer flush, so a later primitive
+ * can still identify adjacency to geometry that OpenGL has already consumed.
+ * Only the current buffer's triangle can be marked in that case, which is
+ * sufficient for its outside repair skirt to claim the shared boundary. */
+typedef struct
+{
+	int32_t native_x[2];
+	int32_t native_y[2];
+	float precise_x[2];
+	float precise_y[2];
+	uint64_t material_key;
+	uint64_t packet;
+	int64_t side;
+	uint32_t triangle_start;
+	uint32_t next;
+	uint32_t generation;
+	uint16_t u[2];
+	uint16_t v[2];
+	uint8_t edge;
+	uint8_t upscale_shift;
+} PGXP_diag_gl_adj_edge;
 
 typedef struct
 {
@@ -663,6 +688,35 @@ static uint32_t gl_hash_heads[PGXP_DIAG_GL_HASH_BUCKETS];
 static uint32_t gl_hash_next[PGXP_DIAG_GL_VERTEX_CAPACITY];
 static uint32_t gl_vertex_count;
 static uint8_t gl_vertex_overflow;
+static PGXP_diag_gl_adj_edge
+	gl_adj_edges[PGXP_DIAG_GL_ADJ_EDGE_CAPACITY];
+static uint32_t gl_adj_hash_heads[PGXP_DIAG_GL_ADJ_HASH_BUCKETS];
+static uint8_t gl_adj_shared_mask[PGXP_DIAG_GL_VERTEX_CAPACITY];
+static uint32_t gl_adj_frame = ~UINT32_C(0);
+static unsigned gl_adj_mode = PGXP_DIAG_GL_TEST_OFF;
+static uint32_t gl_adj_edge_count;
+static uint32_t gl_adj_generation;
+static uint32_t gl_adj_mask_count;
+static uint64_t gl_adj_buffers;
+static uint64_t gl_adj_triangles;
+static uint64_t gl_adj_edges_seen;
+static uint64_t gl_adj_exact_pairs;
+static uint64_t gl_adj_opposite_pairs;
+static uint64_t gl_adj_mismatch_pairs;
+static uint64_t gl_adj_material_pairs[2];
+static uint64_t gl_adj_packet_pairs[2];
+static uint64_t gl_adj_uv_pairs[2];
+static uint64_t gl_adj_selected_pairs;
+static uint64_t gl_adj_selected_current;
+static uint64_t gl_adj_selected_previous;
+static uint64_t gl_adj_selected_cross_buffer;
+static uint64_t gl_adj_overflow;
+static uint64_t gl_adj_delta_bins[PGXP_DIAG_EDGE_DELTA_BINS];
+static uint64_t gl_adj_packet_bins[PGXP_DIAG_EDGE_PACKET_BINS];
+static double gl_adj_delta_sum;
+static float gl_adj_delta_max;
+static uint32_t gl_adj_samples;
+static uint32_t gl_adj_window_samples;
 static uint64_t gl_repair_buffers;
 static uint64_t gl_repair_vertices;
 static uint64_t gl_repair_metadata_mismatch;
@@ -745,6 +799,25 @@ static void pgxp_diag_gl_reset_stream(void)
 
 static void pgxp_diag_gl_reset_window(void)
 {
+	gl_adj_buffers = 0;
+	gl_adj_triangles = 0;
+	gl_adj_edges_seen = 0;
+	gl_adj_exact_pairs = 0;
+	gl_adj_opposite_pairs = 0;
+	gl_adj_mismatch_pairs = 0;
+	memset(gl_adj_material_pairs, 0, sizeof(gl_adj_material_pairs));
+	memset(gl_adj_packet_pairs, 0, sizeof(gl_adj_packet_pairs));
+	memset(gl_adj_uv_pairs, 0, sizeof(gl_adj_uv_pairs));
+	gl_adj_selected_pairs = 0;
+	gl_adj_selected_current = 0;
+	gl_adj_selected_previous = 0;
+	gl_adj_selected_cross_buffer = 0;
+	gl_adj_overflow = 0;
+	memset(gl_adj_delta_bins, 0, sizeof(gl_adj_delta_bins));
+	memset(gl_adj_packet_bins, 0, sizeof(gl_adj_packet_bins));
+	gl_adj_delta_sum = 0.0;
+	gl_adj_delta_max = 0.0f;
+	gl_adj_window_samples = 0;
 	gl_repair_buffers = 0;
 	gl_repair_vertices = 0;
 	gl_repair_metadata_mismatch = 0;
@@ -853,9 +926,18 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_preserve_cap2_opaque_four",
 		"coverage_clip_original_opaque",
 		"coverage_clip_snap8_opaque",
-		"coverage_union_skirt_opaque"
+		"coverage_union_skirt_opaque",
+		"adjacency_material_one", "adjacency_material_two",
+		"adjacency_material_four", "adjacency_any_four",
+		"adjacency_near_four", "adjacency_uv_four"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
+}
+
+static int pgxp_diag_gl_mode_is_adjacency(unsigned mode)
+{
+	return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
+		mode <= PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR;
 }
 
 void PGXP_DiagGLSetMode(unsigned mode)
@@ -1255,6 +1337,14 @@ void PGXP_DiagInit(void)
 	submit_window_samples = 0;
 	pgxp_diag_gl_reset_stream();
 	pgxp_diag_gl_reset_window();
+	memset(gl_adj_hash_heads, 0xff, sizeof(gl_adj_hash_heads));
+	memset(gl_adj_shared_mask, 0, sizeof(gl_adj_shared_mask));
+	gl_adj_frame = ~UINT32_C(0);
+	gl_adj_mode = PGXP_DIAG_GL_TEST_OFF;
+	gl_adj_edge_count = 0;
+	gl_adj_generation = 0;
+	gl_adj_mask_count = 0;
+	gl_adj_samples = 0;
 	gl_repair_samples = 0;
 	gl_native_samples = 0;
 	gpu_quad_native_sign = 0;
@@ -3742,6 +3832,265 @@ static int pgxp_diag_gl_raster_gate(void* vertices, unsigned stride_bytes,
 	return 1;
 }
 
+static uint32_t pgxp_diag_gl_adj_hash(int32_t x0, int32_t y0,
+		int32_t x1, int32_t y1)
+{
+	uint32_t hash = UINT32_C(2166136261);
+#define PGXP_GL_ADJ_HASH_VALUE(value) do { \
+	hash = (hash ^ (uint32_t)(value)) * UINT32_C(16777619); \
+} while (0)
+	PGXP_GL_ADJ_HASH_VALUE(x0);
+	PGXP_GL_ADJ_HASH_VALUE(y0);
+	PGXP_GL_ADJ_HASH_VALUE(x1);
+	PGXP_GL_ADJ_HASH_VALUE(y1);
+#undef PGXP_GL_ADJ_HASH_VALUE
+	return hash & (PGXP_DIAG_GL_ADJ_HASH_BUCKETS - 1u);
+}
+
+static int pgxp_diag_gl_adj_policy(unsigned mode, int material_same,
+		int packet_near, int uv_same)
+{
+	if (mode == PGXP_DIAG_GL_TEST_ADJACENCY_ANY_FOUR)
+		return 1;
+	if (!material_same)
+		return 0;
+	if (mode == PGXP_DIAG_GL_TEST_ADJACENCY_NEAR_FOUR)
+		return packet_near;
+	if (mode == PGXP_DIAG_GL_TEST_ADJACENCY_UV_FOUR)
+		return uv_same;
+	return 1;
+}
+
+/* Classify exact shared native edges in the final mapped stream.  Native
+ * endpoint identity is necessary but not sufficient: both triangles must be
+ * opaque textured PGXP geometry, lie on opposite sides of the edge, and
+ * recover different precise endpoints.  The selected mode then decides how
+ * much material/packet/UV continuity is required.  No geometry is changed
+ * here; rhi_lib_gl.c consumes the three-bit mask only for the duplicate
+ * outside-skirt copy, leaving the baseline stream untouched. */
+static void pgxp_diag_gl_classify_adjacency(void* vertices, unsigned count,
+		unsigned stride_bytes, unsigned mode)
+{
+	static const uint8_t edge_vertices[3][3] = {
+		{ 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }
+	};
+	uint32_t start;
+
+	if (gl_adj_frame != mode_frame || gl_adj_mode != mode ||
+	    gl_adj_generation == UINT32_MAX)
+	{
+		memset(gl_adj_hash_heads, 0xff, sizeof(gl_adj_hash_heads));
+		gl_adj_frame = mode_frame;
+		gl_adj_mode = mode;
+		gl_adj_edge_count = 0;
+		gl_adj_generation = 0;
+	}
+	gl_adj_generation++;
+	gl_adj_mask_count = count < PGXP_DIAG_GL_VERTEX_CAPACITY ? count :
+		PGXP_DIAG_GL_VERTEX_CAPACITY;
+	memset(gl_adj_shared_mask, 0, gl_adj_mask_count);
+	gl_adj_buffers++;
+
+	for (start = 0; start < count; start++)
+	{
+		const PGXP_diag_gl_vertex* triangle;
+		unsigned edge_index;
+		if (!pgxp_diag_gl_triangle_valid(start, count) ||
+		    gl_vertices[start].vertex != 0)
+			continue;
+		triangle = &gl_vertices[start];
+		if (!triangle->textured || triangle->semi_transparent ||
+		    triangle->invalid_w)
+			continue;
+		gl_adj_triangles++;
+
+		for (edge_index = 0; edge_index < 3u; edge_index++)
+		{
+			unsigned first = edge_vertices[edge_index][0];
+			unsigned second = edge_vertices[edge_index][1];
+			unsigned third = edge_vertices[edge_index][2];
+			const PGXP_diag_gl_vertex* first_vertex =
+				&gl_vertices[start + first];
+			const PGXP_diag_gl_vertex* second_vertex =
+				&gl_vertices[start + second];
+			const float* first_position = pgxp_diag_gl_position(vertices,
+				stride_bytes, start + first);
+			const float* second_position = pgxp_diag_gl_position(vertices,
+				stride_bytes, start + second);
+			int32_t x0 = first_vertex->native_x;
+			int32_t y0 = first_vertex->native_y;
+			int32_t x1 = second_vertex->native_x;
+			int32_t y1 = second_vertex->native_y;
+			float px0 = first_position[0];
+			float py0 = first_position[1];
+			float px1 = second_position[0];
+			float py1 = second_position[1];
+			uint16_t u0 = first_vertex->u;
+			uint16_t v0 = first_vertex->v;
+			uint16_t u1 = second_vertex->u;
+			uint16_t v1 = second_vertex->v;
+			int64_t side;
+			uint32_t bucket;
+			uint32_t previous_index;
+			PGXP_diag_gl_adj_edge* current;
+
+			gl_adj_edges_seen++;
+			if ((x0 == x1 && y0 == y1) || !isfinite(px0) ||
+			    !isfinite(py0) || !isfinite(px1) || !isfinite(py1))
+				continue;
+			if (x1 < x0 || (x1 == x0 && y1 < y0))
+			{
+				int32_t temp_i;
+				float temp_f;
+				uint16_t temp_u;
+				temp_i = x0; x0 = x1; x1 = temp_i;
+				temp_i = y0; y0 = y1; y1 = temp_i;
+				temp_f = px0; px0 = px1; px1 = temp_f;
+				temp_f = py0; py0 = py1; py1 = temp_f;
+				temp_u = u0; u0 = u1; u1 = temp_u;
+				temp_u = v0; v0 = v1; v1 = temp_u;
+			}
+			side = pgxp_diag_tj_native_cross(x0, y0, x1, y1,
+				gl_vertices[start + third].native_x,
+				gl_vertices[start + third].native_y);
+			if (!side)
+				continue;
+			bucket = pgxp_diag_gl_adj_hash(x0, y0, x1, y1);
+			previous_index = gl_adj_hash_heads[bucket];
+			while (previous_index != UINT32_MAX &&
+			       previous_index < gl_adj_edge_count)
+			{
+				const PGXP_diag_gl_adj_edge* previous =
+					&gl_adj_edges[previous_index];
+				uint64_t gap;
+				float scale;
+				float delta;
+				int material_same;
+				int packet_near;
+				int uv_same;
+				previous_index = previous->next;
+				if (previous->native_x[0] != x0 ||
+				    previous->native_y[0] != y0 ||
+				    previous->native_x[1] != x1 ||
+				    previous->native_y[1] != y1 ||
+				    (previous->generation == gl_adj_generation &&
+				     previous->triangle_start == start) ||
+				    previous->upscale_shift != triangle->upscale_shift)
+					continue;
+				gl_adj_exact_pairs++;
+				if ((previous->side < 0) == (side < 0))
+					continue;
+				gl_adj_opposite_pairs++;
+				delta = fabsf(previous->precise_x[0] - px0);
+				if (fabsf(previous->precise_y[0] - py0) > delta)
+					delta = fabsf(previous->precise_y[0] - py0);
+				if (fabsf(previous->precise_x[1] - px1) > delta)
+					delta = fabsf(previous->precise_x[1] - px1);
+				if (fabsf(previous->precise_y[1] - py1) > delta)
+					delta = fabsf(previous->precise_y[1] - py1);
+				if (!isfinite(delta) || delta <= 0.0f)
+					continue;
+				scale = (float)(1u << triangle->upscale_shift);
+				delta /= scale;
+				gl_adj_mismatch_pairs++;
+				gl_adj_delta_bins[pgxp_diag_edge_delta_bin(delta)]++;
+				gl_adj_delta_sum += delta;
+				if (delta > gl_adj_delta_max)
+					gl_adj_delta_max = delta;
+				material_same = previous->material_key ==
+					triangle->material_key;
+				gl_adj_material_pairs[material_same ? 1u : 0u]++;
+				gap = previous->packet > triangle->packet ?
+					previous->packet - triangle->packet :
+					triangle->packet - previous->packet;
+				packet_near = gap <= 64u;
+				gl_adj_packet_pairs[packet_near ? 1u : 0u]++;
+				gl_adj_packet_bins[pgxp_diag_edge_packet_bin(gap)]++;
+				uv_same = previous->u[0] == u0 && previous->v[0] == v0 &&
+					previous->u[1] == u1 && previous->v[1] == v1;
+				gl_adj_uv_pairs[uv_same ? 1u : 0u]++;
+				if (!pgxp_diag_gl_adj_policy(mode, material_same,
+						packet_near, uv_same))
+					continue;
+
+				gl_adj_shared_mask[start] |= (uint8_t)(1u << edge_index);
+				gl_adj_selected_pairs++;
+				gl_adj_selected_current++;
+				if (previous->generation == gl_adj_generation &&
+				    previous->triangle_start < gl_adj_mask_count)
+				{
+					gl_adj_shared_mask[previous->triangle_start] |=
+						(uint8_t)(1u << previous->edge);
+					gl_adj_selected_previous++;
+				}
+				else
+					gl_adj_selected_cross_buffer++;
+
+				if (log_cb &&
+				    gl_adj_samples < PGXP_DIAG_SUBMIT_SAMPLES &&
+				    gl_adj_window_samples < PGXP_DIAG_GL_WINDOW_SAMPLES)
+				{
+					log_cb(RETRO_LOG_INFO,
+						"[pgxp_gl_adjacency_edge] n=%u mf=%u mode=%u "
+						"prev=%llu curr=%llu native=%d/%d-%d/%d "
+						"prev_xy=%.6f/%.6f-%.6f/%.6f "
+						"curr_xy=%.6f/%.6f-%.6f/%.6f delta=%.6f "
+						"material=%u near=%u uv=%u gap=%llu cross_buffer=%u\n",
+						gl_adj_samples + 1, mode_frame, mode,
+						(unsigned long long)previous->packet,
+						(unsigned long long)triangle->packet,
+						x0, y0, x1, y1,
+						previous->precise_x[0] / scale,
+						previous->precise_y[0] / scale,
+						previous->precise_x[1] / scale,
+						previous->precise_y[1] / scale,
+						px0 / scale, py0 / scale, px1 / scale, py1 / scale,
+						delta, material_same, packet_near, uv_same,
+						(unsigned long long)gap,
+						previous->generation != gl_adj_generation);
+					gl_adj_samples++;
+					gl_adj_window_samples++;
+				}
+			}
+
+			if (gl_adj_edge_count >= PGXP_DIAG_GL_ADJ_EDGE_CAPACITY)
+			{
+				gl_adj_overflow++;
+				continue;
+			}
+			current = &gl_adj_edges[gl_adj_edge_count];
+			current->native_x[0] = x0;
+			current->native_y[0] = y0;
+			current->native_x[1] = x1;
+			current->native_y[1] = y1;
+			current->precise_x[0] = px0;
+			current->precise_y[0] = py0;
+			current->precise_x[1] = px1;
+			current->precise_y[1] = py1;
+			current->material_key = triangle->material_key;
+			current->packet = triangle->packet;
+			current->side = side;
+			current->triangle_start = start;
+			current->generation = gl_adj_generation;
+			current->u[0] = u0;
+			current->v[0] = v0;
+			current->u[1] = u1;
+			current->v[1] = v1;
+			current->edge = (uint8_t)edge_index;
+			current->upscale_shift = triangle->upscale_shift;
+			current->next = gl_adj_hash_heads[bucket];
+			gl_adj_hash_heads[bucket] = gl_adj_edge_count++;
+		}
+	}
+}
+
+unsigned PGXP_DiagGLSharedEdgeMask(unsigned triangle_start)
+{
+	return pgxp_diag_gl_mode_is_adjacency(gl_adj_mode) &&
+		triangle_start < gl_adj_mask_count ?
+		gl_adj_shared_mask[triangle_start] : 0u;
+}
+
 /* Repair T-junctions in the actual mapped OpenGL stream.  The long triangle
  * retains its PGXP coordinates; only the two vertices forming the matching
  * short boundary are projected onto it.  All decisions are buffered so a
@@ -3788,6 +4137,13 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 	if (pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode))
 	{
 		pgxp_diag_gl_native_handoff(vertices, count, stride_bytes,
+			gl_repair_mode);
+		pgxp_diag_gl_reset_stream();
+		return;
+	}
+	if (pgxp_diag_gl_mode_is_adjacency(gl_repair_mode))
+	{
+		pgxp_diag_gl_classify_adjacency(vertices, count, stride_bytes,
 			gl_repair_mode);
 		pgxp_diag_gl_reset_stream();
 		return;
@@ -6174,7 +6530,54 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)gl_repair_mode_mask[1],
 		gl_repair_mode > PGXP_DIAG_GL_TEST_OFF &&
 		(gl_repair_mode <= PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL ||
-		 pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode)));
+		 pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode) ||
+		 (pgxp_diag_gl_mode_is_adjacency(gl_repair_mode) &&
+		  PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE))));
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_gl_adjacency] f=%llu mode=%u name=%s enabled=%u "
+		"buffers=%llu triangles=%llu edges=%llu exact=%llu opposite=%llu "
+		"mismatch=%llu material=different/same:%llu/%llu "
+		"packet=far/near:%llu/%llu uv=different/same:%llu/%llu "
+		"selected=pairs/current/previous/cross_buffer:%llu/%llu/%llu/%llu "
+		"overflow=%llu delta=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+		"packet_bins=%llu/%llu/%llu/%llu/%llu/%llu mean=%.6f max=%.6f "
+		"samples=%u\n",
+		(unsigned long long)frame_number, gl_repair_mode,
+		pgxp_diag_gl_mode_name(gl_repair_mode),
+		PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ? 1u : 0u,
+		(unsigned long long)gl_adj_buffers,
+		(unsigned long long)gl_adj_triangles,
+		(unsigned long long)gl_adj_edges_seen,
+		(unsigned long long)gl_adj_exact_pairs,
+		(unsigned long long)gl_adj_opposite_pairs,
+		(unsigned long long)gl_adj_mismatch_pairs,
+		(unsigned long long)gl_adj_material_pairs[0],
+		(unsigned long long)gl_adj_material_pairs[1],
+		(unsigned long long)gl_adj_packet_pairs[0],
+		(unsigned long long)gl_adj_packet_pairs[1],
+		(unsigned long long)gl_adj_uv_pairs[0],
+		(unsigned long long)gl_adj_uv_pairs[1],
+		(unsigned long long)gl_adj_selected_pairs,
+		(unsigned long long)gl_adj_selected_current,
+		(unsigned long long)gl_adj_selected_previous,
+		(unsigned long long)gl_adj_selected_cross_buffer,
+		(unsigned long long)gl_adj_overflow,
+		(unsigned long long)gl_adj_delta_bins[0],
+		(unsigned long long)gl_adj_delta_bins[1],
+		(unsigned long long)gl_adj_delta_bins[2],
+		(unsigned long long)gl_adj_delta_bins[3],
+		(unsigned long long)gl_adj_delta_bins[4],
+		(unsigned long long)gl_adj_delta_bins[5],
+		(unsigned long long)gl_adj_delta_bins[6],
+		(unsigned long long)gl_adj_packet_bins[0],
+		(unsigned long long)gl_adj_packet_bins[1],
+		(unsigned long long)gl_adj_packet_bins[2],
+		(unsigned long long)gl_adj_packet_bins[3],
+		(unsigned long long)gl_adj_packet_bins[4],
+		(unsigned long long)gl_adj_packet_bins[5],
+		gl_adj_mismatch_pairs ? gl_adj_delta_sum /
+			(double)gl_adj_mismatch_pairs : 0.0,
+		gl_adj_delta_max, gl_adj_samples);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_gl_native_handoff] f=%llu mode=%u name=%s "
 		"triangles=%llu class=FT/FQ/GT/GQ:%llu/%llu/%llu/%llu "
