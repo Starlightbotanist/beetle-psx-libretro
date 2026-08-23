@@ -46,7 +46,8 @@ uniform uint force_zero;
 // Fragment diagnostic: 0 normal, 1 solid opaque-textured coverage,
 // 2 mark opaque-textured fragments that would discard a transparent texel,
 // 3 mark such discards only in coverage outside the original triangle,
-// 4 retain only fragments inside the CPU-selected mathematical triangle.
+// 4 retain only fragments inside the CPU-selected mathematical triangle,
+// 5 retain the baseline draw plus only the second copy's outside skirt.
 uniform uint coverage_probe;
 
 // 0: Only draw opaque pixels, 1: only draw semi-transparent pixels
@@ -95,6 +96,7 @@ flat in uvec2 frag_texture_page;
 in vec2 frag_texture_coord;
 // Original-triangle affine screen barycentrics, pre-multiplied by clip W.
 in vec2 frag_coverage_original_barycentric;
+flat in uint frag_coverage_preserve;
 // Clut coordinates in VRAM
 flat in uvec2 frag_clut;
 // 0: no texture, 1: raw-texture, 2: blended
@@ -1048,6 +1050,20 @@ void main() {
          coverage_barycentric.x - coverage_barycentric.y;
       if (min(min(coverage_barycentric.x, coverage_barycentric.y),
                coverage_barycentric_z) < -0.00001)
+         discard;
+   }
+
+   // Mode 88's first copy has coverage_preserve == 0 and follows the exact
+   // baseline shader path.  Its expanded second copy contributes only where
+   // its fragment lies outside the original mathematical triangle, forming
+   // a true coverage union without redrawing or replacing baseline pixels.
+   if (coverage_probe == 5U && frag_coverage_preserve != 0U) {
+      vec2 coverage_barycentric =
+         frag_coverage_original_barycentric * gl_FragCoord.w;
+      float coverage_barycentric_z = 1.0 -
+         coverage_barycentric.x - coverage_barycentric.y;
+      if (min(min(coverage_barycentric.x, coverage_barycentric.y),
+               coverage_barycentric_z) >= 0.0)
          discard;
    }
 

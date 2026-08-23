@@ -153,6 +153,9 @@ enum PGXP_diag_gl_test_mode
 	 * triangle or that triangle snapped to an 8-bit framebuffer grid. */
 	PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE,
 	PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE,
+	/* Preserve the ordinary GL draw, then add only the outside portion of a
+	 * second opaque, valid-W, surface-preserving coverage copy. */
+	PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

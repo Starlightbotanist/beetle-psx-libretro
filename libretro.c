@@ -4957,6 +4957,10 @@ static void check_variables(bool startup)
                   "coverage clip snap8 opaque") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE;
+         else if (strcmp(var.value,
+                  "coverage union skirt opaque") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

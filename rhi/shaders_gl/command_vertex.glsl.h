@@ -38,6 +38,7 @@ out vec4 frag_fog;
 flat out uvec2 frag_texture_page;
 out vec2 frag_texture_coord;
 out vec2 frag_coverage_original_barycentric;
+flat out uint frag_coverage_preserve;
 flat out uvec2 frag_clut;
 flat out uint frag_texture_blend_mode;
 flat out uint frag_depth_shift;
@@ -128,6 +129,7 @@ void main() {
    // fragment shader recovers their affine screen-space values exactly.
    frag_coverage_original_barycentric =
       coverage_original_barycentric * position.w;
+   frag_coverage_preserve = coverage_preserve;
 
    frag_texture_page = texture_page;
    frag_clut = clut;

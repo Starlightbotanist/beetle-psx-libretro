@@ -715,6 +715,9 @@ struct gl_command_vertex {
    /* Decoder provenance for renderer-side PGXP coverage handling.  This is
     * not a shader attribute: the CPU consumes it before unmapping. */
    uint8_t pgxp_valid_w;
+   /* CPU-only marker for mode 88's second copy.  The baseline copy remains
+    * byte-for-byte unchanged while expansion consumes only this one. */
+   uint8_t coverage_repair_copy;
    /* Diagnostic coverage expansion can move a vertex while preserving the
     * original homogeneous surface.  Integer PSX UV inputs cannot represent
     * the extrapolated coordinate, so this float sidecar becomes the shader
@@ -1168,6 +1171,7 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR:
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
@@ -1206,7 +1210,8 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1241,6 +1246,7 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE:
       case PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE:
          return 8.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR:
          return 4.0f;
@@ -1276,7 +1282,8 @@ static bool gl_pgxp_coverage_preserves_surface(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE;
 }
 
 /* Coverage can safely retain one geometry policy for ordinary opaque
@@ -1304,7 +1311,8 @@ static void gl_pgxp_coverage_class_config(unsigned mode, float raster_grid,
        mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
-       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
+       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
+       mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE)
    {
       epsilon[1] = 0.0f;
       vertex_cap[1] = 0.0f;
@@ -1366,6 +1374,8 @@ static unsigned gl_pgxp_texture_probe(unsigned mode)
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return 4u;
+   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE)
+      return 5u;
    return 0u;
 }
 
@@ -1382,6 +1392,8 @@ static const char *gl_pgxp_texture_probe_name(unsigned mode)
       return "original_triangle_inside_clip";
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return "snap8_triangle_inside_clip";
+   if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE)
+      return "baseline_plus_outside_skirt";
    return "off";
 }
 
@@ -1769,6 +1781,15 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, unsigned mode,
          bool valid_w;
          unsigned coverage_class;
          unsigned j;
+
+         /* Mode 88 interleaves an untouched baseline triangle with a second
+          * repair triangle.  Expanding only the marked copy makes coverage a
+          * union; the ordinary OpenGL raster set can no longer be removed. */
+         if (mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+             (!v[0].coverage_repair_copy ||
+              !v[1].coverage_repair_copy ||
+              !v[2].coverage_repair_copy))
+            continue;
 
          if (!v[0].texture_blend_mode || !v[1].texture_blend_mode ||
              !v[2].texture_blend_mode)
@@ -7991,6 +8012,17 @@ void rhi_gl_push_triangle(
       gl_vram_sync_primitive(renderer, v, 3);
       push_primitive(renderer, v, 3, GL_TRIANGLES,
             semi_transparency_mode, mask_test, set_mask);
+      if (PGXP_DiagGLGetMode() ==
+               PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+          gl_pgxp_geometry_active() && pgxp_valid_w &&
+          texture_blend_mode && !semi_transparent)
+      {
+         int _fi;
+         for (_fi = 0; _fi < 3; _fi++)
+            v[_fi].coverage_repair_copy = 1u;
+         push_primitive(renderer, v, 3, GL_TRIANGLES,
+               semi_transparency_mode, mask_test, set_mask);
+      }
    }
 }
 
@@ -8148,6 +8180,17 @@ void rhi_gl_push_quad(
          renderer->submission_quads++;
          push_primitive(renderer, expanded, 6, GL_TRIANGLES,
                semi_transparency_mode, mask_test, set_mask);
+         if (PGXP_DiagGLGetMode() ==
+                  PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE &&
+             gl_pgxp_geometry_active() && pgxp_valid_w &&
+             texture_blend_mode && !semi_transparent)
+         {
+            int _fi;
+            for (_fi = 0; _fi < 6; _fi++)
+               expanded[_fi].coverage_repair_copy = 1u;
+            push_primitive(renderer, expanded, 6, GL_TRIANGLES,
+                  semi_transparency_mode, mask_test, set_mask);
+         }
       }
    }
 }

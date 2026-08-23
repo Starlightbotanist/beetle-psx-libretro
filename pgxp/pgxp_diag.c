@@ -848,7 +848,8 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_preserve_cap4_opaque_four",
 		"coverage_preserve_cap2_opaque_four",
 		"coverage_clip_original_opaque",
-		"coverage_clip_snap8_opaque"
+		"coverage_clip_snap8_opaque",
+		"coverage_union_skirt_opaque"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
