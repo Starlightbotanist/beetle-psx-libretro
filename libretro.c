@@ -4949,6 +4949,14 @@ static void check_variables(bool startup)
                   "coverage preserve cap2 opaque four") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR;
+         else if (strcmp(var.value,
+                  "coverage clip original opaque") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE;
+         else if (strcmp(var.value,
+                  "coverage clip snap8 opaque") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

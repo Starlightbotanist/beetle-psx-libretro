@@ -45,7 +45,8 @@ uniform uint force_zero;
 
 // Fragment diagnostic: 0 normal, 1 solid opaque-textured coverage,
 // 2 mark opaque-textured fragments that would discard a transparent texel,
-// 3 mark such discards only in coverage outside the original triangle.
+// 3 mark such discards only in coverage outside the original triangle,
+// 4 retain only fragments inside the CPU-selected mathematical triangle.
 uniform uint coverage_probe;
 
 // 0: Only draw opaque pixels, 1: only draw semi-transparent pixels
@@ -1033,6 +1034,21 @@ void main() {
    if (force_zero != 0u) {
       frag_color = vec4(0.);
       return;
+   }
+
+   // Modes 86/87 expand fixed-function coverage only far enough to request
+   // candidate fragments.  Reject the outer skirt here using affine edge
+   // functions for either the original precise triangle or its 8-bit-snapped
+   // counterpart.  The small negative allowance is numerical slop, not a
+   // user-tuned coverage margin.
+   if (coverage_probe == 4U) {
+      vec2 coverage_barycentric =
+         frag_coverage_original_barycentric * gl_FragCoord.w;
+      float coverage_barycentric_z = 1.0 -
+         coverage_barycentric.x - coverage_barycentric.y;
+      if (min(min(coverage_barycentric.x, coverage_barycentric.y),
+               coverage_barycentric_z) < -0.00001)
+         discard;
    }
 
    // This returns before texture sampling, filtering, or transparency tests.

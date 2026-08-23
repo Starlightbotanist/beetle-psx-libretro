@@ -148,6 +148,11 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8_OPAQUE_THREE,
 	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR,
 	PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR,
+	/* Use expansion only to make candidate fragments available, then apply
+	 * an explicit fragment-stage inside test for either the original precise
+	 * triangle or that triangle snapped to an 8-bit framebuffer grid. */
+	PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE,
+	PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
