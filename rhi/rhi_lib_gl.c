@@ -715,7 +715,7 @@ struct gl_command_vertex {
    /* Decoder provenance for renderer-side PGXP coverage handling.  This is
     * not a shader attribute: the CPU consumes it before unmapping. */
    uint8_t pgxp_valid_w;
-   /* CPU-only marker for union modes 88-94's second copy.  The baseline copy
+   /* CPU-only marker for union modes 88-105's second copy. The baseline copy
     * remains byte-for-byte unchanged while expansion consumes only this one. */
    uint8_t coverage_repair_copy;
    /* Absolute command-stream vertex supplying native adjacency metadata for
@@ -1131,7 +1131,7 @@ typedef struct gl_renderer gl_renderer;
 static bool gl_pgxp_adjacency_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_ADJACENCY_MATERIAL_ONE &&
-      mode <= PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR;
+      mode <= PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1201,7 +1201,15 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR:
       case PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_LONG_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR:
          return 4.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT:
+      case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT:
+         /* One hardware subpixel of guard is added to the measured gap. */
+         return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_FIVE:
          return 5.0f;
       default:
@@ -1288,7 +1296,16 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR:
       case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR:
       case PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_LONG_ANY_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR:
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR:
          return 8.0f;
+      case PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT:
+      case PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT:
+         /* 1 subpixel * cap 32 retains mode 98's absolute movement bound
+          * (4 subpixels * cap 8) while allowing a gap-sized edge offset. */
+         return 32.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP4_OPAQUE_FOUR:
          return 4.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP2_OPAQUE_FOUR:
@@ -1875,11 +1892,12 @@ static bool gl_pgxp_preserve_surface_at(gl_renderer *renderer,
 /* Offset only selected triangle edge lines.  Unselected line equations stay
  * unchanged, so unmatched silhouettes do not receive mode 88's global
  * growth.  Each new vertex is the intersection of its two incident (possibly
- * offset) lines; the familiar cap-8 bound is then applied linearly to avoid
- * acute-corner spikes. */
+ * offset) lines; the mode-specific absolute movement bound is then applied
+ * linearly to avoid acute-corner spikes. */
 static bool gl_pgxp_expand_shared_edges(gl_renderer *renderer,
       gl_command_vertex *v, unsigned edge_mask, float epsilon,
-      float vertex_cap, unsigned coverage_class)
+      const float edge_expansion[3], float vertex_cap,
+      unsigned coverage_class)
 {
    float x[3];
    float y[3];
@@ -1889,6 +1907,7 @@ static bool gl_pgxp_expand_shared_edges(gl_renderer *renderer,
    float target_x[3];
    float target_y[3];
    float max_move = 0.0f;
+   float max_edge_epsilon = 0.0f;
    float cap_scale = 1.0f;
    unsigned i;
 
@@ -1903,6 +1922,7 @@ static bool gl_pgxp_expand_shared_edges(gl_renderer *renderer,
       float dy;
       float length;
       float third_side;
+      float edge_epsilon = 0.0f;
       x[i] = v[i].position[0];
       y[i] = v[i].position[1];
       if (!isfinite(x[i]) || !isfinite(y[i]))
@@ -1923,8 +1943,16 @@ static bool gl_pgxp_expand_shared_edges(gl_renderer *renderer,
          nx[i] = -nx[i];
          ny[i] = -ny[i];
       }
-      line_c[i] = nx[i] * x[i] + ny[i] * y[i] +
-         ((edge_mask & (1u << i)) ? epsilon : 0.0f);
+      if (edge_mask & (1u << i))
+      {
+         edge_epsilon = epsilon;
+         if (edge_expansion && isfinite(edge_expansion[i]) &&
+             edge_expansion[i] > 0.0f)
+            edge_epsilon += edge_expansion[i];
+         if (edge_epsilon > max_edge_epsilon)
+            max_edge_epsilon = edge_epsilon;
+      }
+      line_c[i] = nx[i] * x[i] + ny[i] * y[i] + edge_epsilon;
    }
 
    for (i = 0; i < 3u; i++)
@@ -1965,14 +1993,15 @@ static bool gl_pgxp_expand_shared_edges(gl_renderer *renderer,
    }
 
    renderer->pgxp_coverage_preserved++;
-   renderer->pgxp_coverage_edge_sum += (double)(epsilon * cap_scale);
+   renderer->pgxp_coverage_edge_sum +=
+      (double)(max_edge_epsilon * cap_scale);
    renderer->pgxp_coverage_class_edge_sum[coverage_class] +=
-      (double)(epsilon * cap_scale);
+      (double)(max_edge_epsilon * cap_scale);
    if (!renderer->pgxp_coverage_expanded ||
-       epsilon * cap_scale < renderer->pgxp_coverage_edge_min)
-      renderer->pgxp_coverage_edge_min = epsilon * cap_scale;
-   if (epsilon * cap_scale > renderer->pgxp_coverage_edge_max)
-      renderer->pgxp_coverage_edge_max = epsilon * cap_scale;
+       max_edge_epsilon * cap_scale < renderer->pgxp_coverage_edge_min)
+      renderer->pgxp_coverage_edge_min = max_edge_epsilon * cap_scale;
+   if (max_edge_epsilon * cap_scale > renderer->pgxp_coverage_edge_max)
+      renderer->pgxp_coverage_edge_max = max_edge_epsilon * cap_scale;
    for (i = 0; i < 3u; i++)
    {
       float move = hypotf(target_x[i] - x[i], target_y[i] - y[i]);
@@ -2146,14 +2175,19 @@ static void gl_pgxp_expand_coverage(gl_renderer *renderer, unsigned mode,
          {
             unsigned source = v[0].coverage_repair_source;
             unsigned edge_mask;
+            float edge_expansion[3];
             if (v[1].coverage_repair_source != source + 1u ||
                 v[2].coverage_repair_source != source + 2u)
                continue;
             edge_mask = PGXP_DiagGLSharedEdgeMask(source);
             if (!edge_mask)
                continue;
+            for (j = 0; j < 3u; j++)
+               edge_expansion[j] =
+                  PGXP_DiagGLSharedEdgeExpansion(source, j);
             gl_pgxp_expand_shared_edges(renderer, v, edge_mask,
-                  class_epsilon, class_vertex_cap, coverage_class);
+                  class_epsilon, edge_expansion, class_vertex_cap,
+                  coverage_class);
             continue;
          }
          max_move = max_radius * scale_delta;

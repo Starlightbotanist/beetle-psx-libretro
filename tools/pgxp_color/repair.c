@@ -579,6 +579,12 @@ static void test_partial_edge_adjacency(void)
 	static const float short_precise_consistent[3][2] = {
 		{ 5.0f, 0.0f }, { 0.0f, 0.0f }, { 5.0f, -5.0f }
 	};
+	static const float short_precise_overlap[3][2] = {
+		{ 5.0f, 0.125f }, { 0.0f, 0.125f }, { 5.0f, -5.0f }
+	};
+	static const float short_precise_mixed[3][2] = {
+		{ 5.0f, 0.125f }, { 0.0f, -0.125f }, { 5.0f, -5.0f }
+	};
 	static const int32_t short_same_side[3][2] = {
 		{ 5, 0 }, { 0, 0 }, { 5, 5 }
 	};
@@ -737,6 +743,129 @@ static void test_partial_edge_adjacency(void)
 		PGXP_DiagGLSharedEdgeMask(0), 1u);
 	expect_mask("vertical containment selects short",
 		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_LONG_ANY_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("long-only selects containing edge",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("long-only leaves contained edge clear",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("gap-only both selects long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("gap-only both selects short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR);
+	submit_triangle(&stream[0], diagonal_long_native,
+		diagonal_long_precise, 0x24);
+	submit_triangle(&stream[3], diagonal_short_native,
+		diagonal_short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("gap-only accepts diagonal long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("gap-only accepts diagonal short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR);
+	submit_triangle(&stream[0], vertical_long_native,
+		vertical_long_precise, 0x24);
+	submit_triangle(&stream[3], vertical_short_native,
+		vertical_short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("gap-only accepts vertical long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("gap-only accepts vertical short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("gap-only long selects containing edge",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("gap-only long leaves contained edge clear",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("overlap-only rejects true gap long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("overlap-only rejects true gap short",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native,
+		short_precise_overlap, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("overlap-only selects overlapping long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("overlap-only selects overlapping short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise_mixed, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("gap-only rejects mixed long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("gap-only rejects mixed short",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise_mixed, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("overlap-only rejects mixed long",
+		PGXP_DiagGLSharedEdgeMask(0), 0u);
+	expect_mask("overlap-only rejects mixed short",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("fitted both selects long",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("fitted both selects short",
+		PGXP_DiagGLSharedEdgeMask(3), 1u);
+	expect_near("fitted both long half-gap",
+		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.0625f);
+	expect_near("fitted both short half-gap",
+		PGXP_DiagGLSharedEdgeExpansion(3, 0), 0.0625f);
+	PGXP_DiagFrame(0);
+
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT);
+	submit_triangle(&stream[0], long_native, long_precise, 0x24);
+	submit_triangle(&stream[3], short_native, short_precise, 0x24);
+	PGXP_DiagGLRepair(stream, 6, (unsigned)sizeof(stream[0]));
+	expect_mask("fitted long selects containing edge",
+		PGXP_DiagGLSharedEdgeMask(0), 1u);
+	expect_mask("fitted long leaves contained edge clear",
+		PGXP_DiagGLSharedEdgeMask(3), 0u);
+	expect_near("fitted long uses full gap",
+		PGXP_DiagGLSharedEdgeExpansion(0, 0), 0.125f);
+	expect_near("fitted long contained has no expansion",
+		PGXP_DiagGLSharedEdgeExpansion(3, 0), 0.0f);
 	PGXP_DiagFrame(0);
 
 	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR);

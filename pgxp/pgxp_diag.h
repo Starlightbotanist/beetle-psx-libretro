@@ -176,6 +176,16 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_MATERIAL_FOUR,
 	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_ANY_FOUR,
 	PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR,
+	/* Split mode 98 by repaired side and by the recovered screen-space
+	 * relationship: a real empty gap, an existing overlap, or either.  The
+	 * final two modes size the skirt from the measured gap rather than using
+	 * the same four-subpixel width for every edge. */
+	PGXP_DIAG_GL_TEST_PARTIAL_LONG_ANY_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR,
+	PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT,
+	PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
@@ -244,6 +254,7 @@ void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
 void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		unsigned stride_bytes);
 unsigned PGXP_DiagGLSharedEdgeMask(unsigned triangle_start);
+float PGXP_DiagGLSharedEdgeExpansion(unsigned triangle_start, unsigned edge);
 void PGXP_DiagGLSetMode(unsigned mode);
 unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
@@ -312,6 +323,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagGLPrimitive(vertices, count, stride_bytes, material_key) ((void)0)
 #define PGXP_DiagGLRepair(vertices, count, stride_bytes) ((void)0)
 #define PGXP_DiagGLSharedEdgeMask(triangle_start) 0u
+#define PGXP_DiagGLSharedEdgeExpansion(triangle_start, edge) 0.0f
 #define PGXP_DiagGLSetMode(mode) ((void)0)
 #define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)

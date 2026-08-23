@@ -5043,6 +5043,24 @@ static void check_variables(bool startup)
          else if (strcmp(var.value, "overlap both any four") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_OVERLAP_BOTH_ANY_FOUR;
+         else if (strcmp(var.value, "partial long any four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_LONG_ANY_FOUR;
+         else if (strcmp(var.value, "partial both gap four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FOUR;
+         else if (strcmp(var.value, "partial long gap four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FOUR;
+         else if (strcmp(var.value, "partial both overlap four") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_OVERLAP_FOUR;
+         else if (strcmp(var.value, "partial both gap fit") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_BOTH_GAP_FIT;
+         else if (strcmp(var.value, "partial long gap fit") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_PARTIAL_LONG_GAP_FIT;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }
