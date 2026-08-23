@@ -865,7 +865,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage.",
+      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound.",
       NULL,
       "pgxp",
       {
@@ -943,6 +943,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "coverage preserve cap12", "71: GL Coverage + Preserve Surface (Cap 12x)" },
          { "coverage preserve cap14", "72: GL Coverage + Preserve Surface (Cap 14x)" },
          { "coverage preserve cap16", "73: GL Coverage + Preserve Surface (Cap 16x)" },
+         { "coverage preserve one max1", "74: GL Preserve Surface - 1 Subpixel (Mode 70 Max Move)" },
+         { "coverage preserve two max1", "75: GL Preserve Surface - 2 Subpixels (Mode 70 Max Move)" },
+         { "coverage preserve three max1", "76: GL Preserve Surface - 3 Subpixels (Mode 70 Max Move)" },
          { NULL, NULL },
       },
       "off"

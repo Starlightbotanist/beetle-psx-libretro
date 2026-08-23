@@ -1117,14 +1117,17 @@ static float gl_pgxp_coverage_subpixel_units(unsigned mode)
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_HALF:
          return 0.5f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_ONE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1:
          return 1.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_TWO_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_TWO:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1:
          return 2.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_THREE_CAP4:
       case PGXP_DIAG_GL_TEST_COVERAGE_VALID_W_THREE:
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1:
          return 3.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR:
       case PGXP_DIAG_GL_TEST_COVERAGE_EXPAND_FOUR_CAP4:
@@ -1164,7 +1167,10 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14 ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1;
 }
 
 static float gl_pgxp_coverage_vertex_cap(unsigned mode)
@@ -1191,6 +1197,12 @@ static float gl_pgxp_coverage_vertex_cap(unsigned mode)
          return 16.0f;
       case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8:
          return 8.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1:
+         return 32.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1:
+         return 16.0f;
+      case PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1:
+         return 32.0f / 3.0f;
       default:
          return gl_pgxp_coverage_subpixel_units(mode) > 0.0f ? 8.0f : 0.0f;
    }
@@ -1201,7 +1213,10 @@ static bool gl_pgxp_coverage_preserves_surface(unsigned mode)
    return mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP8 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP12 ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP14 ||
-      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16;
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_CAP16 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_ONE_MAX1 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_TWO_MAX1 ||
+      mode == PGXP_DIAG_GL_TEST_COVERAGE_PRESERVE_THREE_MAX1;
 }
 
 /* Scaling about the incenter multiplies every side length by

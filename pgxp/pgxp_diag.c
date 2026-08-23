@@ -834,7 +834,10 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"coverage_preserve_cap8",
 		"coverage_preserve_cap12",
 		"coverage_preserve_cap14",
-		"coverage_preserve_cap16"
+		"coverage_preserve_cap16",
+		"coverage_preserve_one_max1",
+		"coverage_preserve_two_max1",
+		"coverage_preserve_three_max1"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
