@@ -1571,13 +1571,13 @@ static bool context_is_valid(const struct Context *self) { return self->valid; }
    enum { VULKAN_NUM_VERTEX_ATTRIBS = 16 };
    enum { VULKAN_NUM_VERTEX_BUFFERS = 4 };
    enum { VULKAN_PUSH_CONSTANT_SIZE = 128 };
-   /* Grown from 8 for SpecConstIndex_PreciseColor (constant_id 8). Two
+   /* Grown through 10 for the focused textured-pipeline coverage probe. Two
     * places must agree on this number: RHI_SPIRV_NUM_SPEC_CONSTANTS in
     * rhi_spirv_reflect.h mirrors it, and a constant accepted here but
     * rejected there is silently never applied to any pipeline -- while a
     * constant set past this bound is an out-of-bounds write into the
     * static state. Both happened; keep them in step. */
-   enum { VULKAN_NUM_SPEC_CONSTANTS = 10 };
+   enum { VULKAN_NUM_SPEC_CONSTANTS = 11 };
 
    struct ImplementationWorkarounds
    {
@@ -5722,8 +5722,21 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
        * programs, which also declare 0..6. */
       SpecConstIndex_PreciseColor = 8,
       /* Linear-light depth cueing; rides the precise-colour vertex path. */
-      SpecConstIndex_PgxpFog = 9
+      SpecConstIndex_PgxpFog = 9,
+      /* Diagnostic-only early fragment return in the ordinary textured
+       * pipeline. Keeping the draw textured is essential: changing it to
+       * the flat queue also changes render-pass construction and ordering. */
+      SpecConstIndex_CoverageProbe = 10
    };
+
+#if PGXP_DIAG
+static bool pgxp_vk_solid_probe_enabled(void)
+{
+   return PGXP_DiagGLGetMode() ==
+         PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID &&
+      (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
+}
+#endif
 
    struct SaveState
    {
@@ -6030,6 +6043,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       /* Same omission and same fix as the opaque textured drain below. */
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
             (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+      commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+            SpecConstIndex_CoverageProbe, 0);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
@@ -6062,6 +6077,14 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
        * semi-transparent site. */
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
             (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+#if PGXP_DIAG
+      commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+            SpecConstIndex_CoverageProbe,
+            pgxp_vk_solid_probe_enabled() ? 1 : 0);
+#else
+      commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+            SpecConstIndex_CoverageProbe, 0);
+#endif
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
@@ -10461,6 +10484,11 @@ static void renderer_reset_queue(Renderer *self)
 
 static void renderer_semi_transparent_set_state(Renderer *self,
       const SemiTransparentState *state){
+   int coverage_probe = 0;
+#if PGXP_DIAG
+   coverage_probe = pgxp_vk_solid_probe_enabled() && state->textured &&
+      state->semi_transparent == SemiTransparentMode_None;
+#endif
    if (state->scaled_read)
    {
       if (self->msaa > 1)
@@ -10486,6 +10514,8 @@ static void renderer_semi_transparent_set_state(Renderer *self,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_pgxp_color : 0);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+         SpecConstIndex_CoverageProbe, coverage_probe);
    /* Only the feedback programs declare this; the pipeline hash masks it out
     * everywhere else. 1 = check-mask (historical behaviour), 0 = the routed
     * non-masked subtractive case. */
@@ -19578,35 +19608,14 @@ struct pgxp_vk_solid_stats
 
 static struct pgxp_vk_solid_stats pgxp_vk_solid;
 
-static bool pgxp_vk_solid_coverage_enabled(
-      uint8_t texture_blend_mode, int blend_mode)
+static void pgxp_vk_solid_note(unsigned count, bool quad)
 {
-   return PGXP_DiagGLGetMode() ==
-         PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID &&
-      (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0 &&
-      texture_blend_mode != 0 && blend_mode == -1;
-}
-
-static void pgxp_vk_solid_color(Vertex *vertices, unsigned count,
-      bool quad)
-{
-   unsigned i;
    pgxp_vk_solid.candidates++;
    pgxp_vk_solid.vertices += count;
    if (quad)
       pgxp_vk_solid.quads++;
    else
       pgxp_vk_solid.triangles++;
-   for (i = 0; i < count; i++)
-   {
-      vertices[i].cf[0] = 1.0f;
-      vertices[i].cf[1] = 0.0f;
-      vertices[i].cf[2] = 1.0f;
-      vertices[i].fog[0] = 0.0f;
-      vertices[i].fog[1] = 0.0f;
-      vertices[i].fog[2] = 0.0f;
-      vertices[i].fog[3] = 0.0f;
-   }
 }
 
 static void pgxp_vk_solid_finalize(void)
@@ -19622,7 +19631,8 @@ static void pgxp_vk_solid_finalize(void)
       log_cb(RETRO_LOG_INFO,
             "[pgxp_vk_solid_coverage] frames=%u "
             "candidates=%llu triangles=%llu quads=%llu vertices=%llu "
-            "texture_sampling=disabled color=magenta\n",
+            "texture_sampling=normal discard=bypassed "
+            "pipeline=textured color=magenta\n",
             pgxp_vk_solid.frames,
             (unsigned long long)pgxp_vk_solid.candidates,
             (unsigned long long)pgxp_vk_solid.triangles,
@@ -20132,25 +20142,24 @@ void rhi_vulkan_push_triangle(
       bool mask_test, bool set_mask,
       bool pgxp_valid_w)
 {
+#if PGXP_DIAG
    bool solid_coverage = false;
+#endif
    if (!renderer)
       return;
 
 #if PGXP_DIAG
-   solid_coverage = pgxp_vk_solid_coverage_enabled(
-         texture_blend_mode, blend_mode);
+   solid_coverage = pgxp_vk_solid_probe_enabled() &&
+      texture_blend_mode != 0 && blend_mode == -1;
 #endif
-   renderer->render_state.texture_color_modulate =
-      !solid_coverage && texture_blend_mode == 2;
-   renderer->render_state.primitive_dither =
-      solid_coverage ? false : dither;
+   renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
+   renderer->render_state.primitive_dither = dither;
    renderer_set_palette_offset(renderer, clut_x, clut_y);
    renderer_set_texture_offset(renderer, texpage_x, texpage_y);
    renderer->render_state.mask_test = mask_test;
    renderer->render_state.force_mask_bit = set_mask;
    renderer_set_UV_limits(renderer, min_u, min_v, max_u, max_v);
-   renderer_apply_texture_mode(renderer,
-         solid_coverage ? 0 : texture_blend_mode, depth_shift);
+   renderer_apply_texture_mode(renderer, texture_blend_mode, depth_shift);
 
    renderer_apply_blend_mode(renderer, blend_mode);
 
@@ -20169,7 +20178,7 @@ void rhi_vulkan_push_triangle(
       vertices_set_fog(vertices, 3, fog);
 #if PGXP_DIAG
       if (solid_coverage)
-         pgxp_vk_solid_color(vertices, 3, false);
+         pgxp_vk_solid_note(3, false);
 #endif
       renderer_draw_triangle(renderer, vertices);
    }
@@ -20199,25 +20208,24 @@ void rhi_vulkan_push_quad(
       bool pgxp_valid_w,
       bool is_sprite, bool may_be_2d)
 {
+#if PGXP_DIAG
    bool solid_coverage = false;
+#endif
    if (!renderer)
       return;
 
 #if PGXP_DIAG
-   solid_coverage = pgxp_vk_solid_coverage_enabled(
-         texture_blend_mode, blend_mode);
+   solid_coverage = pgxp_vk_solid_probe_enabled() &&
+      texture_blend_mode != 0 && blend_mode == -1;
 #endif
-   renderer->render_state.texture_color_modulate =
-      !solid_coverage && texture_blend_mode == 2;
-   renderer->render_state.primitive_dither =
-      solid_coverage ? false : dither;
+   renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
+   renderer->render_state.primitive_dither = dither;
    renderer_set_palette_offset(renderer, clut_x, clut_y);
    renderer_set_texture_offset(renderer, texpage_x, texpage_y);
    renderer->render_state.mask_test = mask_test;
    renderer->render_state.force_mask_bit = set_mask;
    renderer_set_UV_limits(renderer, min_u, min_v, max_u, max_v);
-   renderer_apply_texture_mode(renderer,
-         solid_coverage ? 0 : texture_blend_mode, depth_shift);
+   renderer_apply_texture_mode(renderer, texture_blend_mode, depth_shift);
 
    renderer_apply_blend_mode(renderer, blend_mode);
 
@@ -20243,7 +20251,7 @@ void rhi_vulkan_push_quad(
       vertices_set_fog(vertices, 4, fog);
 #if PGXP_DIAG
       if (solid_coverage)
-         pgxp_vk_solid_color(vertices, 4, true);
+         pgxp_vk_solid_note(4, true);
 #endif
       renderer_draw_quad(renderer, vertices);
    }

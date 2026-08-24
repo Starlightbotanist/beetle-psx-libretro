@@ -54,6 +54,12 @@ layout(constant_id = 8) const int PRECISE_COLOR = 0;
  * the fp16 target and when either option is off, so the pow() cost exists
  * only where the feature is live. */
 layout(constant_id = 9) const int PGXP_FOG = 0;
+#ifdef TEXTURED
+/* Diagnostic-only: retain the ordinary textured pipeline, queue, render pass
+ * and nearest texture fetch, but return before transparency/filtering can
+ * discard a generated fragment. */
+layout(constant_id = 10) const int COVERAGE_PROBE = 0;
+#endif
 layout(location = 6) in mediump vec4 vFog;
 
 #include "pgxp_fog.h"
@@ -75,6 +81,11 @@ void main()
 		NNColor = hdColor;
 	} else {
 		NNColor = sample_vram_atlas(clamp_coord(vUV));
+	}
+
+	if (COVERAGE_PROBE != 0) {
+		FragColor = vec4(1.0, 0.0, 1.0, NNColor.a + vColor.a);
+		return;
 	}
 
 	// Even for opaque draw calls, this pixel is transparent.

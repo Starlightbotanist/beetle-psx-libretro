@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Focused GL/Vulkan parity diagnostics for PGXP raster seams. Mode 156 removes texture sampling on both backends. Modes 157-158 test GL depth-counter lifetime. Modes 159-160 move GL draw-offset addition to the CPU, with mode 160 also using Vulkan's clip-expression order.",
+      "Focused GL/Vulkan PGXP coverage diagnostic. Mode 156 renders opaque textured fragments magenta before transparency discard. Vulkan retains its normal textured queue, shader pipeline, render pass, texture fetch, mask alpha, depth and scissor state.",
       NULL,
       "pgxp",
       {
@@ -1158,11 +1158,14 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "native union y 8bpp only", "154: Clamp-1 Repair - 8-bpp Texture Only" },
          { "native union y 16bpp only", "155: Clamp-1 Repair - 16-bpp Texture Only" },
 #endif
-         { "cross backend solid", "156: GL/Vulkan Solid Coverage Probe" },
+         { "cross backend solid", "156: GL/Vulkan Same-Pipeline Coverage" },
+#if 0
+         /* Completed backend-state probes remain implemented and parseable. */
          { "depth counter persist", "157: GL Counter Persists, Depth Clears Per Flush" },
          { "depth frame global", "158: GL Experimental Frame-Global Depth" },
          { "cpu draw offset", "159: GL CPU-Side Draw Offset" },
          { "cpu draw offset vulkan math", "160: GL CPU Offset + Vulkan Clip Math" },
+#endif
          { NULL, NULL },
       },
       "off"
