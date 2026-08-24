@@ -963,7 +963,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_stack_gl_coverage),
       "PGXP Stack H: OpenGL Coverage Repair",
       NULL,
-      "Ablation control for raster seam modes 88-121. Enabled adds the selected opaque valid-W outside repair skirt; disabled makes those modes render the ordinary baseline stream only.",
+      "Ablation control for raster seam modes 88-121 and 123-127. Enabled adds the selected opaque valid-W outside repair coverage; disabled makes those modes render the ordinary baseline stream only.",
       NULL,
       "pgxp",
       {
@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound; 77-79 separate opaque and semi-transparent coverage; 80-85 probe opaque skirts and cap/edge tradeoffs; 86-87 replace fixed coverage with mathematical inside tests; 88 preserves baseline coverage and adds an opaque repair skirt; 89-94 restrict that skirt to exact native shared edges; 95-99 target native-collinear partial edges and T-junctions; 100-105 split long edges, true gaps, existing overlaps, and measured-gap expansion; 106-110 vary bounded true-gap width and isolate mixed topology; 111-116 sweep overlap-only versus all partial topologies at one through three subpixels; 117-121 test recovered gaps between slightly offset parallel native edges.",
+      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound; 77-79 separate opaque and semi-transparent coverage; 80-85 probe opaque skirts and cap/edge tradeoffs; 86-87 replace fixed coverage with mathematical inside tests; 88 preserves baseline coverage and adds an opaque repair skirt; 89-94 restrict that skirt to exact native shared edges; 95-99 target native-collinear partial edges and T-junctions; 100-105 split long edges, true gaps, existing overlaps, and measured-gap expansion; 106-110 vary bounded true-gap width and isolate mixed topology; 111-116 sweep overlap-only versus all partial topologies at one through three subpixels; 117-121 test recovered gaps between slightly offset parallel native edges; 122 bypasses GL depth comparison; 123-127 add exact native-only outside coverage with bounded PGXP/native deltas.",
       NULL,
       "pgxp",
       {
@@ -1131,6 +1131,12 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "parallel gap fit one", "119: GL Parallel Gap Fit - Native Distance <= 1px" },
          { "parallel gap fit two", "120: GL Parallel Gap Fit - Native Distance <= 2px" },
          { "parallel gap four one", "121: GL Parallel Gap - Native Distance <= 1px, 4 Subpixels" },
+         { "depth always", "122: GL Depth Test ALWAYS (Negative Control)" },
+         { "native union all", "123: GL Baseline + Native Outside Coverage (All Deltas)" },
+         { "native union delta quarter", "124: GL Native Outside Coverage - Delta <= 0.25px" },
+         { "native union delta half", "125: GL Native Outside Coverage - Delta <= 0.5px" },
+         { "native union delta one", "126: GL Native Outside Coverage - Delta <= 1px" },
+         { "native union delta two", "127: GL Native Outside Coverage - Delta <= 2px" },
          { NULL, NULL },
       },
       "off"

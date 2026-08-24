@@ -215,6 +215,16 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_ONE,
 	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FIT_TWO,
 	PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE,
+	/* Fixed-function depth negative-control, followed by exact native-shape
+	 * coverage unions.  The latter retain the original PGXP triangle and add
+	 * only portions of its native-coordinate counterpart which rasterize
+	 * outside the original mathematical triangle. */
+	PGXP_DIAG_GL_TEST_DEPTH_ALWAYS,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_QUARTER,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_HALF,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_ONE,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 
@@ -284,6 +294,7 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 		unsigned stride_bytes);
 unsigned PGXP_DiagGLSharedEdgeMask(unsigned triangle_start);
 float PGXP_DiagGLSharedEdgeExpansion(unsigned triangle_start, unsigned edge);
+int PGXP_DiagGLNativePosition(unsigned index, float* x, float* y);
 void PGXP_DiagGLSetMode(unsigned mode);
 unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
@@ -354,6 +365,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagGLRepair(vertices, count, stride_bytes) ((void)0)
 #define PGXP_DiagGLSharedEdgeMask(triangle_start) 0u
 #define PGXP_DiagGLSharedEdgeExpansion(triangle_start, edge) 0.0f
+#define PGXP_DiagGLNativePosition(index, x, y) 0
 #define PGXP_DiagGLSetMode(mode) ((void)0)
 #define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)

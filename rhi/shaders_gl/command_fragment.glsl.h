@@ -1053,12 +1053,13 @@ void main() {
          discard;
    }
 
-   // Union modes 88-105's first copy has coverage_preserve == 0 and follows
+   // Union modes' first copy has coverage_preserve == 0 and follows
    // the exact baseline shader path.  Its expanded second copy contributes
    // only where its fragment lies outside the original mathematical
    // triangle, forming a true coverage union without redrawing or replacing
-   // baseline pixels. Modes 89-105 additionally restrict expansion to native
-   // exact or partially shared edges on the CPU before this test.
+   // baseline pixels. Edge modes restrict expansion through CPU adjacency;
+   // native-union modes instead reshape the repair copy to the exact native
+   // polygon while retaining this same outside-only mask.
    if (coverage_probe == 5U && frag_coverage_preserve != 0U) {
       vec2 coverage_barycentric =
          frag_coverage_original_barycentric * gl_FragCoord.w;

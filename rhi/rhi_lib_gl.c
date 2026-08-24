@@ -722,7 +722,7 @@ struct gl_command_vertex {
    /* Decoder provenance for renderer-side PGXP coverage handling.  This is
     * not a shader attribute: the CPU consumes it before unmapping. */
    uint8_t pgxp_valid_w;
-   /* CPU-only marker for union modes 88-121's second copy. The baseline copy
+   /* CPU-only marker for union modes 88-127's second copy. The baseline copy
     * remains byte-for-byte unchanged while expansion consumes only this one. */
    uint8_t coverage_repair_copy;
    /* Absolute command-stream vertex supplying native adjacency metadata for
@@ -1141,10 +1141,16 @@ static bool gl_pgxp_adjacency_mode(unsigned mode)
       mode <= PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE;
 }
 
+static bool gl_pgxp_native_union_mode(unsigned mode)
+{
+   return mode >= PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL &&
+      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO;
+}
+
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
 {
    return mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE ||
-      gl_pgxp_adjacency_mode(mode);
+      gl_pgxp_adjacency_mode(mode) || gl_pgxp_native_union_mode(mode);
 }
 
 static float gl_pgxp_coverage_subpixel_units(unsigned mode)
@@ -1274,6 +1280,7 @@ static bool gl_pgxp_coverage_requires_valid_w(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE ||
+      gl_pgxp_native_union_mode(mode) ||
       gl_pgxp_adjacency_mode(mode);
 }
 
@@ -1391,6 +1398,7 @@ static bool gl_pgxp_coverage_preserves_surface(unsigned mode)
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE ||
       mode == PGXP_DIAG_GL_TEST_COVERAGE_UNION_SKIRT_OPAQUE ||
+      gl_pgxp_native_union_mode(mode) ||
       gl_pgxp_adjacency_mode(mode);
 }
 
@@ -1501,6 +1509,9 @@ static const char *gl_pgxp_texture_probe_name(unsigned mode)
       return "original_triangle_inside_clip";
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return "snap8_triangle_inside_clip";
+   if (gl_pgxp_native_union_mode(mode))
+      return PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ?
+         "baseline_plus_native_outside" : "disabled_by_stack_toggle";
    if (gl_pgxp_coverage_union_mode(mode))
       return PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ?
          (gl_pgxp_adjacency_mode(mode) ?
@@ -1936,6 +1947,126 @@ static bool gl_pgxp_preserve_surface_at(gl_renderer *renderer,
          v[i].fog[c] = new_fog[i][c];
    }
    return true;
+}
+
+static float gl_pgxp_native_union_delta_limit(unsigned mode)
+{
+   switch (mode)
+   {
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_QUARTER:
+         return 0.25f;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_HALF:
+         return 0.5f;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_ONE:
+         return 1.0f;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO:
+         return 2.0f;
+      default:
+         return 0.0f;
+   }
+}
+
+/* Keep the ordinary PGXP triangle byte-for-byte intact, then reshape only
+ * its marked repair copy to the exact native polygon.  The preserved-surface
+ * barycentrics make the fragment shader discard the part still inside the
+ * original PGXP triangle, so the copy contributes only native coverage that
+ * PGXP lost.  This directly tests the known-positive mode-23 geometry without
+ * replacing its texture, colour, fog, W, or depth surface. */
+static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
+{
+   gl_command_vertex *vertices;
+   float delta_limit = gl_pgxp_native_union_delta_limit(mode);
+   size_t bi;
+
+   if (!renderer || !renderer->command_buffer->map ||
+       !gl_pgxp_native_union_mode(mode) ||
+       !PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ||
+       !gl_pgxp_geometry_active())
+      return;
+
+   vertices = (gl_command_vertex *)renderer->command_buffer->map;
+   for (bi = 0; bi < renderer->batches.count; bi++)
+   {
+      const struct gl_primitive_batch *batch = &renderer->batches.items[bi];
+      unsigned end;
+      unsigned i;
+
+      if (batch->draw_mode != GL_TRIANGLES || !batch->opaque)
+         continue;
+      if (batch->first > renderer->command_buffer->map_index ||
+          batch->count > renderer->command_buffer->map_index - batch->first)
+         continue;
+      end = batch->first + batch->count;
+      for (i = batch->first; i + 2u < end; i += 3u)
+      {
+         gl_command_vertex *v = &vertices[i];
+         float target_x[3];
+         float target_y[3];
+         float max_delta = 0.0f;
+         unsigned j;
+
+         if (!v[0].coverage_repair_copy ||
+             !v[1].coverage_repair_copy ||
+             !v[2].coverage_repair_copy)
+            continue;
+         renderer->pgxp_coverage_candidates++;
+         renderer->pgxp_coverage_class_seen[0]++;
+         renderer->pgxp_coverage_class_candidates[0]++;
+         for (j = 0; j < 3u; j++)
+         {
+            float dx;
+            float dy;
+            float delta;
+            if (!PGXP_DiagGLNativePosition(v[j].coverage_repair_source,
+                     &target_x[j], &target_y[j]))
+               break;
+            dx = target_x[j] - v[j].position[0];
+            dy = target_y[j] - v[j].position[1];
+            delta = hypotf(dx, dy);
+            if (!isfinite(delta))
+               break;
+            if (delta > max_delta)
+               max_delta = delta;
+         }
+         if (j != 3u)
+         {
+            renderer->pgxp_coverage_nonfinite++;
+            continue;
+         }
+         if (delta_limit > 0.0f && max_delta > delta_limit)
+            continue;
+         if (max_delta <= 1.0e-7f)
+            continue;
+         if (!gl_pgxp_preserve_surface_at(renderer, v, target_x, target_y))
+         {
+            renderer->pgxp_coverage_preserve_rejected++;
+            continue;
+         }
+         renderer->pgxp_coverage_preserved++;
+         renderer->pgxp_coverage_edge_sum += (double)max_delta;
+         renderer->pgxp_coverage_class_edge_sum[0] += (double)max_delta;
+         if (!renderer->pgxp_coverage_expanded ||
+             max_delta < renderer->pgxp_coverage_edge_min)
+            renderer->pgxp_coverage_edge_min = max_delta;
+         if (max_delta > renderer->pgxp_coverage_edge_max)
+            renderer->pgxp_coverage_edge_max = max_delta;
+         for (j = 0; j < 3u; j++)
+         {
+            float move = hypotf(target_x[j] - v[j].position[0],
+                  target_y[j] - v[j].position[1]);
+            v[j].position[0] = target_x[j];
+            v[j].position[1] = target_y[j];
+            renderer->pgxp_coverage_move_sum += (double)move;
+            renderer->pgxp_coverage_class_move_sum[0] += (double)move;
+            if (move > renderer->pgxp_coverage_move_max)
+               renderer->pgxp_coverage_move_max = move;
+            if (move > renderer->pgxp_coverage_class_move_max[0])
+               renderer->pgxp_coverage_class_move_max[0] = move;
+         }
+         renderer->pgxp_coverage_expanded++;
+         renderer->pgxp_coverage_class_expanded[0]++;
+      }
+   }
 }
 
 /* Offset only selected triangle edge lines.  Unselected line equations stay
@@ -4238,6 +4369,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
     * by default after the broad 3b1b8013 experiment proved screen-coordinate
     * coincidence alone is not safe mutation provenance. */
    PGXP_DiagGLRasterScale(renderer->internal_upscaling);
+   gl_pgxp_apply_native_union(renderer, raster_requested);
    PGXP_DiagGLRepair(renderer->command_buffer->map,
          (unsigned)renderer->command_buffer->map_index,
          (unsigned)sizeof(gl_command_vertex));
@@ -4252,7 +4384,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
       /* Standalone probes use the classifier for counts.  Combined
        * coverage+probe modes are already classified by expansion itself;
        * counting here as well would double the candidate total. */
-      if (texture_probe && subpixel_units <= 0.0f)
+      if (texture_probe && subpixel_units <= 0.0f &&
+          !gl_pgxp_native_union_mode(raster_requested))
          gl_pgxp_count_texture_probe(renderer);
       if (subpixel_units > 0.0f)
       {
@@ -4296,6 +4429,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
 
    {
       size_t bi;
+      bool depth_always =
+         raster_requested == PGXP_DIAG_GL_TEST_DEPTH_ALWAYS &&
+         gl_pgxp_geometry_active();
+      glDepthFunc(depth_always ? GL_ALWAYS : GL_LEQUAL);
       for (bi = 0; bi < renderer->batches.count; bi++)
       {
          struct gl_primitive_batch *it = &renderer->batches.items[bi];
@@ -4462,6 +4599,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
             gl_tt_image_release(renderer, hd_owned);
       }
       }
+      if (depth_always)
+         glDepthFunc(GL_LEQUAL);
    }
 
    glDisable(GL_STENCIL_TEST);
@@ -7694,7 +7833,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
          gl_pgxp_coverage_class_config(renderer->pgxp_coverage_mode, grid,
                class_epsilon, class_vertex_cap);
          log_cb(RETRO_LOG_INFO,
-               "[pgxp_gl_coverage] frames=%u mode=%u active=%u "
+               "[pgxp_gl_coverage] frames=%u mode=%u active=%u depth_func=%s "
                "texture_probe=%s subpixel_bits=%u scale=%u "
                "units=%.2f epsilon=%.9g vertex_cap=%.1f scale_cap=%.9g "
                "valid_w_gate=%u preserve_surface=%u "
@@ -7726,6 +7865,9 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                renderer->submission_frames,
                renderer->pgxp_coverage_mode,
                gl_pgxp_geometry_active() ? 1u : 0u,
+               renderer->pgxp_coverage_mode ==
+                     PGXP_DIAG_GL_TEST_DEPTH_ALWAYS &&
+                     gl_pgxp_geometry_active() ? "always" : "lequal",
                gl_pgxp_texture_probe_name(renderer->pgxp_coverage_mode),
                gl_caps.subpixel_bits, renderer->internal_upscaling,
                (double)units, units > 0.0f ? (double)(units / grid) : 0.0,
@@ -8303,7 +8445,7 @@ void rhi_gl_push_triangle(
 
    /* Keep the untouched triangle and its repair copy in one mapped stream so
     * adjacency masks can refer to the baseline by absolute vertex index. */
-   if (gl_pgxp_adjacency_mode(PGXP_DiagGLGetMode()) &&
+   if (gl_pgxp_coverage_union_mode(PGXP_DiagGLGetMode()) &&
        PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
        gl_pgxp_geometry_active() && pgxp_valid_w &&
        texture_blend_mode && blend_mode == -1 &&
@@ -8457,7 +8599,7 @@ void rhi_gl_push_quad(
 
    /* The six baseline vertices and six repair vertices must share one mapped
     * stream for exact source-index lookup. */
-   if (gl_pgxp_adjacency_mode(PGXP_DiagGLGetMode()) &&
+   if (gl_pgxp_coverage_union_mode(PGXP_DiagGLGetMode()) &&
        PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) &&
        gl_pgxp_geometry_active() && pgxp_valid_w &&
        texture_blend_mode && blend_mode == -1 &&

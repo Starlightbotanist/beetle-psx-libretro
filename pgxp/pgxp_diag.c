@@ -1008,7 +1008,9 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"partial_both_any_two", "partial_both_any_three",
 		"parallel_gap_fit_quarter", "parallel_gap_fit_half",
 		"parallel_gap_fit_one", "parallel_gap_fit_two",
-		"parallel_gap_four_one"
+		"parallel_gap_four_one", "depth_always", "native_union_all",
+		"native_union_delta_quarter", "native_union_delta_half",
+		"native_union_delta_one", "native_union_delta_two"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -4898,6 +4900,18 @@ float PGXP_DiagGLSharedEdgeExpansion(unsigned triangle_start, unsigned edge)
 	return pgxp_diag_gl_partial_fits_gap(gl_adj_mode) &&
 		triangle_start < gl_adj_mask_count && edge < 3u ?
 		gl_adj_shared_expansion[triangle_start][edge] : 0.0f;
+}
+
+/* Expose the lossless native-coordinate sidecar only while the matching GL
+ * command buffer is still mapped.  Repair copies point back to baseline
+ * indices, so this never guesses native coordinates from float positions. */
+int PGXP_DiagGLNativePosition(unsigned index, float* x, float* y)
+{
+	if (!x || !y || index >= gl_vertex_count || !gl_vertices[index].valid)
+		return 0;
+	*x = (float)gl_vertices[index].native_x;
+	*y = (float)gl_vertices[index].native_y;
+	return 1;
 }
 
 /* Repair T-junctions in the actual mapped OpenGL stream.  The long triangle

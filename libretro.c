@@ -5111,6 +5111,20 @@ static void check_variables(bool startup)
          else if (strcmp(var.value, "parallel gap four one") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_PARALLEL_GAP_FOUR_ONE;
+         else if (strcmp(var.value, "depth always") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_DEPTH_ALWAYS;
+         else if (strcmp(var.value, "native union all") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL;
+         else if (strcmp(var.value, "native union delta quarter") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_QUARTER;
+         else if (strcmp(var.value, "native union delta half") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_HALF;
+         else if (strcmp(var.value, "native union delta one") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_ONE;
+         else if (strcmp(var.value, "native union delta two") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }
