@@ -830,6 +830,10 @@ struct gl_primitive_batch {
     * Normal batching remains unchanged; mode 45 requests an extra split when
     * texturing changes so conservative raster cannot leak onto HUD/lines. */
    bool textured;
+   /* Synthetic coverage copies split from their baseline only in the depth
+    * ownership diagnostic so GL_LESS can make the union use actual baseline
+    * raster coverage rather than a high-precision mathematical proxy. */
+   bool coverage_repair;
    /* Drives the stencil write value for this batch.  Note that
     * vertex_add_blended_pass() forces this true for the second pass of a
     * textured semi-transparent primitive, so it is NOT a faithful copy of
@@ -1168,7 +1172,7 @@ static bool gl_pgxp_adjacency_mode(unsigned mode)
 static bool gl_pgxp_native_union_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL &&
-      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_FOUR;
+      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1514,6 +1518,10 @@ static unsigned gl_pgxp_texture_probe(unsigned mode)
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_ORIGINAL_OPAQUE ||
        mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return 4u;
+   if (mode == PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_REPAIR_MARKER)
+      return 6u;
+   if (mode == PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRANSPARENT_MARKER)
+      return 7u;
    if (gl_pgxp_coverage_union_mode(mode) &&
        PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE))
       return 5u;
@@ -1533,6 +1541,10 @@ static const char *gl_pgxp_texture_probe_name(unsigned mode)
       return "original_triangle_inside_clip";
    if (mode == PGXP_DIAG_GL_TEST_COVERAGE_CLIP_SNAP8_OPAQUE)
       return "snap8_triangle_inside_clip";
+   if (mode == PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_REPAIR_MARKER)
+      return "native_y_outside_repair_marker";
+   if (mode == PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRANSPARENT_MARKER)
+      return "native_y_transparent_repair_marker";
    if (gl_pgxp_native_union_mode(mode))
       return PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ?
          "baseline_plus_native_outside" : "disabled_by_stack_toggle";
@@ -2205,6 +2217,9 @@ static float gl_pgxp_native_surface_bary_clamp_limit(unsigned mode)
       case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_HALF:
          return 0.5f;
       case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_ONE:
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_REPAIR_MARKER:
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRANSPARENT_MARKER:
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP:
          return 1.0f;
       case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_TWO:
          return 2.0f;
@@ -4863,6 +4878,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
       bool depth_always =
          raster_requested == PGXP_DIAG_GL_TEST_DEPTH_ALWAYS &&
          gl_pgxp_geometry_active();
+      bool repair_depth_ownership =
+         raster_requested ==
+            PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP &&
+         gl_pgxp_geometry_active();
       glDepthFunc(depth_always ? GL_ALWAYS : GL_LEQUAL);
       for (bi = 0; bi < renderer->batches.count; bi++)
       {
@@ -4872,6 +4891,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
          GLenum blend_func = GL_FUNC_ADD;
          GLenum blend_src = GL_CONSTANT_ALPHA;
          GLenum blend_dst = GL_CONSTANT_ALPHA;
+
+         if (!depth_always)
+            glDepthFunc(repair_depth_ownership && it->coverage_repair ?
+                  GL_LESS : GL_LEQUAL);
 
          /* Mask bits */
          if (it->set_mask)
@@ -5030,7 +5053,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
             gl_tt_image_release(renderer, hd_owned);
       }
       }
-      if (depth_always)
+      if (depth_always || repair_depth_ownership)
          glDepthFunc(GL_LEQUAL);
    }
 
@@ -7023,12 +7046,18 @@ static void vertex_preprocessing(
    bool is_textured;
    bool is_opaque;
    bool buffer_full;
+   bool repair_depth_mode;
+   bool coverage_repair;
 
    if (!renderer)
       return;
 
    is_semi_transparent = v[0].semi_transparent == 1;
    is_textured         = v[0].texture_blend_mode != 0;
+   repair_depth_mode   =
+      PGXP_DiagGLGetMode() ==
+         PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP;
+   coverage_repair     = repair_depth_mode && v[0].coverage_repair_copy;
    /* Textured semi-transparent polys can contain opaque texels (when
     * bit 15 of the color is set to 0). Therefore they're drawn twice,
     * once for the opaque texels and once for the semi-transparent
@@ -7044,9 +7073,28 @@ static void vertex_preprocessing(
    }
 
    {
-      int16_t z = renderer->primitive_ordering;
+      float z;
       unsigned i;
-      renderer->primitive_ordering += 1;
+
+      /* A repair copy is part of the immediately preceding PS1 primitive,
+       * not a new painter-order command.  In mode 146, start ordinary
+       * primitives at ordering 1 so equal-depth repairs can use GL_LESS and
+       * still pass against the depth-clear value in genuinely empty pixels. */
+      if (repair_depth_mode)
+      {
+         if (coverage_repair)
+            z = (float)renderer->primitive_ordering;
+         else
+         {
+            z = (float)renderer->primitive_ordering + 1.0f;
+            renderer->primitive_ordering += 1;
+         }
+      }
+      else
+      {
+         z = (float)renderer->primitive_ordering;
+         renderer->primitive_ordering += 1;
+      }
 
       for (i = 0; i < count; i++)
       {
@@ -7076,6 +7124,8 @@ static void vertex_preprocessing(
            gl_pgxp_geometry_active() &&
            is_textured != renderer->batches.items[
               renderer->batches.count - 1u].textured)
+       || coverage_repair != renderer->batches.items[
+            renderer->batches.count - 1u].coverage_repair
        || (is_semi_transparent &&
            stm != renderer->semi_transparency_mode)
        || renderer->set_mask != set_mask
@@ -7092,6 +7142,7 @@ static void vertex_preprocessing(
       }
       batch.opaque = is_opaque;
       batch.textured = is_textured;
+      batch.coverage_repair = coverage_repair;
       batch.draw_mode = mode;
       batch.transparency_mode = stm;
       batch.set_mask = set_mask;
@@ -7124,6 +7175,7 @@ static void vertex_add_blended_pass(
 
       batch.opaque = false;
       batch.textured = last->textured;
+      batch.coverage_repair = last->coverage_repair;
       batch.draw_mode = last->draw_mode;
       batch.transparency_mode = last->transparency_mode;
       batch.set_mask = true;
@@ -8312,7 +8364,11 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                gl_pgxp_geometry_active() ? 1u : 0u,
                renderer->pgxp_coverage_mode ==
                      PGXP_DIAG_GL_TEST_DEPTH_ALWAYS &&
-                     gl_pgxp_geometry_active() ? "always" : "lequal",
+                     gl_pgxp_geometry_active() ? "always" :
+               (renderer->pgxp_coverage_mode ==
+                     PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP &&
+                     gl_pgxp_geometry_active() ?
+                        "lequal+repair_less" : "lequal"),
                gl_pgxp_texture_probe_name(renderer->pgxp_coverage_mode),
                gl_caps.subpixel_bits, renderer->internal_upscaling,
                (double)units, units > 0.0f ? (double)(units / grid) : 0.0,

@@ -1060,7 +1060,8 @@ void main() {
    // baseline pixels. Edge modes restrict expansion through CPU adjacency;
    // native-union modes instead reshape the repair copy to the exact native
    // polygon while retaining this same outside-only mask.
-   if (coverage_probe == 5U && frag_coverage_preserve != 0U) {
+   if ((coverage_probe == 5U || coverage_probe == 6U ||
+         coverage_probe == 7U) && frag_coverage_preserve != 0U) {
       vec2 coverage_barycentric =
          frag_coverage_original_barycentric * gl_FragCoord.w;
       float coverage_barycentric_z = 1.0 -
@@ -1068,6 +1069,13 @@ void main() {
       if (min(min(coverage_barycentric.x, coverage_barycentric.y),
                coverage_barycentric_z) >= 0.0)
          discard;
+   }
+
+   // Mark only the added outside portion of the repair copy. The ordinary
+   // PGXP triangle has coverage_preserve == 0 and remains untouched.
+   if (coverage_probe == 6U && frag_coverage_preserve != 0U) {
+      frag_color = vec4(1.0, 0.0, 1.0, float(force_mask_bit));
+      return;
    }
 
    // This returns before texture sampling, filtering, or transparency tests.
@@ -1167,6 +1175,13 @@ STRINGIZE(
             // neither can color a location lacking raster coverage.
             if ((coverage_probe == 2U ||
                   (coverage_probe == 3U && expanded_skirt)) &&
+                frag_semi_transparent == 0U) {
+               frag_color = vec4(1.0, 0.0, 1.0,
+                     float(force_mask_bit));
+               return;
+            }
+            if (coverage_probe == 7U &&
+                frag_coverage_preserve != 0U &&
                 frag_semi_transparent == 0U) {
                frag_color = vec4(1.0, 0.0, 1.0,
                      float(force_mask_bit));

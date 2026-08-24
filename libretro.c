@@ -5158,6 +5158,16 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_TWO;
          else if (strcmp(var.value, "native union y bary clamp four") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_FOUR;
+         else if (strcmp(var.value, "native union y repair marker") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_REPAIR_MARKER;
+         else if (strcmp(var.value,
+                  "native union y transparent marker") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRANSPARENT_MARKER;
+         else if (strcmp(var.value,
+                  "native union y depth ownership") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

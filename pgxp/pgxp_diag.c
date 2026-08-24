@@ -1020,7 +1020,10 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"native_union_y_bary_clamp_half",
 		"native_union_y_bary_clamp_one",
 		"native_union_y_bary_clamp_two",
-		"native_union_y_bary_clamp_four"
+		"native_union_y_bary_clamp_four",
+		"native_union_y_repair_marker",
+		"native_union_y_transparent_marker",
+		"native_union_y_depth_ownership"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

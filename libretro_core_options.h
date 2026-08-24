@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Focused diagnostic modes for PGXP OpenGL raster seams. Modes 135 and 138 are the best binary safety-gate references. Modes 140-143 continuously reduce unsafe Y repair movement to a barycentric bound rather than rejecting the entire repair triangle. Historical implementations remain in the diagnostic code but are hidden from this runtime list.",
+      "Focused diagnostic modes for PGXP OpenGL raster seams. Mode 141 is the continuous clamp reference. Modes 144/145 mark all outside repair fragments or only transparent repair texels. Mode 146 gives repair copies their baseline primitive's depth and accepts only fragments not already owned by that baseline. Original PGXP triangles remain unchanged.",
       NULL,
       "pgxp",
       {
@@ -1146,11 +1146,10 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "native union all", "123: Native Outside Union - XY, All Deltas (Unsafe Control)" },
          { "native union y all", "129: Native Outside Union - Y Only, All Deltas" },
          { "native union y bary one", "135: Y Union - Barycentric Excess <= 1.0" },
-         { "native union y uv sixteen", "138: Y Union - UV Extrapolation <= 16 Texels" },
-         { "native union y bary clamp half", "140: Y Union - Clamp Barycentric Excess to 0.5" },
          { "native union y bary clamp one", "141: Y Union - Clamp Barycentric Excess to 1.0" },
-         { "native union y bary clamp two", "142: Y Union - Clamp Barycentric Excess to 2.0" },
-         { "native union y bary clamp four", "143: Y Union - Clamp Barycentric Excess to 4.0" },
+         { "native union y repair marker", "144: Mark All Clamp-1 Outside Repair Fragments" },
+         { "native union y transparent marker", "145: Mark Transparent Clamp-1 Repair Texels" },
+         { "native union y depth ownership", "146: Clamp-1 Repair Only Where Baseline Depth Is Absent" },
          { NULL, NULL },
       },
       "off"
