@@ -5125,6 +5125,18 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_ONE;
          else if (strcmp(var.value, "native union delta two") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO;
+         else if (strcmp(var.value, "native union x all") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_X_ALL;
+         else if (strcmp(var.value, "native union y all") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_ALL;
+         else if (strcmp(var.value, "native union y delta one") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_ONE;
+         else if (strcmp(var.value, "native union y delta two") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_TWO;
+         else if (strcmp(var.value, "native union y tail two") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TAIL_TWO;
+         else if (strcmp(var.value, "native union y dominant") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

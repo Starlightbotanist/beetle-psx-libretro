@@ -225,6 +225,17 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_HALF,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_ONE,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO,
+	/* Mode 123 proved that restoring the exact native coverage envelope can
+	 * completely close R4's tunnel strips, but is far too broad globally.
+	 * Split that positive control by coordinate axis and displacement so the
+	 * smallest responsible subset can be identified without conflating it
+	 * with the already-rejected adjacency families. */
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_X_ALL,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_ALL,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_ONE,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_TWO,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TAIL_TWO,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

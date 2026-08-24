@@ -722,7 +722,7 @@ struct gl_command_vertex {
    /* Decoder provenance for renderer-side PGXP coverage handling.  This is
     * not a shader attribute: the CPU consumes it before unmapping. */
    uint8_t pgxp_valid_w;
-   /* CPU-only marker for union modes 88-127's second copy. The baseline copy
+   /* CPU-only marker for union modes 88+'s second copy. The baseline copy
     * remains byte-for-byte unchanged while expansion consumes only this one. */
    uint8_t coverage_repair_copy;
    /* Absolute command-stream vertex supplying native adjacency metadata for
@@ -1077,6 +1077,19 @@ struct gl_renderer {
    uint64_t pgxp_coverage_radius_bins[8];
    uint64_t pgxp_coverage_aspect_bins[8];
    uint64_t pgxp_coverage_desired_scale_bins[8];
+   /* Native-union diagnostics record the unmodified PGXP-to-native delta,
+    * independent of which axis a mode ultimately restores.  This lets one
+    * log distinguish a safe selector from a visually similar broad union. */
+   uint64_t pgxp_native_union_axis_samples;
+   double pgxp_native_union_axis_sum[2];
+   float pgxp_native_union_axis_max[2];
+   /* X-dominant, Y-dominant, and balanced at a 2:1 axis ratio. */
+   uint64_t pgxp_native_union_dominance[3];
+   /* Maximum 2D triangle delta: <=.25, <=.5, <=1, <=2, <=4, >4. */
+   uint64_t pgxp_native_union_delta_bins[6];
+   uint64_t pgxp_native_union_rejected_low;
+   uint64_t pgxp_native_union_rejected_high;
+   uint64_t pgxp_native_union_rejected_dominance;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -1144,7 +1157,7 @@ static bool gl_pgxp_adjacency_mode(unsigned mode)
 static bool gl_pgxp_native_union_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL &&
-      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO;
+      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1590,6 +1603,18 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
          sizeof(renderer->pgxp_coverage_aspect_bins));
    memset(renderer->pgxp_coverage_desired_scale_bins, 0,
          sizeof(renderer->pgxp_coverage_desired_scale_bins));
+   renderer->pgxp_native_union_axis_samples = 0;
+   memset(renderer->pgxp_native_union_axis_sum, 0,
+         sizeof(renderer->pgxp_native_union_axis_sum));
+   memset(renderer->pgxp_native_union_axis_max, 0,
+         sizeof(renderer->pgxp_native_union_axis_max));
+   memset(renderer->pgxp_native_union_dominance, 0,
+         sizeof(renderer->pgxp_native_union_dominance));
+   memset(renderer->pgxp_native_union_delta_bins, 0,
+         sizeof(renderer->pgxp_native_union_delta_bins));
+   renderer->pgxp_native_union_rejected_low = 0;
+   renderer->pgxp_native_union_rejected_high = 0;
+   renderer->pgxp_native_union_rejected_dominance = 0;
 }
 
 static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
@@ -1958,12 +1983,48 @@ static float gl_pgxp_native_union_delta_limit(unsigned mode)
       case PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_HALF:
          return 0.5f;
       case PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_ONE:
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_ONE:
          return 1.0f;
       case PGXP_DIAG_GL_TEST_NATIVE_UNION_DELTA_TWO:
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_TWO:
          return 2.0f;
       default:
          return 0.0f;
    }
+}
+
+static float gl_pgxp_native_union_delta_floor(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TAIL_TWO ? 2.0f : 0.0f;
+}
+
+static bool gl_pgxp_native_union_uses_x(unsigned mode)
+{
+   return mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_ALL &&
+      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_ONE &&
+      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_TWO &&
+      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TAIL_TWO &&
+      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT;
+}
+
+static bool gl_pgxp_native_union_uses_y(unsigned mode)
+{
+   return mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_X_ALL;
+}
+
+static bool gl_pgxp_native_union_requires_y_dominance(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT;
+}
+
+static unsigned gl_pgxp_native_union_delta_bin(float delta)
+{
+   static const float limits[5] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+   unsigned i;
+   for (i = 0; i < 5u; i++)
+      if (delta <= limits[i])
+         return i;
+   return 5u;
 }
 
 /* Keep the ordinary PGXP triangle byte-for-byte intact, then reshape only
@@ -1976,6 +2037,11 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
 {
    gl_command_vertex *vertices;
    float delta_limit = gl_pgxp_native_union_delta_limit(mode);
+   float delta_floor = gl_pgxp_native_union_delta_floor(mode);
+   bool use_x = gl_pgxp_native_union_uses_x(mode);
+   bool use_y = gl_pgxp_native_union_uses_y(mode);
+   bool require_y_dominance =
+      gl_pgxp_native_union_requires_y_dominance(mode);
    size_t bi;
 
    if (!renderer || !renderer->command_buffer->map ||
@@ -2000,9 +2066,17 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
       for (i = batch->first; i + 2u < end; i += 3u)
       {
          gl_command_vertex *v = &vertices[i];
+         float native_x[3];
+         float native_y[3];
+         float raw_dx[3];
+         float raw_dy[3];
          float target_x[3];
          float target_y[3];
+         float max_raw_dx = 0.0f;
+         float max_raw_dy = 0.0f;
+         float max_raw_delta = 0.0f;
          float max_delta = 0.0f;
+         unsigned dominance;
          unsigned j;
 
          if (!v[0].coverage_repair_copy ||
@@ -2014,17 +2088,30 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
          renderer->pgxp_coverage_class_candidates[0]++;
          for (j = 0; j < 3u; j++)
          {
-            float dx;
-            float dy;
+            float abs_dx;
+            float abs_dy;
+            float raw_delta;
             float delta;
             if (!PGXP_DiagGLNativePosition(v[j].coverage_repair_source,
-                     &target_x[j], &target_y[j]))
+                     &native_x[j], &native_y[j]))
                break;
-            dx = target_x[j] - v[j].position[0];
-            dy = target_y[j] - v[j].position[1];
-            delta = hypotf(dx, dy);
-            if (!isfinite(delta))
+            raw_dx[j] = native_x[j] - v[j].position[0];
+            raw_dy[j] = native_y[j] - v[j].position[1];
+            abs_dx = fabsf(raw_dx[j]);
+            abs_dy = fabsf(raw_dy[j]);
+            raw_delta = hypotf(raw_dx[j], raw_dy[j]);
+            if (!isfinite(raw_delta))
                break;
+            if (abs_dx > max_raw_dx)
+               max_raw_dx = abs_dx;
+            if (abs_dy > max_raw_dy)
+               max_raw_dy = abs_dy;
+            if (raw_delta > max_raw_delta)
+               max_raw_delta = raw_delta;
+            target_x[j] = use_x ? native_x[j] : v[j].position[0];
+            target_y[j] = use_y ? native_y[j] : v[j].position[1];
+            delta = hypotf(target_x[j] - v[j].position[0],
+                  target_y[j] - v[j].position[1]);
             if (delta > max_delta)
                max_delta = delta;
          }
@@ -2033,10 +2120,42 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
             renderer->pgxp_coverage_nonfinite++;
             continue;
          }
+         for (j = 0; j < 3u; j++)
+         {
+            float abs_dx = fabsf(raw_dx[j]);
+            float abs_dy = fabsf(raw_dy[j]);
+            renderer->pgxp_native_union_axis_sum[0] += (double)abs_dx;
+            renderer->pgxp_native_union_axis_sum[1] += (double)abs_dy;
+            if (abs_dx > renderer->pgxp_native_union_axis_max[0])
+               renderer->pgxp_native_union_axis_max[0] = abs_dx;
+            if (abs_dy > renderer->pgxp_native_union_axis_max[1])
+               renderer->pgxp_native_union_axis_max[1] = abs_dy;
+            renderer->pgxp_native_union_axis_samples++;
+         }
+         if (max_raw_dx >= 2.0f * max_raw_dy)
+            dominance = 0u;
+         else if (max_raw_dy >= 2.0f * max_raw_dx)
+            dominance = 1u;
+         else
+            dominance = 2u;
+         renderer->pgxp_native_union_dominance[dominance]++;
+         renderer->pgxp_native_union_delta_bins[
+               gl_pgxp_native_union_delta_bin(max_raw_delta)]++;
+         if (require_y_dominance && dominance != 1u)
+         {
+            renderer->pgxp_native_union_rejected_dominance++;
+            continue;
+         }
          if (delta_limit > 0.0f && max_delta > delta_limit)
+         {
+            renderer->pgxp_native_union_rejected_high++;
             continue;
-         if (max_delta <= 1.0e-7f)
+         }
+         if (max_delta <= delta_floor || max_delta <= 1.0e-7f)
+         {
+            renderer->pgxp_native_union_rejected_low++;
             continue;
+         }
          if (!gl_pgxp_preserve_surface_at(renderer, v, target_x, target_y))
          {
             renderer->pgxp_coverage_preserve_rejected++;
@@ -7854,6 +7973,12 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                "conservative_batches=%llu probe_triangles=ot/st/ut/mixed:"
                "%llu/%llu/%llu/%llu move_mean=%.9g move_max=%.9g "
                "edge_mean=%.9g edge_min=%.9g edge_max=%.9g "
+               "native_union=axis_samples/x_mean/x_max/y_mean/y_max:"
+               "%llu/%.9g/%.9g/%.9g/%.9g "
+               "dominance=x/y/balanced:%llu/%llu/%llu "
+               "delta2d=le.25/.5/1/2/4/gt4:"
+               "%llu/%llu/%llu/%llu/%llu/%llu "
+               "native_gate=low/high/dominance:%llu/%llu/%llu "
                "shape_bins=inradius_px:<.25/.5/1/2/4/8/16/inf:"
                "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
                "radius_px:<4/8/16/32/64/128/256/inf:"
@@ -7945,6 +8070,28 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                      (double)renderer->pgxp_coverage_expanded : 0.0,
                (double)renderer->pgxp_coverage_edge_min,
                (double)renderer->pgxp_coverage_edge_max,
+               (unsigned long long)renderer->pgxp_native_union_axis_samples,
+               renderer->pgxp_native_union_axis_samples ?
+                  renderer->pgxp_native_union_axis_sum[0] /
+                     (double)renderer->pgxp_native_union_axis_samples : 0.0,
+               (double)renderer->pgxp_native_union_axis_max[0],
+               renderer->pgxp_native_union_axis_samples ?
+                  renderer->pgxp_native_union_axis_sum[1] /
+                     (double)renderer->pgxp_native_union_axis_samples : 0.0,
+               (double)renderer->pgxp_native_union_axis_max[1],
+               (unsigned long long)renderer->pgxp_native_union_dominance[0],
+               (unsigned long long)renderer->pgxp_native_union_dominance[1],
+               (unsigned long long)renderer->pgxp_native_union_dominance[2],
+               (unsigned long long)renderer->pgxp_native_union_delta_bins[0],
+               (unsigned long long)renderer->pgxp_native_union_delta_bins[1],
+               (unsigned long long)renderer->pgxp_native_union_delta_bins[2],
+               (unsigned long long)renderer->pgxp_native_union_delta_bins[3],
+               (unsigned long long)renderer->pgxp_native_union_delta_bins[4],
+               (unsigned long long)renderer->pgxp_native_union_delta_bins[5],
+               (unsigned long long)renderer->pgxp_native_union_rejected_low,
+               (unsigned long long)renderer->pgxp_native_union_rejected_high,
+               (unsigned long long)
+                  renderer->pgxp_native_union_rejected_dominance,
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[0],
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[1],
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[2],

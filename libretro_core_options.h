@@ -963,7 +963,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_stack_gl_coverage),
       "PGXP Stack H: OpenGL Coverage Repair",
       NULL,
-      "Ablation control for raster seam modes 88-121 and 123-127. Enabled adds the selected opaque valid-W outside repair coverage; disabled makes those modes render the ordinary baseline stream only.",
+      "Ablation control for the OpenGL raster-seam repair modes. Enabled adds the selected opaque valid-W outside repair coverage; disabled makes those modes render the ordinary baseline stream only.",
       NULL,
       "pgxp",
       {
@@ -1005,11 +1005,16 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Diagnostic-build-only runtime experiments for PGXP raster seams. Modes 1-44 are completed geometry/coordinate probes; 45-49 test OpenGL coverage; 50-51 distinguish raster coverage from transparent texture discard; 52-61 compare expansion and absolute caps; 62-63 approximate a 4-bit input grid on Vulkan; 64-69 test relative-growth and intermediate-cap safety bounds; 70-73 preserve interpolation while expanding coverage; 74-76 minimize the preserved edge margin at mode 70's movement bound; 77-79 separate opaque and semi-transparent coverage; 80-85 probe opaque skirts and cap/edge tradeoffs; 86-87 replace fixed coverage with mathematical inside tests; 88 preserves baseline coverage and adds an opaque repair skirt; 89-94 restrict that skirt to exact native shared edges; 95-99 target native-collinear partial edges and T-junctions; 100-105 split long edges, true gaps, existing overlaps, and measured-gap expansion; 106-110 vary bounded true-gap width and isolate mixed topology; 111-116 sweep overlap-only versus all partial topologies at one through three subpixels; 117-121 test recovered gaps between slightly offset parallel native edges; 122 bypasses GL depth comparison; 123-127 add exact native-only outside coverage with bounded PGXP/native deltas.",
+      "Focused diagnostic modes for PGXP OpenGL raster seams. The list retains only baseline and important positive controls plus the exact-native union family. Modes 128-133 split mode 123 by X/Y axis, vertical displacement, and vertical dominance. Historical implementations remain in the diagnostic code but are hidden from this runtime list.",
       NULL,
       "pgxp",
       {
          { "off",                    "0: Off (Observe Only)" },
+#if 0
+         /* Completed probes are intentionally hidden from the runtime menu.
+          * RetroArch caps the number of values in one option; keeping their
+          * implementations and parsers preserves historical reproducibility
+          * without consuming the focused test suite's value budget. */
          { "native boundary",        "1: Native Boundary Control" },
          { "broad replay",           "2: Broad Projection Replay (Unsafe)" },
          { "native-t improved",      "3: Native-t Projection - Improved" },
@@ -1137,6 +1142,23 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "native union delta half", "125: GL Native Outside Coverage - Delta <= 0.5px" },
          { "native union delta one", "126: GL Native Outside Coverage - Delta <= 1px" },
          { "native union delta two", "127: GL Native Outside Coverage - Delta <= 2px" },
+#endif
+         { "native ot all",         "23: Native XY Replacement (Broad Control)" },
+         { "native ot y",           "29: Native Y Replacement (Broad Control)" },
+         { "coverage preserve cap8", "70: Uniform Outside Expansion (Control)" },
+         { "coverage union skirt opaque", "88: Outside Repair Skirt (Control)" },
+         { "partial both any four", "98: Partial-Adjacency Repair (Control)" },
+         { "native union all", "123: Native Outside Union - XY, All Deltas (Unsafe Control)" },
+         { "native union delta quarter", "124: Native Outside Union - XY <= 0.25px" },
+         { "native union delta half", "125: Native Outside Union - XY <= 0.5px" },
+         { "native union delta one", "126: Native Outside Union - XY <= 1px" },
+         { "native union delta two", "127: Native Outside Union - XY <= 2px" },
+         { "native union x all", "128: Native Outside Union - X Only, All Deltas" },
+         { "native union y all", "129: Native Outside Union - Y Only, All Deltas" },
+         { "native union y delta one", "130: Native Outside Union - Y Only <= 1px" },
+         { "native union y delta two", "131: Native Outside Union - Y Only <= 2px" },
+         { "native union y tail two", "132: Native Outside Union - Y Only > 2px" },
+         { "native union y dominant", "133: Native Outside Union - Y Only, Y-Dominant" },
          { NULL, NULL },
       },
       "off"

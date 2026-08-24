@@ -809,10 +809,10 @@ static uint32_t gl_native_samples;
 static uint32_t gl_native_window_samples;
 static unsigned gl_repair_mode = PGXP_DIAG_GL_REPAIR_APPLY ?
 	PGXP_DIAG_GL_TEST_BROAD_REPLAY : PGXP_DIAG_GL_TEST_OFF;
-static uint64_t gl_repair_mode_mask[2];
+static uint64_t gl_repair_mode_mask[3];
 /* gl_repair_mode_mask records every selected runtime mode by bit index. */
-typedef char pgxp_diag_gl_mode_mask_must_fit_u128[
-	PGXP_DIAG_GL_TEST_COUNT <= 128 ? 1 : -1];
+typedef char pgxp_diag_gl_mode_mask_must_fit_u192[
+	PGXP_DIAG_GL_TEST_COUNT <= 192 ? 1 : -1];
 static int gpu_quad_native_sign;
 static int gpu_quad_precise_sign;
 static int gpu_quad_invalid_w;
@@ -1010,7 +1010,10 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"parallel_gap_fit_one", "parallel_gap_fit_two",
 		"parallel_gap_four_one", "depth_always", "native_union_all",
 		"native_union_delta_quarter", "native_union_delta_half",
-		"native_union_delta_one", "native_union_delta_two"
+		"native_union_delta_one", "native_union_delta_two",
+		"native_union_x_all", "native_union_y_all",
+		"native_union_y_delta_one", "native_union_y_delta_two",
+		"native_union_y_tail_two", "native_union_y_dominant"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -7332,7 +7335,7 @@ void PGXP_DiagFrame(int backend)
 		"candidates=%llu gate=invalid_w/movement/pair_overflow=%llu/%llu/%llu "
 		"proposals=%llu consistent=%llu conflicts=%llu "
 		"atomic_pairs=%llu would_move=%llu applied=%llu mean=%.6f max=%.6f "
-		"mode=%u name=%s mask=%016llx/%016llx apply=%u\n",
+		"mode=%u name=%s mask=%016llx/%016llx/%016llx apply=%u\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)gl_repair_buffers,
 		(unsigned long long)gl_repair_vertices,
@@ -7364,6 +7367,7 @@ void PGXP_DiagFrame(int backend)
 		pgxp_diag_gl_mode_name(gl_repair_mode),
 		(unsigned long long)gl_repair_mode_mask[0],
 		(unsigned long long)gl_repair_mode_mask[1],
+		(unsigned long long)gl_repair_mode_mask[2],
 		gl_repair_mode > PGXP_DIAG_GL_TEST_OFF &&
 		(gl_repair_mode <= PGXP_DIAG_GL_TEST_PERP_CLOSED_MATERIAL ||
 		 pgxp_diag_gl_mode_is_native_handoff(gl_repair_mode) ||
