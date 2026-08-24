@@ -281,6 +281,11 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_DEPTH_FRAME_GLOBAL,
 	PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET,
 	PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET_VULKAN_MATH,
+	/* Vulkan-only follow-up to the cross-backend solid probe.  Keep every
+	 * primitive in its ordinary queue and shader family while first marking
+	 * all classes uniformly, then marking their ownership independently. */
+	PGXP_DIAG_GL_TEST_VK_ALL_PRIMITIVE_SOLID,
+	PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

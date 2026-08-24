@@ -5730,10 +5730,46 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    };
 
 #if PGXP_DIAG
-static bool pgxp_vk_solid_probe_enabled(void)
+enum
 {
-   return PGXP_DiagGLGetMode() ==
-         PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID &&
+   PgxpVkProbe_Off = 0,
+   PgxpVkProbe_OpaqueTextured = 1,
+   PgxpVkProbe_SemiTextured = 2,
+   PgxpVkProbe_OpaqueFlat = 3,
+   PgxpVkProbe_SemiFlat = 4,
+   PgxpVkProbe_AllMagenta = 5
+};
+
+static int pgxp_vk_coverage_probe_value(bool textured, bool semi_transparent)
+{
+   unsigned mode;
+
+   if ((PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) == 0)
+      return PgxpVkProbe_Off;
+
+   mode = PGXP_DiagGLGetMode();
+   if (mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID)
+      return textured && !semi_transparent ?
+         PgxpVkProbe_OpaqueTextured : PgxpVkProbe_Off;
+   if (mode == PGXP_DIAG_GL_TEST_VK_ALL_PRIMITIVE_SOLID)
+      return PgxpVkProbe_AllMagenta;
+   if (mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP)
+   {
+      if (textured)
+         return semi_transparent ? PgxpVkProbe_SemiTextured :
+            PgxpVkProbe_OpaqueTextured;
+      return semi_transparent ? PgxpVkProbe_SemiFlat :
+         PgxpVkProbe_OpaqueFlat;
+   }
+   return PgxpVkProbe_Off;
+}
+
+static bool pgxp_vk_coverage_probe_enabled(void)
+{
+   unsigned mode = PGXP_DiagGLGetMode();
+   return (mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID ||
+         mode == PGXP_DIAG_GL_TEST_VK_ALL_PRIMITIVE_SOLID ||
+         mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP) &&
       (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
 }
 #endif
@@ -6043,8 +6079,14 @@ static bool pgxp_vk_solid_probe_enabled(void)
       /* Same omission and same fix as the opaque textured drain below. */
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
             (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+#if PGXP_DIAG
+      commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+            SpecConstIndex_CoverageProbe,
+            pgxp_vk_coverage_probe_value(true, true));
+#else
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
             SpecConstIndex_CoverageProbe, 0);
+#endif
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
@@ -6080,7 +6122,7 @@ static bool pgxp_vk_solid_probe_enabled(void)
 #if PGXP_DIAG
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
             SpecConstIndex_CoverageProbe,
-            pgxp_vk_solid_probe_enabled() ? 1 : 0);
+            pgxp_vk_coverage_probe_value(true, false));
 #else
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
             SpecConstIndex_CoverageProbe, 0);
@@ -9766,6 +9808,14 @@ static void renderer_render_opaque_primitives(Renderer *self){
     * the pre-cue colour raw. */
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+#if PGXP_DIAG
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+         SpecConstIndex_CoverageProbe,
+         pgxp_vk_coverage_probe_value(false, false));
+#else
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+         SpecConstIndex_CoverageProbe, 0);
+#endif
    commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
 
    renderer_dispatch(self, vertices, scissors, false);
@@ -10486,8 +10536,8 @@ static void renderer_semi_transparent_set_state(Renderer *self,
       const SemiTransparentState *state){
    int coverage_probe = 0;
 #if PGXP_DIAG
-   coverage_probe = pgxp_vk_solid_probe_enabled() && state->textured &&
-      state->semi_transparent == SemiTransparentMode_None;
+   coverage_probe = pgxp_vk_coverage_probe_value(state->textured,
+         state->semi_transparent != SemiTransparentMode_None);
 #endif
    if (state->scaled_read)
    {
@@ -19599,46 +19649,74 @@ static ScanoutMode get_scanout_mode(bool bpp24)
 #if PGXP_DIAG
 struct pgxp_vk_solid_stats
 {
+   unsigned mode;
    unsigned frames;
-   uint64_t candidates;
+   uint64_t primitives[4];
+   uint64_t vertices[4];
    uint64_t triangles;
    uint64_t quads;
-   uint64_t vertices;
+   uint64_t lines;
 };
 
 static struct pgxp_vk_solid_stats pgxp_vk_solid;
 
-static void pgxp_vk_solid_note(unsigned count, bool quad)
+static void pgxp_vk_solid_note(unsigned count, unsigned shape,
+      bool textured, bool semi_transparent)
 {
-   pgxp_vk_solid.candidates++;
-   pgxp_vk_solid.vertices += count;
-   if (quad)
+   unsigned class_index = textured ? (semi_transparent ? 1u : 0u) :
+      (semi_transparent ? 3u : 2u);
+
+   pgxp_vk_solid.primitives[class_index]++;
+   pgxp_vk_solid.vertices[class_index] += count;
+   if (shape == 1u)
       pgxp_vk_solid.quads++;
+   else if (shape == 2u)
+      pgxp_vk_solid.lines++;
    else
       pgxp_vk_solid.triangles++;
 }
 
 static void pgxp_vk_solid_finalize(void)
 {
-   if (PGXP_DiagGLGetMode() != PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID)
+   unsigned mode = PGXP_DiagGLGetMode();
+
+   if (!pgxp_vk_coverage_probe_enabled())
    {
       memset(&pgxp_vk_solid, 0, sizeof(pgxp_vk_solid));
       return;
+   }
+   if (pgxp_vk_solid.mode != mode)
+   {
+      memset(&pgxp_vk_solid, 0, sizeof(pgxp_vk_solid));
+      pgxp_vk_solid.mode = mode;
    }
    if (++pgxp_vk_solid.frames < 60u)
       return;
    if (log_cb)
       log_cb(RETRO_LOG_INFO,
-            "[pgxp_vk_solid_coverage] frames=%u "
-            "candidates=%llu triangles=%llu quads=%llu vertices=%llu "
-            "texture_sampling=normal discard=bypassed "
-            "pipeline=textured color=magenta\n",
+            "[pgxp_vk_coverage_probe] mode=%u frames=%u "
+            "primitive_class=opaque_textured/semi_textured/opaque_flat/semi_flat:"
+            "%llu/%llu/%llu/%llu "
+            "vertices=%llu/%llu/%llu/%llu "
+            "shape=triangles/quads/lines:%llu/%llu/%llu "
+            "queues=retained shaders=retained discard=bypassed color=%s\n",
+            mode,
             pgxp_vk_solid.frames,
-            (unsigned long long)pgxp_vk_solid.candidates,
+            (unsigned long long)pgxp_vk_solid.primitives[0],
+            (unsigned long long)pgxp_vk_solid.primitives[1],
+            (unsigned long long)pgxp_vk_solid.primitives[2],
+            (unsigned long long)pgxp_vk_solid.primitives[3],
+            (unsigned long long)pgxp_vk_solid.vertices[0],
+            (unsigned long long)pgxp_vk_solid.vertices[1],
+            (unsigned long long)pgxp_vk_solid.vertices[2],
+            (unsigned long long)pgxp_vk_solid.vertices[3],
             (unsigned long long)pgxp_vk_solid.triangles,
             (unsigned long long)pgxp_vk_solid.quads,
-            (unsigned long long)pgxp_vk_solid.vertices);
+            (unsigned long long)pgxp_vk_solid.lines,
+            mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP ?
+               "by_class" : "magenta");
    memset(&pgxp_vk_solid, 0, sizeof(pgxp_vk_solid));
+   pgxp_vk_solid.mode = mode;
 }
 
 struct pgxp_vk_snap_stats
@@ -20144,13 +20222,15 @@ void rhi_vulkan_push_triangle(
 {
 #if PGXP_DIAG
    bool solid_coverage = false;
+   bool probe_textured = texture_blend_mode != 0;
+   bool probe_semi = blend_mode != -1;
 #endif
    if (!renderer)
       return;
 
 #if PGXP_DIAG
-   solid_coverage = pgxp_vk_solid_probe_enabled() &&
-      texture_blend_mode != 0 && blend_mode == -1;
+   solid_coverage = pgxp_vk_coverage_probe_value(
+         probe_textured, probe_semi) != PgxpVkProbe_Off;
 #endif
    renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
    renderer->render_state.primitive_dither = dither;
@@ -20178,7 +20258,7 @@ void rhi_vulkan_push_triangle(
       vertices_set_fog(vertices, 3, fog);
 #if PGXP_DIAG
       if (solid_coverage)
-         pgxp_vk_solid_note(3, false);
+         pgxp_vk_solid_note(3, 0, probe_textured, probe_semi);
 #endif
       renderer_draw_triangle(renderer, vertices);
    }
@@ -20210,13 +20290,15 @@ void rhi_vulkan_push_quad(
 {
 #if PGXP_DIAG
    bool solid_coverage = false;
+   bool probe_textured = texture_blend_mode != 0;
+   bool probe_semi = blend_mode != -1;
 #endif
    if (!renderer)
       return;
 
 #if PGXP_DIAG
-   solid_coverage = pgxp_vk_solid_probe_enabled() &&
-      texture_blend_mode != 0 && blend_mode == -1;
+   solid_coverage = pgxp_vk_coverage_probe_value(
+         probe_textured, probe_semi) != PgxpVkProbe_Off;
 #endif
    renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
    renderer->render_state.primitive_dither = dither;
@@ -20251,7 +20333,7 @@ void rhi_vulkan_push_quad(
       vertices_set_fog(vertices, 4, fog);
 #if PGXP_DIAG
       if (solid_coverage)
-         pgxp_vk_solid_note(4, true);
+         pgxp_vk_solid_note(4, 1, probe_textured, probe_semi);
 #endif
       renderer_draw_quad(renderer, vertices);
    }
@@ -20268,6 +20350,12 @@ void rhi_vulkan_push_line(
 {
    if (!renderer)
       return;
+
+#if PGXP_DIAG
+   if (pgxp_vk_coverage_probe_value(false, blend_mode != -1) !=
+         PgxpVkProbe_Off)
+      pgxp_vk_solid_note(2, 2, false, blend_mode != -1);
+#endif
 
    renderer->render_state.texture_mode = TextureMode_None;
    fbatlas_set_texture_mode(&renderer->atlas, TextureMode_None);

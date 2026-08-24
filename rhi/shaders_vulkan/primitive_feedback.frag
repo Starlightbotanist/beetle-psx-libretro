@@ -35,15 +35,23 @@ layout(constant_id = 7) const int MASK_TEST = 1;
  * the fog sidecar hits, so every program that shades with vColor must run
  * the same mix or it un-fogs the primitive. */
 layout(constant_id = 9) const int PGXP_FOG = 0;
+/* Same values as primitive.frag.  Declaring the probe here is essential for
+ * masked and programmable-blend draws, which use this separate shader family. */
+layout(constant_id = 10) const int COVERAGE_PROBE = 0;
 layout(location = 6) in mediump vec4 vFog;
 #include "pgxp_fog.h"
 
+#define COVERAGE_PROBE_COLOR \
+	(COVERAGE_PROBE == 2 ? vec3(0.0, 1.0, 1.0) : \
+	 COVERAGE_PROBE == 3 ? vec3(1.0, 1.0, 0.0) : \
+	 COVERAGE_PROBE == 4 ? vec3(0.0, 1.0, 0.0) : \
+	 vec3(1.0, 0.0, 1.0))
 
 void main()
 {
 #ifdef TEXTURED
 	vec4 NNColor = sample_vram_atlas(clamp_coord(vUV));
-	if (all(equal(NNColor, vec4(0.0))))
+	if (COVERAGE_PROBE == 0 && all(equal(NNColor, vec4(0.0))))
 		discard;
 
 	vec4 color = NNColor;
@@ -67,6 +75,15 @@ void main()
 
 	if (MASK_TEST != 0 && fbcolor.a > 0.5)
 		discard;
+
+	if (COVERAGE_PROBE != 0) {
+#ifdef TEXTURED
+		FragColor = vec4(COVERAGE_PROBE_COLOR, NNColor.a + vColor.a);
+#else
+		FragColor = vec4(COVERAGE_PROBE_COLOR, vColor.a);
+#endif
+		return;
+	}
 
 	vec3 blended;
 	if (BLEND_MODE == BLEND_ADD)

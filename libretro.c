@@ -5210,6 +5210,12 @@ static void check_variables(bool startup)
                   "cpu draw offset vulkan math") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET_VULKAN_MATH;
+         else if (strcmp(var.value,
+                  "vulkan all primitive solid") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_VK_ALL_PRIMITIVE_SOLID;
+         else if (strcmp(var.value,
+                  "vulkan primitive ownership") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

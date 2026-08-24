@@ -54,15 +54,20 @@ layout(constant_id = 8) const int PRECISE_COLOR = 0;
  * the fp16 target and when either option is off, so the pow() cost exists
  * only where the feature is live. */
 layout(constant_id = 9) const int PGXP_FOG = 0;
-#ifdef TEXTURED
 /* Diagnostic-only: retain the ordinary textured pipeline, queue, render pass
  * and nearest texture fetch, but return before transparency/filtering can
- * discard a generated fragment. */
+ * discard a generated fragment.  The all-class follow-up also declares this
+ * in flat variants so no draw has to migrate between shader families. */
 layout(constant_id = 10) const int COVERAGE_PROBE = 0;
-#endif
 layout(location = 6) in mediump vec4 vFog;
 
 #include "pgxp_fog.h"
+
+#define COVERAGE_PROBE_COLOR \
+	(COVERAGE_PROBE == 2 ? vec3(0.0, 1.0, 1.0) : \
+	 COVERAGE_PROBE == 3 ? vec3(1.0, 1.0, 0.0) : \
+	 COVERAGE_PROBE == 4 ? vec3(0.0, 1.0, 0.0) : \
+	 vec3(1.0, 0.0, 1.0))
 
 void main()
 {
@@ -84,7 +89,7 @@ void main()
 	}
 
 	if (COVERAGE_PROBE != 0) {
-		FragColor = vec4(1.0, 0.0, 1.0, NNColor.a + vColor.a);
+		FragColor = vec4(COVERAGE_PROBE_COLOR, NNColor.a + vColor.a);
 		return;
 	}
 
@@ -174,6 +179,10 @@ void main()
 		shaded = max(shaded_hot, vec3(0.0));
 	FragColor = vec4(shaded, NNColor.a + vColor.a);
 #else
+	if (COVERAGE_PROBE != 0) {
+		FragColor = vec4(COVERAGE_PROBE_COLOR, vColor.a);
+		return;
+	}
 	FragColor = vec4((PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb, vColor.a);
 #endif
 

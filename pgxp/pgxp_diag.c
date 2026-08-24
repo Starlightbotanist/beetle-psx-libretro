@@ -1037,7 +1037,9 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"depth_counter_persist",
 		"depth_frame_global",
 		"cpu_draw_offset",
-		"cpu_draw_offset_vulkan_math"
+		"cpu_draw_offset_vulkan_math",
+		"vk_all_primitive_solid",
+		"vk_primitive_ownership"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
