@@ -1023,7 +1023,16 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"native_union_y_bary_clamp_four",
 		"native_union_y_repair_marker",
 		"native_union_y_transparent_marker",
-		"native_union_y_depth_ownership"
+		"native_union_y_depth_ownership",
+		"native_union_y_triangle_only",
+		"native_union_y_quad_only",
+		"native_union_y_flat_only",
+		"native_union_y_gouraud_only",
+		"native_union_y_raw_only",
+		"native_union_y_modulated_only",
+		"native_union_y_4bpp_only",
+		"native_union_y_8bpp_only",
+		"native_union_y_16bpp_only"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -4925,6 +4934,22 @@ int PGXP_DiagGLNativePosition(unsigned index, float* x, float* y)
 	*x = (float)gl_vertices[index].native_x;
 	*y = (float)gl_vertices[index].native_y;
 	return 1;
+}
+
+/* Return packet-authored primitive classes for a baseline command-stream
+ * vertex.  The GL repair copy stores this exact source index, so topology and
+ * shading do not have to be inferred from coincident colours or positions. */
+unsigned PGXP_DiagGLPrimitiveFlags(unsigned index)
+{
+	unsigned flags;
+	if (index >= gl_vertex_count || !gl_vertices[index].valid)
+		return 0u;
+	flags = PGXP_DIAG_GL_PRIMITIVE_VALID;
+	if (gl_vertices[index].opcode & 0x08u)
+		flags |= PGXP_DIAG_GL_PRIMITIVE_QUAD;
+	if (gl_vertices[index].gouraud)
+		flags |= PGXP_DIAG_GL_PRIMITIVE_GOURAUD;
+	return flags;
 }
 
 /* Repair T-junctions in the actual mapped OpenGL stream.  The long triangle

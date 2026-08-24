@@ -1108,6 +1108,40 @@ static void test_partial_edge_adjacency(void)
 	PGXP_DiagFrame(0);
 }
 
+static void test_packet_primitive_flags(void)
+{
+	static const int32_t native[3][2] = {
+		{ 0, 0 }, { 10, 0 }, { 0, 10 }
+	};
+	static const float precise[3][2] = {
+		{ 0.0f, 0.0f }, { 10.0f, 0.0f }, { 0.0f, 10.0f }
+	};
+	test_vertex stream[3];
+	unsigned flat_triangle = PGXP_DIAG_GL_PRIMITIVE_VALID;
+	unsigned gouraud_quad = PGXP_DIAG_GL_PRIMITIVE_VALID |
+		PGXP_DIAG_GL_PRIMITIVE_QUAD | PGXP_DIAG_GL_PRIMITIVE_GOURAUD;
+
+	puts("[R9] packet sidecar reports topology and shading exactly");
+	PGXP_DiagGLSetMode(PGXP_DIAG_GL_TEST_OFF);
+	submit_triangle(stream, native, precise, 0x24);
+	expect_mask("flat triangle flags vertex 0",
+		PGXP_DiagGLPrimitiveFlags(0), flat_triangle);
+	expect_mask("flat triangle flags vertex 2",
+		PGXP_DiagGLPrimitiveFlags(2), flat_triangle);
+	expect_mask("out-of-range flags are invalid",
+		PGXP_DiagGLPrimitiveFlags(3), 0u);
+	PGXP_DiagGLRepair(stream, 3, (unsigned)sizeof(stream[0]));
+	PGXP_DiagFrame(0);
+
+	submit_triangle(stream, native, precise, 0x3c);
+	expect_mask("gouraud quad flags vertex 0",
+		PGXP_DiagGLPrimitiveFlags(0), gouraud_quad);
+	expect_mask("gouraud quad flags vertex 2",
+		PGXP_DiagGLPrimitiveFlags(2), gouraud_quad);
+	PGXP_DiagGLRepair(stream, 3, (unsigned)sizeof(stream[0]));
+	PGXP_DiagFrame(0);
+}
+
 int main(void)
 {
 	PGXP_Init();
@@ -1120,6 +1154,7 @@ int main(void)
 	test_runtime_mode_matrix();
 	test_exact_edge_adjacency();
 	test_partial_edge_adjacency();
+	test_packet_primitive_flags();
 	PGXP_Shutdown();
 	printf("\nFAIL count %d\n", failures);
 	if (failures)

@@ -256,7 +256,27 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_REPAIR_MARKER,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRANSPARENT_MARKER,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP,
+	/* Keep clamp-one geometry fixed and split its repair copies by packet
+	 * topology, shading, texture blend, and PS1 texture depth.  These are
+	 * exhaustive categorical diagnostics: together each family reconstructs
+	 * mode 141 without introducing another geometry-strength threshold. */
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRIANGLE_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_QUAD_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_FLAT_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_GOURAUD_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_RAW_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_MODULATED_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_4BPP_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_8BPP_ONLY,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_16BPP_ONLY,
 	PGXP_DIAG_GL_TEST_COUNT
+};
+
+enum PGXP_diag_gl_primitive_flags
+{
+	PGXP_DIAG_GL_PRIMITIVE_VALID = 1u << 0,
+	PGXP_DIAG_GL_PRIMITIVE_QUAD = 1u << 1,
+	PGXP_DIAG_GL_PRIMITIVE_GOURAUD = 1u << 2
 };
 
 typedef struct PGXP_diag_primitive_vertex_Tag
@@ -326,6 +346,7 @@ void PGXP_DiagGLRepair(void* vertices, unsigned count,
 unsigned PGXP_DiagGLSharedEdgeMask(unsigned triangle_start);
 float PGXP_DiagGLSharedEdgeExpansion(unsigned triangle_start, unsigned edge);
 int PGXP_DiagGLNativePosition(unsigned index, float* x, float* y);
+unsigned PGXP_DiagGLPrimitiveFlags(unsigned index);
 void PGXP_DiagGLSetMode(unsigned mode);
 unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
@@ -397,6 +418,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagGLSharedEdgeMask(triangle_start) 0u
 #define PGXP_DiagGLSharedEdgeExpansion(triangle_start, edge) 0.0f
 #define PGXP_DiagGLNativePosition(index, x, y) 0
+#define PGXP_DiagGLPrimitiveFlags(index) 0u
 #define PGXP_DiagGLSetMode(mode) ((void)0)
 #define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)

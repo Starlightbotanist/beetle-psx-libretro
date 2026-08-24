@@ -5168,6 +5168,36 @@ static void check_variables(bool startup)
                   "native union y depth ownership") == 0)
             gl_test_mode =
                PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP;
+         else if (strcmp(var.value,
+                  "native union y triangle only") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRIANGLE_ONLY;
+         else if (strcmp(var.value,
+                  "native union y quad only") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_QUAD_ONLY;
+         else if (strcmp(var.value,
+                  "native union y flat only") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_FLAT_ONLY;
+         else if (strcmp(var.value,
+                  "native union y gouraud only") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_GOURAUD_ONLY;
+         else if (strcmp(var.value,
+                  "native union y raw only") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_RAW_ONLY;
+         else if (strcmp(var.value,
+                  "native union y modulated only") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_MODULATED_ONLY;
+         else if (strcmp(var.value,
+                  "native union y 4bpp only") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_4BPP_ONLY;
+         else if (strcmp(var.value,
+                  "native union y 8bpp only") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_8BPP_ONLY;
+         else if (strcmp(var.value,
+                  "native union y 16bpp only") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_16BPP_ONLY;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

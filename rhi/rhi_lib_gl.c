@@ -973,6 +973,20 @@ struct gl_vram_sync_tile
 
 struct gl_analog;
 
+enum gl_pgxp_native_class_index
+{
+   GL_PGXP_NATIVE_CLASS_TRIANGLE = 0,
+   GL_PGXP_NATIVE_CLASS_QUAD,
+   GL_PGXP_NATIVE_CLASS_FLAT,
+   GL_PGXP_NATIVE_CLASS_GOURAUD,
+   GL_PGXP_NATIVE_CLASS_RAW,
+   GL_PGXP_NATIVE_CLASS_MODULATED,
+   GL_PGXP_NATIVE_CLASS_4BPP,
+   GL_PGXP_NATIVE_CLASS_8BPP,
+   GL_PGXP_NATIVE_CLASS_16BPP,
+   GL_PGXP_NATIVE_CLASS_COUNT
+};
+
 struct gl_renderer {
    /* Buffer used to handle PlayStation GPU draw commands */
    gl_draw_buffer *command_buffer;
@@ -1105,6 +1119,13 @@ struct gl_renderer {
    uint64_t pgxp_native_surface_clamped_bary;
    double pgxp_native_surface_clamp_scale_sum;
    float pgxp_native_surface_clamp_scale_min;
+   /* Packet-authored class distribution before and after the native-Y
+    * selector.  Each triangle contributes once to topology, shading,
+    * blend, and texture-depth families. */
+   uint64_t pgxp_native_class_seen[GL_PGXP_NATIVE_CLASS_COUNT];
+   uint64_t pgxp_native_class_expanded[GL_PGXP_NATIVE_CLASS_COUNT];
+   uint64_t pgxp_native_class_invalid;
+   uint64_t pgxp_native_class_rejected;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -1172,7 +1193,7 @@ static bool gl_pgxp_adjacency_mode(unsigned mode)
 static bool gl_pgxp_native_union_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL &&
-      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP;
+      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_16BPP_ONLY;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1651,6 +1672,12 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_native_surface_clamped_bary = 0;
    renderer->pgxp_native_surface_clamp_scale_sum = 0.0;
    renderer->pgxp_native_surface_clamp_scale_min = 0.0f;
+   memset(renderer->pgxp_native_class_seen, 0,
+         sizeof(renderer->pgxp_native_class_seen));
+   memset(renderer->pgxp_native_class_expanded, 0,
+         sizeof(renderer->pgxp_native_class_expanded));
+   renderer->pgxp_native_class_invalid = 0;
+   renderer->pgxp_native_class_rejected = 0;
 }
 
 static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
@@ -2210,8 +2237,98 @@ static void gl_pgxp_native_surface_limits(unsigned mode,
    }
 }
 
+static bool gl_pgxp_native_class_mode(unsigned mode)
+{
+   return mode >= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRIANGLE_ONLY &&
+      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_16BPP_ONLY;
+}
+
+static void gl_pgxp_native_class_record(uint64_t *counts,
+      unsigned primitive_flags, const gl_command_vertex *v)
+{
+   if (!counts || !v ||
+       !(primitive_flags & PGXP_DIAG_GL_PRIMITIVE_VALID))
+      return;
+
+   counts[(primitive_flags & PGXP_DIAG_GL_PRIMITIVE_QUAD) ?
+         GL_PGXP_NATIVE_CLASS_QUAD : GL_PGXP_NATIVE_CLASS_TRIANGLE]++;
+   counts[(primitive_flags & PGXP_DIAG_GL_PRIMITIVE_GOURAUD) ?
+         GL_PGXP_NATIVE_CLASS_GOURAUD : GL_PGXP_NATIVE_CLASS_FLAT]++;
+
+   if (v[0].texture_blend_mode == 1u)
+      counts[GL_PGXP_NATIVE_CLASS_RAW]++;
+   else if (v[0].texture_blend_mode == 2u)
+      counts[GL_PGXP_NATIVE_CLASS_MODULATED]++;
+
+   if (v[0].depth_shift == 2u)
+      counts[GL_PGXP_NATIVE_CLASS_4BPP]++;
+   else if (v[0].depth_shift == 1u)
+      counts[GL_PGXP_NATIVE_CLASS_8BPP]++;
+   else if (v[0].depth_shift == 0u)
+      counts[GL_PGXP_NATIVE_CLASS_16BPP]++;
+}
+
+static bool gl_pgxp_native_class_selected(unsigned mode,
+      unsigned primitive_flags, const gl_command_vertex *v)
+{
+   if (!gl_pgxp_native_class_mode(mode))
+      return true;
+   if (!v || !(primitive_flags & PGXP_DIAG_GL_PRIMITIVE_VALID))
+      return false;
+
+   switch (mode)
+   {
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TRIANGLE_ONLY:
+         return !(primitive_flags & PGXP_DIAG_GL_PRIMITIVE_QUAD);
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_QUAD_ONLY:
+         return (primitive_flags & PGXP_DIAG_GL_PRIMITIVE_QUAD) != 0u;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_FLAT_ONLY:
+         return !(primitive_flags & PGXP_DIAG_GL_PRIMITIVE_GOURAUD);
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_GOURAUD_ONLY:
+         return (primitive_flags & PGXP_DIAG_GL_PRIMITIVE_GOURAUD) != 0u;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_RAW_ONLY:
+         return v[0].texture_blend_mode == 1u;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_MODULATED_ONLY:
+         return v[0].texture_blend_mode == 2u;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_4BPP_ONLY:
+         return v[0].depth_shift == 2u;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_8BPP_ONLY:
+         return v[0].depth_shift == 1u;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_16BPP_ONLY:
+         return v[0].depth_shift == 0u;
+      default:
+         return true;
+   }
+}
+
+/* Class filtering happens before a repair copy enters the GL command stream.
+ * Leaving an unmodified duplicate behind for a rejected class would assign it
+ * a new painter-order depth and turn a selector into an occlusion experiment.
+ * Record the baseline class here, then create no second primitive at all when
+ * the selected categorical subset does not include it. */
+static bool gl_pgxp_native_repair_copy_selected(gl_renderer *renderer,
+      unsigned mode, const gl_command_vertex *v, unsigned source)
+{
+   unsigned primitive_flags;
+   if (!renderer || !v)
+      return false;
+   primitive_flags = PGXP_DiagGLPrimitiveFlags(source);
+   if (!(primitive_flags & PGXP_DIAG_GL_PRIMITIVE_VALID))
+      renderer->pgxp_native_class_invalid++;
+   gl_pgxp_native_class_record(renderer->pgxp_native_class_seen,
+         primitive_flags, v);
+   if (!gl_pgxp_native_class_selected(mode, primitive_flags, v))
+   {
+      renderer->pgxp_native_class_rejected++;
+      return false;
+   }
+   return true;
+}
+
 static float gl_pgxp_native_surface_bary_clamp_limit(unsigned mode)
 {
+   if (gl_pgxp_native_class_mode(mode))
+      return 1.0f;
    switch (mode)
    {
       case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_HALF:
@@ -2338,6 +2455,7 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
          float max_raw_delta = 0.0f;
          float max_delta = 0.0f;
          struct gl_pgxp_surface_quality surface_quality;
+         unsigned primitive_flags;
          unsigned dominance;
          unsigned j;
 
@@ -2345,6 +2463,8 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
              !v[1].coverage_repair_copy ||
              !v[2].coverage_repair_copy)
             continue;
+         primitive_flags = PGXP_DiagGLPrimitiveFlags(
+               v[0].coverage_repair_source);
          renderer->pgxp_coverage_candidates++;
          renderer->pgxp_coverage_class_seen[0]++;
          renderer->pgxp_coverage_class_candidates[0]++;
@@ -2511,6 +2631,8 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
          }
          renderer->pgxp_coverage_expanded++;
          renderer->pgxp_coverage_class_expanded[0]++;
+         gl_pgxp_native_class_record(renderer->pgxp_native_class_expanded,
+               primitive_flags, v);
       }
    }
 }
@@ -8531,6 +8653,52 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[5],
                (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[6],
                (unsigned long long)renderer->pgxp_coverage_desired_scale_bins[7]);
+         log_cb(RETRO_LOG_INFO,
+               "[pgxp_gl_native_class] frames=%u mode=%u "
+               "invalid=%llu rejected=%llu "
+               "seen/expanded=tri:%llu/%llu quad:%llu/%llu "
+               "flat:%llu/%llu gouraud:%llu/%llu raw:%llu/%llu "
+               "modulated:%llu/%llu 4bpp:%llu/%llu 8bpp:%llu/%llu "
+               "16bpp:%llu/%llu\n",
+               renderer->submission_frames, renderer->pgxp_coverage_mode,
+               (unsigned long long)renderer->pgxp_native_class_invalid,
+               (unsigned long long)renderer->pgxp_native_class_rejected,
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_TRIANGLE],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_TRIANGLE],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_QUAD],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_QUAD],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_FLAT],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_FLAT],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_GOURAUD],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_GOURAUD],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_RAW],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_RAW],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_MODULATED],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_MODULATED],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_4BPP],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_4BPP],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_8BPP],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_8BPP],
+               (unsigned long long)renderer->pgxp_native_class_seen[
+                  GL_PGXP_NATIVE_CLASS_16BPP],
+               (unsigned long long)renderer->pgxp_native_class_expanded[
+                  GL_PGXP_NATIVE_CLASS_16BPP]);
          gl_pgxp_coverage_reset(renderer, renderer->pgxp_coverage_mode);
       }
       renderer->submission_flushes = 0;
@@ -9102,14 +9270,19 @@ void rhi_gl_push_triangle(
           texture_blend_mode && !semi_transparent)
       {
          unsigned _source = renderer->vertex_index_pos - 3u;
-         int _fi;
-         for (_fi = 0; _fi < 3; _fi++)
+         unsigned _mode = PGXP_DiagGLGetMode();
+         if (gl_pgxp_native_repair_copy_selected(renderer, _mode, v,
+                  _source))
          {
-            v[_fi].coverage_repair_copy = 1u;
-            v[_fi].coverage_repair_source = _source + (unsigned)_fi;
+            int _fi;
+            for (_fi = 0; _fi < 3; _fi++)
+            {
+               v[_fi].coverage_repair_copy = 1u;
+               v[_fi].coverage_repair_source = _source + (unsigned)_fi;
+            }
+            push_primitive(renderer, v, 3, GL_TRIANGLES,
+                  semi_transparency_mode, mask_test, set_mask);
          }
-         push_primitive(renderer, v, 3, GL_TRIANGLES,
-               semi_transparency_mode, mask_test, set_mask);
       }
    }
 }
@@ -9284,15 +9457,29 @@ void rhi_gl_push_quad(
              texture_blend_mode && !semi_transparent)
          {
             unsigned _source = renderer->vertex_index_pos - 6u;
-            int _fi;
-            for (_fi = 0; _fi < 6; _fi++)
+            unsigned _mode = PGXP_DiagGLGetMode();
+            bool _selected = true;
+            int _ti;
+            for (_ti = 0; _ti < 2; _ti++)
             {
-               expanded[_fi].coverage_repair_copy = 1u;
-               expanded[_fi].coverage_repair_source =
-                  _source + (unsigned)_fi;
+               bool _part_selected = gl_pgxp_native_repair_copy_selected(
+                     renderer, _mode, &expanded[_ti * 3],
+                     _source + (unsigned)(_ti * 3));
+               if (!_part_selected)
+                  _selected = false;
             }
-            push_primitive(renderer, expanded, 6, GL_TRIANGLES,
-                  semi_transparency_mode, mask_test, set_mask);
+            if (_selected)
+            {
+               int _fi;
+               for (_fi = 0; _fi < 6; _fi++)
+               {
+                  expanded[_fi].coverage_repair_copy = 1u;
+                  expanded[_fi].coverage_repair_source =
+                     _source + (unsigned)_fi;
+               }
+               push_primitive(renderer, expanded, 6, GL_TRIANGLES,
+                     semi_transparency_mode, mask_test, set_mask);
+            }
          }
       }
    }
