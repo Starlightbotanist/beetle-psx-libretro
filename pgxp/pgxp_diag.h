@@ -245,6 +245,13 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_W_FOUR,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTEEN,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTY_FOUR,
+	/* Continuous counterparts to the binary barycentric gates.  Unsafe
+	 * repair copies retain as much of their Y coverage as the bound permits
+	 * instead of disappearing completely and reopening a seam. */
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_HALF,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_ONE,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_TWO,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_FOUR,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

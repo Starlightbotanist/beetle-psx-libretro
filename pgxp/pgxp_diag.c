@@ -1016,7 +1016,11 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"native_union_y_tail_two", "native_union_y_dominant",
 		"native_union_y_bary_half", "native_union_y_bary_one",
 		"native_union_y_w_two", "native_union_y_w_four",
-		"native_union_y_uv_sixteen", "native_union_y_uv_sixty_four"
+		"native_union_y_uv_sixteen", "native_union_y_uv_sixty_four",
+		"native_union_y_bary_clamp_half",
+		"native_union_y_bary_clamp_one",
+		"native_union_y_bary_clamp_two",
+		"native_union_y_bary_clamp_four"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

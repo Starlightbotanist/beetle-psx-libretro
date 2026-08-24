@@ -5149,6 +5149,15 @@ static void check_variables(bool startup)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTEEN;
          else if (strcmp(var.value, "native union y uv sixty four") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTY_FOUR;
+         else if (strcmp(var.value, "native union y bary clamp half") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_HALF;
+         else if (strcmp(var.value, "native union y bary clamp one") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_ONE;
+         else if (strcmp(var.value, "native union y bary clamp two") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_TWO;
+         else if (strcmp(var.value, "native union y bary clamp four") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_FOUR;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

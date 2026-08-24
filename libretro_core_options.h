@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Focused diagnostic modes for PGXP OpenGL raster seams. Mode 123 is the unsafe full native-coverage positive control and 129 is its Y-only form. Modes 134-139 retain mode 129's geometry while independently bounding barycentric, W, or UV surface extrapolation. Historical implementations remain in the diagnostic code but are hidden from this runtime list.",
+      "Focused diagnostic modes for PGXP OpenGL raster seams. Modes 135 and 138 are the best binary safety-gate references. Modes 140-143 continuously reduce unsafe Y repair movement to a barycentric bound rather than rejecting the entire repair triangle. Historical implementations remain in the diagnostic code but are hidden from this runtime list.",
       NULL,
       "pgxp",
       {
@@ -1145,12 +1145,12 @@ struct retro_core_option_v2_definition option_defs_us[] = {
 #endif
          { "native union all", "123: Native Outside Union - XY, All Deltas (Unsafe Control)" },
          { "native union y all", "129: Native Outside Union - Y Only, All Deltas" },
-         { "native union y bary half", "134: Y Union - Barycentric Excess <= 0.5" },
          { "native union y bary one", "135: Y Union - Barycentric Excess <= 1.0" },
-         { "native union y w two", "136: Y Union - W Ratio <= 2x" },
-         { "native union y w four", "137: Y Union - W Ratio <= 4x" },
          { "native union y uv sixteen", "138: Y Union - UV Extrapolation <= 16 Texels" },
-         { "native union y uv sixty four", "139: Y Union - UV Extrapolation <= 64 Texels" },
+         { "native union y bary clamp half", "140: Y Union - Clamp Barycentric Excess to 0.5" },
+         { "native union y bary clamp one", "141: Y Union - Clamp Barycentric Excess to 1.0" },
+         { "native union y bary clamp two", "142: Y Union - Clamp Barycentric Excess to 2.0" },
+         { "native union y bary clamp four", "143: Y Union - Clamp Barycentric Excess to 4.0" },
          { NULL, NULL },
       },
       "off"

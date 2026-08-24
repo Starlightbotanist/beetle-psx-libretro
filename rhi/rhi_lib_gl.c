@@ -1098,6 +1098,9 @@ struct gl_renderer {
    uint64_t pgxp_native_surface_rejected_bary;
    uint64_t pgxp_native_surface_rejected_w;
    uint64_t pgxp_native_surface_rejected_uv;
+   uint64_t pgxp_native_surface_clamped_bary;
+   double pgxp_native_surface_clamp_scale_sum;
+   float pgxp_native_surface_clamp_scale_min;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -1165,7 +1168,7 @@ static bool gl_pgxp_adjacency_mode(unsigned mode)
 static bool gl_pgxp_native_union_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL &&
-      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTY_FOUR;
+      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_FOUR;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1633,6 +1636,9 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_native_surface_rejected_bary = 0;
    renderer->pgxp_native_surface_rejected_w = 0;
    renderer->pgxp_native_surface_rejected_uv = 0;
+   renderer->pgxp_native_surface_clamped_bary = 0;
+   renderer->pgxp_native_surface_clamp_scale_sum = 0.0;
+   renderer->pgxp_native_surface_clamp_scale_min = 0.0f;
 }
 
 static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
@@ -1999,6 +2005,51 @@ struct gl_pgxp_surface_quality
    float uv_delta;
 };
 
+/* Barycentric coordinates are affine in screen position.  Moving each
+ * target vertex a common fraction of the way from its original vertex
+ * therefore scales this excess by exactly the same fraction. */
+static bool gl_pgxp_bary_excess_at(const gl_command_vertex *v,
+      const float target_x[3], const float target_y[3], float *max_excess)
+{
+   double x[3];
+   double y[3];
+   unsigned i;
+
+   if (!v || !target_x || !target_y || !max_excess)
+      return false;
+   *max_excess = 0.0f;
+   for (i = 0; i < 3u; i++)
+   {
+      if (!isfinite(v[i].position[0]) || !isfinite(v[i].position[1]) ||
+          !isfinite(target_x[i]) || !isfinite(target_y[i]))
+         return false;
+      x[i] = v[i].position[0];
+      y[i] = v[i].position[1];
+   }
+   for (i = 0; i < 3u; i++)
+   {
+      float barycentric[2];
+      double b[3];
+      unsigned c;
+      if (!gl_pgxp_coverage_barycentric_at(x, y, target_x[i],
+               target_y[i], barycentric))
+         return false;
+      b[0] = barycentric[0];
+      b[1] = barycentric[1];
+      b[2] = 1.0 - b[0] - b[1];
+      for (c = 0; c < 3u; c++)
+      {
+         double excess = b[c] < 0.0 ? -b[c] :
+            (b[c] > 1.0 ? b[c] - 1.0 : 0.0);
+         if (!isfinite(excess))
+            return false;
+         if (excess > (double)*max_excess)
+            *max_excess = (float)excess;
+      }
+   }
+   return true;
+}
+
 /* Evaluate the same projective q and UV planes used by
  * gl_pgxp_preserve_surface_at without mutating the repair copy.  Native
  * coordinates are usually less than a pixel from PGXP, but a thin or nearly
@@ -2147,6 +2198,23 @@ static void gl_pgxp_native_surface_limits(unsigned mode,
    }
 }
 
+static float gl_pgxp_native_surface_bary_clamp_limit(unsigned mode)
+{
+   switch (mode)
+   {
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_HALF:
+         return 0.5f;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_ONE:
+         return 1.0f;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_TWO:
+         return 2.0f;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_CLAMP_FOUR:
+         return 4.0f;
+      default:
+         return 0.0f;
+   }
+}
+
 static float gl_pgxp_native_union_delta_limit(unsigned mode)
 {
    switch (mode)
@@ -2214,6 +2282,7 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
    float surface_bary_limit;
    float surface_w_limit;
    float surface_uv_limit;
+   float surface_bary_clamp_limit;
    size_t bi;
 
    if (!renderer || !renderer->command_buffer->map ||
@@ -2224,6 +2293,8 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
 
    gl_pgxp_native_surface_limits(mode, &surface_bary_limit,
          &surface_w_limit, &surface_uv_limit);
+   surface_bary_clamp_limit =
+      gl_pgxp_native_surface_bary_clamp_limit(mode);
 
    vertices = (gl_command_vertex *)renderer->command_buffer->map;
    for (bi = 0; bi < renderer->batches.count; bi++)
@@ -2328,6 +2399,46 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
             continue;
          }
          if (max_delta <= delta_floor || max_delta <= 1.0e-7f)
+         {
+            renderer->pgxp_native_union_rejected_low++;
+            continue;
+         }
+         if (surface_bary_clamp_limit > 0.0f)
+         {
+            float full_bary_excess;
+            if (!gl_pgxp_bary_excess_at(v, target_x, target_y,
+                     &full_bary_excess))
+            {
+               renderer->pgxp_coverage_preserve_rejected++;
+               continue;
+            }
+            if (full_bary_excess > surface_bary_clamp_limit)
+            {
+               float clamp_scale =
+                  surface_bary_clamp_limit / full_bary_excess;
+               if (!isfinite(clamp_scale) || clamp_scale <= 0.0f)
+               {
+                  renderer->pgxp_coverage_preserve_rejected++;
+                  continue;
+               }
+               for (j = 0; j < 3u; j++)
+               {
+                  target_x[j] = v[j].position[0] +
+                     (target_x[j] - v[j].position[0]) * clamp_scale;
+                  target_y[j] = v[j].position[1] +
+                     (target_y[j] - v[j].position[1]) * clamp_scale;
+               }
+               max_delta *= clamp_scale;
+               if (!renderer->pgxp_native_surface_clamped_bary ||
+                   clamp_scale <
+                     renderer->pgxp_native_surface_clamp_scale_min)
+                  renderer->pgxp_native_surface_clamp_scale_min = clamp_scale;
+               renderer->pgxp_native_surface_clamp_scale_sum +=
+                  (double)clamp_scale;
+               renderer->pgxp_native_surface_clamped_bary++;
+            }
+         }
+         if (max_delta <= 1.0e-7f)
          {
             renderer->pgxp_native_union_rejected_low++;
             continue;
@@ -8187,6 +8298,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                "uv=le1/4/16/64/256/gt256:"
                "%llu/%llu/%llu/%llu/%llu/%llu "
                "surface_gate=bary/w/uv:%llu/%llu/%llu "
+               "surface_clamp=bary/scale_mean/scale_min:%llu/%.9g/%.9g "
                "shape_bins=inradius_px:<.25/.5/1/2/4/8/16/inf:"
                "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
                "radius_px:<4/8/16/32/64/128/256/inf:"
@@ -8324,6 +8436,13 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                   renderer->pgxp_native_surface_rejected_bary,
                (unsigned long long)renderer->pgxp_native_surface_rejected_w,
                (unsigned long long)renderer->pgxp_native_surface_rejected_uv,
+               (unsigned long long)
+                  renderer->pgxp_native_surface_clamped_bary,
+               renderer->pgxp_native_surface_clamped_bary ?
+                  renderer->pgxp_native_surface_clamp_scale_sum /
+                     (double)renderer->pgxp_native_surface_clamped_bary : 0.0,
+               renderer->pgxp_native_surface_clamped_bary ?
+                  (double)renderer->pgxp_native_surface_clamp_scale_min : 0.0,
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[0],
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[1],
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[2],
