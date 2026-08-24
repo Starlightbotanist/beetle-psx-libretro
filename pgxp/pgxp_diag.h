@@ -236,6 +236,15 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_TWO,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TAIL_TWO,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT,
+	/* Surface-conditioning splits of the positive Y-only union.  These keep
+	 * its geometry selection unchanged and reject only numerically extreme
+	 * attribute extrapolation before a repair copy can reach the GPU. */
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_HALF,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_ONE,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_W_TWO,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_W_FOUR,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTEEN,
+	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTY_FOUR,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

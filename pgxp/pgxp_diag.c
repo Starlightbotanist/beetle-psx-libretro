@@ -1013,7 +1013,10 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"native_union_delta_one", "native_union_delta_two",
 		"native_union_x_all", "native_union_y_all",
 		"native_union_y_delta_one", "native_union_y_delta_two",
-		"native_union_y_tail_two", "native_union_y_dominant"
+		"native_union_y_tail_two", "native_union_y_dominant",
+		"native_union_y_bary_half", "native_union_y_bary_one",
+		"native_union_y_w_two", "native_union_y_w_four",
+		"native_union_y_uv_sixteen", "native_union_y_uv_sixty_four"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }

@@ -1090,6 +1090,14 @@ struct gl_renderer {
    uint64_t pgxp_native_union_rejected_low;
    uint64_t pgxp_native_union_rejected_high;
    uint64_t pgxp_native_union_rejected_dominance;
+   /* Surface quality at the repair triangle's target vertices. */
+   uint64_t pgxp_native_surface_quality_samples;
+   uint64_t pgxp_native_surface_bary_bins[6];
+   uint64_t pgxp_native_surface_w_bins[6];
+   uint64_t pgxp_native_surface_uv_bins[6];
+   uint64_t pgxp_native_surface_rejected_bary;
+   uint64_t pgxp_native_surface_rejected_w;
+   uint64_t pgxp_native_surface_rejected_uv;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -1157,7 +1165,7 @@ static bool gl_pgxp_adjacency_mode(unsigned mode)
 static bool gl_pgxp_native_union_mode(unsigned mode)
 {
    return mode >= PGXP_DIAG_GL_TEST_NATIVE_UNION_ALL &&
-      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT;
+      mode <= PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTY_FOUR;
 }
 
 static bool gl_pgxp_coverage_union_mode(unsigned mode)
@@ -1615,6 +1623,16 @@ static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
    renderer->pgxp_native_union_rejected_low = 0;
    renderer->pgxp_native_union_rejected_high = 0;
    renderer->pgxp_native_union_rejected_dominance = 0;
+   renderer->pgxp_native_surface_quality_samples = 0;
+   memset(renderer->pgxp_native_surface_bary_bins, 0,
+         sizeof(renderer->pgxp_native_surface_bary_bins));
+   memset(renderer->pgxp_native_surface_w_bins, 0,
+         sizeof(renderer->pgxp_native_surface_w_bins));
+   memset(renderer->pgxp_native_surface_uv_bins, 0,
+         sizeof(renderer->pgxp_native_surface_uv_bins));
+   renderer->pgxp_native_surface_rejected_bary = 0;
+   renderer->pgxp_native_surface_rejected_w = 0;
+   renderer->pgxp_native_surface_rejected_uv = 0;
 }
 
 static void gl_pgxp_count_texture_probe(gl_renderer *renderer)
@@ -1974,6 +1992,161 @@ static bool gl_pgxp_preserve_surface_at(gl_renderer *renderer,
    return true;
 }
 
+struct gl_pgxp_surface_quality
+{
+   float bary_excess;
+   float w_ratio;
+   float uv_delta;
+};
+
+/* Evaluate the same projective q and UV planes used by
+ * gl_pgxp_preserve_surface_at without mutating the repair copy.  Native
+ * coordinates are usually less than a pixel from PGXP, but a thin or nearly
+ * degenerate triangle can turn that small screen-space step into enormous
+ * barycentric, W, and UV extrapolation. */
+static bool gl_pgxp_surface_quality_at(const gl_command_vertex *v,
+      const float target_x[3], const float target_y[3],
+      struct gl_pgxp_surface_quality *quality)
+{
+   double x[3];
+   double y[3];
+   double q[3];
+   double uvq[3][2];
+   unsigned i;
+   unsigned c;
+
+   if (!v || !target_x || !target_y || !quality)
+      return false;
+   memset(quality, 0, sizeof(*quality));
+   for (i = 0; i < 3u; i++)
+   {
+      double w = (double)v[i].position[3];
+      if (!isfinite(v[i].position[0]) || !isfinite(v[i].position[1]) ||
+          !isfinite(target_x[i]) || !isfinite(target_y[i]) ||
+          !isfinite(w) || w <= 1.0e-20)
+         return false;
+      x[i] = v[i].position[0];
+      y[i] = v[i].position[1];
+      q[i] = 1.0 / w;
+      for (c = 0; c < 2u; c++)
+         uvq[i][c] = (double)v[i].texture_coord[c] * q[i];
+   }
+
+   for (i = 0; i < 3u; i++)
+   {
+      float barycentric[2];
+      double b[3];
+      double new_q;
+      double new_w;
+      double old_w = (double)v[i].position[3];
+      double w_ratio;
+      if (!gl_pgxp_coverage_barycentric_at(x, y, target_x[i],
+               target_y[i], barycentric))
+         return false;
+      b[0] = barycentric[0];
+      b[1] = barycentric[1];
+      b[2] = 1.0 - b[0] - b[1];
+      for (c = 0; c < 3u; c++)
+      {
+         double excess = b[c] < 0.0 ? -b[c] :
+            (b[c] > 1.0 ? b[c] - 1.0 : 0.0);
+         if (!isfinite(excess))
+            return false;
+         if (excess > (double)quality->bary_excess)
+            quality->bary_excess = (float)excess;
+      }
+      new_q = b[0] * q[0] + b[1] * q[1] + b[2] * q[2];
+      if (!isfinite(new_q) || new_q <= 1.0e-20)
+         return false;
+      new_w = 1.0 / new_q;
+      if (!isfinite(new_w) || new_w <= 0.0)
+         return false;
+      w_ratio = new_w > old_w ? new_w / old_w : old_w / new_w;
+      if (!isfinite(w_ratio))
+         return false;
+      if (w_ratio > (double)quality->w_ratio)
+         quality->w_ratio = (float)w_ratio;
+      {
+         double uv_component_delta[2];
+         double uv_delta;
+         for (c = 0; c < 2u; c++)
+         {
+            double aq = b[0] * uvq[0][c] + b[1] * uvq[1][c] +
+               b[2] * uvq[2][c];
+            double new_uv = aq / new_q;
+            uv_component_delta[c] = new_uv -
+               (double)v[i].texture_coord[c];
+            if (!isfinite(new_uv) || !isfinite(uv_component_delta[c]))
+               return false;
+         }
+         uv_delta = hypot(uv_component_delta[0], uv_component_delta[1]);
+         if (!isfinite(uv_delta))
+            return false;
+         if (uv_delta > (double)quality->uv_delta)
+            quality->uv_delta = (float)uv_delta;
+      }
+   }
+   return true;
+}
+
+static unsigned gl_pgxp_native_surface_bin(float value,
+      const float limits[5])
+{
+   unsigned i;
+   for (i = 0; i < 5u; i++)
+      if (value <= limits[i])
+         return i;
+   return 5u;
+}
+
+static void gl_pgxp_record_native_surface_quality(gl_renderer *renderer,
+      const struct gl_pgxp_surface_quality *quality)
+{
+   static const float bary_limits[5] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+   static const float w_limits[5] = { 1.01f, 1.1f, 1.5f, 2.0f, 4.0f };
+   static const float uv_limits[5] = { 1.0f, 4.0f, 16.0f, 64.0f, 256.0f };
+   if (!renderer || !quality)
+      return;
+   renderer->pgxp_native_surface_quality_samples++;
+   renderer->pgxp_native_surface_bary_bins[
+         gl_pgxp_native_surface_bin(quality->bary_excess, bary_limits)]++;
+   renderer->pgxp_native_surface_w_bins[
+         gl_pgxp_native_surface_bin(quality->w_ratio, w_limits)]++;
+   renderer->pgxp_native_surface_uv_bins[
+         gl_pgxp_native_surface_bin(quality->uv_delta, uv_limits)]++;
+}
+
+static void gl_pgxp_native_surface_limits(unsigned mode,
+      float *bary_limit, float *w_limit, float *uv_limit)
+{
+   *bary_limit = 0.0f;
+   *w_limit = 0.0f;
+   *uv_limit = 0.0f;
+   switch (mode)
+   {
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_HALF:
+         *bary_limit = 0.5f;
+         break;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_BARY_ONE:
+         *bary_limit = 1.0f;
+         break;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_W_TWO:
+         *w_limit = 2.0f;
+         break;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_W_FOUR:
+         *w_limit = 4.0f;
+         break;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTEEN:
+         *uv_limit = 16.0f;
+         break;
+      case PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_UV_SIXTY_FOUR:
+         *uv_limit = 64.0f;
+         break;
+      default:
+         break;
+   }
+}
+
 static float gl_pgxp_native_union_delta_limit(unsigned mode)
 {
    switch (mode)
@@ -2000,11 +2173,7 @@ static float gl_pgxp_native_union_delta_floor(unsigned mode)
 
 static bool gl_pgxp_native_union_uses_x(unsigned mode)
 {
-   return mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_ALL &&
-      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_ONE &&
-      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DELTA_TWO &&
-      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_TAIL_TWO &&
-      mode != PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DOMINANT;
+   return mode < PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_ALL;
 }
 
 static bool gl_pgxp_native_union_uses_y(unsigned mode)
@@ -2042,6 +2211,9 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
    bool use_y = gl_pgxp_native_union_uses_y(mode);
    bool require_y_dominance =
       gl_pgxp_native_union_requires_y_dominance(mode);
+   float surface_bary_limit;
+   float surface_w_limit;
+   float surface_uv_limit;
    size_t bi;
 
    if (!renderer || !renderer->command_buffer->map ||
@@ -2049,6 +2221,9 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
        !PGXP_FeatureEnabled(PGXP_FEATURE_GL_COVERAGE) ||
        !gl_pgxp_geometry_active())
       return;
+
+   gl_pgxp_native_surface_limits(mode, &surface_bary_limit,
+         &surface_w_limit, &surface_uv_limit);
 
    vertices = (gl_command_vertex *)renderer->command_buffer->map;
    for (bi = 0; bi < renderer->batches.count; bi++)
@@ -2076,6 +2251,7 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
          float max_raw_dy = 0.0f;
          float max_raw_delta = 0.0f;
          float max_delta = 0.0f;
+         struct gl_pgxp_surface_quality surface_quality;
          unsigned dominance;
          unsigned j;
 
@@ -2154,6 +2330,31 @@ static void gl_pgxp_apply_native_union(gl_renderer *renderer, unsigned mode)
          if (max_delta <= delta_floor || max_delta <= 1.0e-7f)
          {
             renderer->pgxp_native_union_rejected_low++;
+            continue;
+         }
+         if (!gl_pgxp_surface_quality_at(v, target_x, target_y,
+                  &surface_quality))
+         {
+            renderer->pgxp_coverage_preserve_rejected++;
+            continue;
+         }
+         gl_pgxp_record_native_surface_quality(renderer, &surface_quality);
+         if (surface_bary_limit > 0.0f &&
+             surface_quality.bary_excess > surface_bary_limit)
+         {
+            renderer->pgxp_native_surface_rejected_bary++;
+            continue;
+         }
+         if (surface_w_limit > 0.0f &&
+             surface_quality.w_ratio > surface_w_limit)
+         {
+            renderer->pgxp_native_surface_rejected_w++;
+            continue;
+         }
+         if (surface_uv_limit > 0.0f &&
+             surface_quality.uv_delta > surface_uv_limit)
+         {
+            renderer->pgxp_native_surface_rejected_uv++;
             continue;
          }
          if (!gl_pgxp_preserve_surface_at(renderer, v, target_x, target_y))
@@ -7979,6 +8180,13 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                "delta2d=le.25/.5/1/2/4/gt4:"
                "%llu/%llu/%llu/%llu/%llu/%llu "
                "native_gate=low/high/dominance:%llu/%llu/%llu "
+               "surface_quality=samples:%llu "
+               "bary=le.25/.5/1/2/4/gt4:%llu/%llu/%llu/%llu/%llu/%llu "
+               "w=le1.01/1.1/1.5/2/4/gt4:"
+               "%llu/%llu/%llu/%llu/%llu/%llu "
+               "uv=le1/4/16/64/256/gt256:"
+               "%llu/%llu/%llu/%llu/%llu/%llu "
+               "surface_gate=bary/w/uv:%llu/%llu/%llu "
                "shape_bins=inradius_px:<.25/.5/1/2/4/8/16/inf:"
                "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu "
                "radius_px:<4/8/16/32/64/128/256/inf:"
@@ -8092,6 +8300,30 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                (unsigned long long)renderer->pgxp_native_union_rejected_high,
                (unsigned long long)
                   renderer->pgxp_native_union_rejected_dominance,
+               (unsigned long long)
+                  renderer->pgxp_native_surface_quality_samples,
+               (unsigned long long)renderer->pgxp_native_surface_bary_bins[0],
+               (unsigned long long)renderer->pgxp_native_surface_bary_bins[1],
+               (unsigned long long)renderer->pgxp_native_surface_bary_bins[2],
+               (unsigned long long)renderer->pgxp_native_surface_bary_bins[3],
+               (unsigned long long)renderer->pgxp_native_surface_bary_bins[4],
+               (unsigned long long)renderer->pgxp_native_surface_bary_bins[5],
+               (unsigned long long)renderer->pgxp_native_surface_w_bins[0],
+               (unsigned long long)renderer->pgxp_native_surface_w_bins[1],
+               (unsigned long long)renderer->pgxp_native_surface_w_bins[2],
+               (unsigned long long)renderer->pgxp_native_surface_w_bins[3],
+               (unsigned long long)renderer->pgxp_native_surface_w_bins[4],
+               (unsigned long long)renderer->pgxp_native_surface_w_bins[5],
+               (unsigned long long)renderer->pgxp_native_surface_uv_bins[0],
+               (unsigned long long)renderer->pgxp_native_surface_uv_bins[1],
+               (unsigned long long)renderer->pgxp_native_surface_uv_bins[2],
+               (unsigned long long)renderer->pgxp_native_surface_uv_bins[3],
+               (unsigned long long)renderer->pgxp_native_surface_uv_bins[4],
+               (unsigned long long)renderer->pgxp_native_surface_uv_bins[5],
+               (unsigned long long)
+                  renderer->pgxp_native_surface_rejected_bary,
+               (unsigned long long)renderer->pgxp_native_surface_rejected_w,
+               (unsigned long long)renderer->pgxp_native_surface_rejected_uv,
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[0],
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[1],
                (unsigned long long)renderer->pgxp_coverage_inradius_bins[2],
