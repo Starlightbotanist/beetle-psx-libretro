@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Focused diagnostic modes for PGXP OpenGL raster seams. Mode 141 is the continuous clamp reference. Modes 147-155 split exactly that repair by packet-authored topology, shading, texture blend, and PS1 texture depth. Each family is exhaustive; original PGXP triangles remain unchanged.",
+      "Focused GL/Vulkan parity diagnostics for PGXP raster seams. Mode 156 removes texture sampling on both backends. Modes 157-158 test GL depth-counter lifetime. Modes 159-160 move GL draw-offset addition to the CPU, with mode 160 also using Vulkan's clip-expression order.",
       NULL,
       "pgxp",
       {
@@ -1143,6 +1143,10 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "native union delta one", "126: GL Native Outside Coverage - Delta <= 1px" },
          { "native union delta two", "127: GL Native Outside Coverage - Delta <= 2px" },
 #endif
+#if 0
+         /* Historical positive control and class splits remain implemented
+          * and parseable, but are hidden to stay below RetroArch's per-option
+          * value cap while the backend-parity suite is active. */
          { "native union y bary clamp one", "141: Y Union - Clamp Barycentric Excess to 1.0" },
          { "native union y triangle only", "147: Clamp-1 Repair - Triangles Only" },
          { "native union y quad only", "148: Clamp-1 Repair - Quads Only" },
@@ -1153,6 +1157,12 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "native union y 4bpp only", "153: Clamp-1 Repair - 4-bpp Texture Only" },
          { "native union y 8bpp only", "154: Clamp-1 Repair - 8-bpp Texture Only" },
          { "native union y 16bpp only", "155: Clamp-1 Repair - 16-bpp Texture Only" },
+#endif
+         { "cross backend solid", "156: GL/Vulkan Solid Coverage Probe" },
+         { "depth counter persist", "157: GL Counter Persists, Depth Clears Per Flush" },
+         { "depth frame global", "158: GL Experimental Frame-Global Depth" },
+         { "cpu draw offset", "159: GL CPU-Side Draw Offset" },
+         { "cpu draw offset vulkan math", "160: GL CPU Offset + Vulkan Clip Math" },
          { NULL, NULL },
       },
       "off"

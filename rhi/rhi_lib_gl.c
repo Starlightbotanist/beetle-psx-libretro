@@ -1037,7 +1037,18 @@ struct gl_renderer {
    bool fb_out_fp16;
    /* Counter for preserving primitive draw order in the z-buffer
     * since we draw semi-transparent primitives out-of-order. */
-   int16_t primitive_ordering;
+   uint32_t primitive_ordering;
+   /* Depth-lifetime diagnostics.  Ordinary GL intentionally clears the depth
+    * attachment and restarts ordering at every command-buffer flush.  Vulkan
+    * also clears and restarts at each render-pass flush, so the frame-global
+    * mode is an intentionally stronger cross-flush experiment, not claimed
+    * backend parity.  Counter-only is its negative control. */
+   unsigned pgxp_depth_mode;
+   bool depth_clear_pending;
+   uint64_t pgxp_depth_flushes;
+   uint64_t pgxp_depth_clears;
+   uint64_t pgxp_depth_carried_flushes;
+   uint32_t pgxp_depth_max_order;
    /* Diagnostic counters for the linear, draw-arrays submission probe. */
    uint64_t submission_flushes;
    uint64_t submission_batches;
@@ -1529,7 +1540,8 @@ static unsigned gl_pgxp_coverage_bin(float value, const float limits[7])
 
 static unsigned gl_pgxp_texture_probe(unsigned mode)
 {
-   if (mode == PGXP_DIAG_GL_TEST_TEXTURE_SOLID_OPAQUE)
+   if (mode == PGXP_DIAG_GL_TEST_TEXTURE_SOLID_OPAQUE ||
+       mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID)
       return 1u;
    if (mode == PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER)
       return 2u;
@@ -1552,7 +1564,9 @@ static unsigned gl_pgxp_texture_probe(unsigned mode)
 static const char *gl_pgxp_texture_probe_name(unsigned mode)
 {
    if (mode == PGXP_DIAG_GL_TEST_TEXTURE_SOLID_OPAQUE)
-      return "solid_opaque_textured";
+      return "gl_solid_opaque_textured";
+   if (mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID)
+      return "cross_backend_solid_opaque_textured";
    if (mode == PGXP_DIAG_GL_TEST_TEXTURE_TRANSPARENT_MARKER)
       return "transparent_texel_marker";
    if (mode ==
@@ -1589,6 +1603,36 @@ static GLenum gl_pgxp_conservative_raster_token(void)
 static bool gl_pgxp_geometry_active(void)
 {
    return (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
+}
+
+static bool gl_pgxp_depth_counter_persistent(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_DEPTH_COUNTER_PERSIST ||
+      mode == PGXP_DIAG_GL_TEST_DEPTH_FRAME_GLOBAL;
+}
+
+static bool gl_pgxp_depth_frame_global(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_DEPTH_FRAME_GLOBAL;
+}
+
+static bool gl_pgxp_cpu_draw_offset(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET ||
+      mode == PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET_VULKAN_MATH;
+}
+
+static void gl_pgxp_depth_mode_sync(gl_renderer *renderer, unsigned mode)
+{
+   if (renderer->pgxp_depth_mode == mode)
+      return;
+   renderer->pgxp_depth_mode = mode;
+   renderer->primitive_ordering = 0;
+   renderer->depth_clear_pending = true;
+   renderer->pgxp_depth_flushes = 0;
+   renderer->pgxp_depth_clears = 0;
+   renderer->pgxp_depth_carried_flushes = 0;
+   renderer->pgxp_depth_max_order = 0;
 }
 
 static void gl_pgxp_coverage_reset(gl_renderer *renderer, unsigned mode)
@@ -4789,7 +4833,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
       * Clear the batch bookkeeping and retry the map. */
       renderer->command_buffer->map_index = 0;
       PGXP_DiagGLRepair(NULL, 0, 0);
-      renderer->primitive_ordering        = 0;
+      if (!gl_pgxp_depth_counter_persistent(PGXP_DiagGLGetMode()))
+         renderer->primitive_ordering = 0;
       gl_primitive_batch_vec_clear(&renderer->batches);
       renderer->vertex_index_pos          = 0;
       gl_draw_buffer_map_no_bind(renderer->command_buffer);
@@ -4803,7 +4848,11 @@ static void gl_renderer_draw(gl_renderer *renderer)
       gl_pgxp_coverage_reset(renderer, raster_requested);
    raster_effective = raster_requested;
    if (raster_effective > PGXP_DIAG_GL_TEST_UPPER_LEFT_NEAREST &&
-       raster_effective != PGXP_DIAG_GL_TEST_VULKAN_CLIP_MATH)
+       raster_effective != PGXP_DIAG_GL_TEST_VULKAN_CLIP_MATH &&
+       raster_effective != PGXP_DIAG_GL_TEST_DEPTH_FRAME_GLOBAL &&
+       raster_effective != PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET &&
+       raster_effective !=
+          PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET_VULKAN_MATH)
       raster_effective = PGXP_DIAG_GL_TEST_OFF;
    raster_upper_left = raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT ||
       raster_requested == PGXP_DIAG_GL_TEST_UPPER_LEFT_SWAN ||
@@ -4849,7 +4898,27 @@ static void gl_renderer_draw(gl_renderer *renderer)
          0);
 #endif
 
-   glClear(GL_DEPTH_BUFFER_BIT);
+   if (gl_pgxp_depth_frame_global(raster_requested))
+   {
+      renderer->pgxp_depth_flushes++;
+      if (renderer->depth_clear_pending)
+      {
+         glClear(GL_DEPTH_BUFFER_BIT);
+         renderer->depth_clear_pending = false;
+         renderer->pgxp_depth_clears++;
+      }
+      else
+         renderer->pgxp_depth_carried_flushes++;
+   }
+   else
+   {
+      glClear(GL_DEPTH_BUFFER_BIT);
+      if (raster_requested == PGXP_DIAG_GL_TEST_DEPTH_COUNTER_PERSIST)
+      {
+         renderer->pgxp_depth_flushes++;
+         renderer->pgxp_depth_clears++;
+      }
+   }
 
    glEnable(GL_DEPTH_TEST);
    glEnable(GL_SCISSOR_TEST);
@@ -5188,7 +5257,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
    renderer->command_buffer->map_index  = 0;
    gl_draw_buffer_map_no_bind(renderer->command_buffer);
 
-   renderer->primitive_ordering = 0;
+   if (!gl_pgxp_depth_counter_persistent(raster_requested))
+      renderer->primitive_ordering = 0;
    gl_primitive_batch_vec_clear(&renderer->batches);
    renderer->opaque = false;
    renderer->vertex_index_pos = 0;
@@ -5634,6 +5704,8 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
    renderer->initial_scanline_pal = initial_scanline_pal;
    renderer->last_scanline_pal = last_scanline_pal;
    renderer->primitive_ordering = 0;
+   renderer->pgxp_depth_mode = PGXP_DIAG_GL_TEST_OFF;
+   renderer->depth_clear_pending = true;
    renderer->tex_x_mask = 0;
    renderer->tex_x_or = 0;
    renderer->tex_y_mask = 0;
@@ -7170,14 +7242,19 @@ static void vertex_preprocessing(
    bool buffer_full;
    bool repair_depth_mode;
    bool coverage_repair;
+   bool cpu_draw_offset;
+   unsigned pgxp_mode;
 
    if (!renderer)
       return;
 
+   pgxp_mode = PGXP_DiagGLGetMode();
+   gl_pgxp_depth_mode_sync(renderer, pgxp_mode);
    is_semi_transparent = v[0].semi_transparent == 1;
    is_textured         = v[0].texture_blend_mode != 0;
+   cpu_draw_offset     = gl_pgxp_cpu_draw_offset(pgxp_mode);
    repair_depth_mode   =
-      PGXP_DiagGLGetMode() ==
+      pgxp_mode ==
          PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_DEPTH_OWNERSHIP;
    coverage_repair     = repair_depth_mode && v[0].coverage_repair_copy;
    /* Textured semi-transparent polys can contain opaque texels (when
@@ -7217,6 +7294,9 @@ static void vertex_preprocessing(
          z = (float)renderer->primitive_ordering;
          renderer->primitive_ordering += 1;
       }
+      if (gl_pgxp_depth_counter_persistent(pgxp_mode) &&
+          renderer->primitive_ordering > renderer->pgxp_depth_max_order)
+         renderer->pgxp_depth_max_order = renderer->primitive_ordering;
 
       for (i = 0; i < count; i++)
       {
@@ -7231,6 +7311,11 @@ static void vertex_preprocessing(
                renderer->submission_w_max = input_w;
          }
          renderer->submission_w_samples++;
+         if (cpu_draw_offset)
+         {
+            v[i].position[0] += (float)renderer->config.draw_offset[0];
+            v[i].position[1] += (float)renderer->config.draw_offset[1];
+         }
          v[i].position[2] = z;
          v[i].texture_window[0] = renderer->tex_x_mask;
          v[i].texture_window[1] = renderer->tex_x_or;
@@ -8290,6 +8375,7 @@ void rhi_gl_refresh_variables(void)
 void rhi_gl_prepare_frame(void)
 {
    gl_renderer *renderer;
+   unsigned mode;
 
    if (static_renderer.state == GL_STATE_INVALID)
       return;
@@ -8306,6 +8392,14 @@ void rhi_gl_prepare_frame(void)
       static_renderer.state = GL_STATE_INVALID;
       return;
    }
+
+   mode = PGXP_DiagGLGetMode();
+   gl_pgxp_depth_mode_sync(renderer, mode);
+   /* finalize_frame drains every pending command.  A new emulated frame is
+    * therefore the safe point to restart the experimental global ordering
+    * sequence and arm its single depth clear. */
+   renderer->primitive_ordering = 0;
+   renderer->depth_clear_pending = true;
 
    gl_normalize_inherited_state();
 
@@ -8420,6 +8514,19 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             (unsigned long long)renderer->submission_w_samples,
             (double)renderer->submission_w_min,
             (double)renderer->submission_w_max);
+      if (gl_pgxp_depth_counter_persistent(renderer->pgxp_depth_mode))
+         log_cb(RETRO_LOG_INFO,
+               "[pgxp_gl_depth_parity] frames=%u mode=%u "
+               "flushes=%llu clears=%llu carried_depth_flushes=%llu "
+               "max_frame_order=%u depth_policy=%s\n",
+               renderer->submission_frames, renderer->pgxp_depth_mode,
+               (unsigned long long)renderer->pgxp_depth_flushes,
+               (unsigned long long)renderer->pgxp_depth_clears,
+               (unsigned long long)renderer->pgxp_depth_carried_flushes,
+               renderer->pgxp_depth_max_order,
+               gl_pgxp_depth_frame_global(renderer->pgxp_depth_mode) ?
+                  "frame_global_vulkan_window_step" :
+                  "counter_global_depth_per_flush");
       if (renderer->pgxp_coverage_mode >=
             PGXP_DIAG_GL_TEST_CONSERVATIVE_RASTER)
       {
@@ -8711,6 +8818,10 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
       renderer->submission_w_max = 0.0f;
       renderer->submission_max_vertices = 0;
       renderer->submission_frames = 0;
+      renderer->pgxp_depth_flushes = 0;
+      renderer->pgxp_depth_clears = 0;
+      renderer->pgxp_depth_carried_flushes = 0;
+      renderer->pgxp_depth_max_order = 0;
    }
 
    /* Shared HD texture tracker frame boundary: process decoded IO

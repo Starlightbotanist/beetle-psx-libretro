@@ -269,6 +269,18 @@ enum PGXP_diag_gl_test_mode
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_4BPP_ONLY,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_8BPP_ONLY,
 	PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_16BPP_ONLY,
+	/* Focused GL/Vulkan follow-up.  The solid probe removes texture sampling
+	 * on both backends.  The depth modes distinguish merely carrying GL's
+	 * counter across flushes from the intentionally stronger experiment of
+	 * carrying both counter and depth for the whole frame.  (Vulkan actually
+	 * resets both at each render-pass flush.)  The offset modes move GL's
+	 * integer draw offset to the CPU, where Vulkan applies it, with the final
+	 * mode also selecting Vulkan's clip-expression order. */
+	PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID,
+	PGXP_DIAG_GL_TEST_DEPTH_COUNTER_PERSIST,
+	PGXP_DIAG_GL_TEST_DEPTH_FRAME_GLOBAL,
+	PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET,
+	PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET_VULKAN_MATH,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

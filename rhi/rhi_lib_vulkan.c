@@ -13,6 +13,7 @@
 #include "rhi_defer.h"
 #include "tt_trace.h"
 #include "pgxp/pgxp_diag.h"
+#include "pgxp/pgxp_main.h"
 #include <retro_inline.h>
 #include <math.h>
 #include "rhi_tt.h"
@@ -19566,6 +19567,70 @@ static ScanoutMode get_scanout_mode(bool bpp24)
 }
 
 #if PGXP_DIAG
+struct pgxp_vk_solid_stats
+{
+   unsigned frames;
+   uint64_t candidates;
+   uint64_t triangles;
+   uint64_t quads;
+   uint64_t vertices;
+};
+
+static struct pgxp_vk_solid_stats pgxp_vk_solid;
+
+static bool pgxp_vk_solid_coverage_enabled(
+      uint8_t texture_blend_mode, int blend_mode)
+{
+   return PGXP_DiagGLGetMode() ==
+         PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID &&
+      (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0 &&
+      texture_blend_mode != 0 && blend_mode == -1;
+}
+
+static void pgxp_vk_solid_color(Vertex *vertices, unsigned count,
+      bool quad)
+{
+   unsigned i;
+   pgxp_vk_solid.candidates++;
+   pgxp_vk_solid.vertices += count;
+   if (quad)
+      pgxp_vk_solid.quads++;
+   else
+      pgxp_vk_solid.triangles++;
+   for (i = 0; i < count; i++)
+   {
+      vertices[i].cf[0] = 1.0f;
+      vertices[i].cf[1] = 0.0f;
+      vertices[i].cf[2] = 1.0f;
+      vertices[i].fog[0] = 0.0f;
+      vertices[i].fog[1] = 0.0f;
+      vertices[i].fog[2] = 0.0f;
+      vertices[i].fog[3] = 0.0f;
+   }
+}
+
+static void pgxp_vk_solid_finalize(void)
+{
+   if (PGXP_DiagGLGetMode() != PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID)
+   {
+      memset(&pgxp_vk_solid, 0, sizeof(pgxp_vk_solid));
+      return;
+   }
+   if (++pgxp_vk_solid.frames < 60u)
+      return;
+   if (log_cb)
+      log_cb(RETRO_LOG_INFO,
+            "[pgxp_vk_solid_coverage] frames=%u "
+            "candidates=%llu triangles=%llu quads=%llu vertices=%llu "
+            "texture_sampling=disabled color=magenta\n",
+            pgxp_vk_solid.frames,
+            (unsigned long long)pgxp_vk_solid.candidates,
+            (unsigned long long)pgxp_vk_solid.triangles,
+            (unsigned long long)pgxp_vk_solid.quads,
+            (unsigned long long)pgxp_vk_solid.vertices);
+   memset(&pgxp_vk_solid, 0, sizeof(pgxp_vk_solid));
+}
+
 struct pgxp_vk_snap_stats
 {
    unsigned mode;
@@ -19708,6 +19773,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
       return;
 
 #if PGXP_DIAG
+   pgxp_vk_solid_finalize();
    pgxp_vk_snap_finalize();
 #endif
    tt_frame_advance();
@@ -20066,17 +20132,25 @@ void rhi_vulkan_push_triangle(
       bool mask_test, bool set_mask,
       bool pgxp_valid_w)
 {
+   bool solid_coverage = false;
    if (!renderer)
       return;
 
-   renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
-   renderer->render_state.primitive_dither = dither;
+#if PGXP_DIAG
+   solid_coverage = pgxp_vk_solid_coverage_enabled(
+         texture_blend_mode, blend_mode);
+#endif
+   renderer->render_state.texture_color_modulate =
+      !solid_coverage && texture_blend_mode == 2;
+   renderer->render_state.primitive_dither =
+      solid_coverage ? false : dither;
    renderer_set_palette_offset(renderer, clut_x, clut_y);
    renderer_set_texture_offset(renderer, texpage_x, texpage_y);
    renderer->render_state.mask_test = mask_test;
    renderer->render_state.force_mask_bit = set_mask;
    renderer_set_UV_limits(renderer, min_u, min_v, max_u, max_v);
-   renderer_apply_texture_mode(renderer, texture_blend_mode, depth_shift);
+   renderer_apply_texture_mode(renderer,
+         solid_coverage ? 0 : texture_blend_mode, depth_shift);
 
    renderer_apply_blend_mode(renderer, blend_mode);
 
@@ -20093,6 +20167,10 @@ void rhi_vulkan_push_triangle(
 #endif
       vertices_set_cf(vertices, 3, precise_rgb);
       vertices_set_fog(vertices, 3, fog);
+#if PGXP_DIAG
+      if (solid_coverage)
+         pgxp_vk_solid_color(vertices, 3, false);
+#endif
       renderer_draw_triangle(renderer, vertices);
    }
 }
@@ -20121,17 +20199,25 @@ void rhi_vulkan_push_quad(
       bool pgxp_valid_w,
       bool is_sprite, bool may_be_2d)
 {
+   bool solid_coverage = false;
    if (!renderer)
       return;
 
-   renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
-   renderer->render_state.primitive_dither = dither;
+#if PGXP_DIAG
+   solid_coverage = pgxp_vk_solid_coverage_enabled(
+         texture_blend_mode, blend_mode);
+#endif
+   renderer->render_state.texture_color_modulate =
+      !solid_coverage && texture_blend_mode == 2;
+   renderer->render_state.primitive_dither =
+      solid_coverage ? false : dither;
    renderer_set_palette_offset(renderer, clut_x, clut_y);
    renderer_set_texture_offset(renderer, texpage_x, texpage_y);
    renderer->render_state.mask_test = mask_test;
    renderer->render_state.force_mask_bit = set_mask;
    renderer_set_UV_limits(renderer, min_u, min_v, max_u, max_v);
-   renderer_apply_texture_mode(renderer, texture_blend_mode, depth_shift);
+   renderer_apply_texture_mode(renderer,
+         solid_coverage ? 0 : texture_blend_mode, depth_shift);
 
    renderer_apply_blend_mode(renderer, blend_mode);
 
@@ -20155,6 +20241,10 @@ void rhi_vulkan_push_quad(
 #endif
       vertices_set_cf(vertices, 4, precise_rgb);
       vertices_set_fog(vertices, 4, fog);
+#if PGXP_DIAG
+      if (solid_coverage)
+         pgxp_vk_solid_color(vertices, 4, true);
+#endif
       renderer_draw_quad(renderer, vertices);
    }
 }

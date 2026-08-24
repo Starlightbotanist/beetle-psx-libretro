@@ -63,7 +63,10 @@ out vec4 xyp_9_14_9;
 #endif
 STRINGIZE(
 void main() {
-   vec2 pos = position.xy + vec2(offset);
+   // Modes 159/160 bake the integer GPU draw offset into each command vertex
+   // on the CPU, matching Vulkan's renderer_build_attribs staging point.
+   vec2 pos = (pgxp_raster_mode == 159U || pgxp_raster_mode == 160U) ?
+      position.xy : position.xy + vec2(offset);
 
    // Modes 17/18/22 explicitly choose how precise PGXP positions land on
    // the fixed-point grid which OpenGL reports through GL_SUBPIXEL_BITS.
@@ -84,7 +87,7 @@ void main() {
    // Mode 34 duplicates Vulkan primitive.vert's operation order exactly.
    // It is algebraically equivalent to the ordinary GL path, but keeps a
    // final concrete shader/backend difference measurable on the live driver.
-   if (pgxp_raster_mode == 34U)
+   if (pgxp_raster_mode == 34U || pgxp_raster_mode == 160U)
    {
       xpos = pos.x / 1024.0 * 2.0 - 1.0;
       ypos = pos.y / 512.0 * 2.0 - 1.0;
@@ -109,9 +112,20 @@ void main() {
 
    // position.z increases as the primitives near the camera so we
    // reverse the order to match the common GL convention
-   float zpos = 1.0 - (position.z / 32768.);
+   // Mode 158 retains one depth sequence for the frame.  Vulkan's NDC Z is
+   // already in [0, 1], whereas GL maps NDC [-1, 1] to window depth [0, 1].
+   // Doubling Vulkan's decrement here makes the resulting GL window-depth
+   // step exactly Vulkan's 4 / 0xffffff step.
+   float zpos = pgxp_raster_mode == 158U ?
+      1.0 - position.z * (8.0 / 16777215.0) :
+      1.0 - (position.z / 32768.0);
 
-   gl_Position.xyzw = vec4(xpos * wpos, ypos * wpos, zpos * wpos, wpos);
+   if (pgxp_raster_mode == 160U)
+      gl_Position = vec4(pos / vec2(1024.0, 512.0) * 2.0 - 1.0,
+            zpos, 1.0) * wpos;
+   else
+      gl_Position.xyzw = vec4(xpos * wpos, ypos * wpos,
+            zpos * wpos, wpos);
    //gl_Position.xyzw = vec4(xpos, ypos, zpos, 1.);
 
    // Glium doesn't support 'normalized' for now

@@ -5198,6 +5198,18 @@ static void check_variables(bool startup)
          else if (strcmp(var.value,
                   "native union y 16bpp only") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_NATIVE_UNION_Y_16BPP_ONLY;
+         else if (strcmp(var.value, "cross backend solid") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID;
+         else if (strcmp(var.value, "depth counter persist") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_DEPTH_COUNTER_PERSIST;
+         else if (strcmp(var.value, "depth frame global") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_DEPTH_FRAME_GLOBAL;
+         else if (strcmp(var.value, "cpu draw offset") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET;
+         else if (strcmp(var.value,
+                  "cpu draw offset vulkan math") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_CPU_DRAW_OFFSET_VULKAN_MATH;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

@@ -1032,7 +1032,12 @@ static const char* pgxp_diag_gl_mode_name(unsigned mode)
 		"native_union_y_modulated_only",
 		"native_union_y_4bpp_only",
 		"native_union_y_8bpp_only",
-		"native_union_y_16bpp_only"
+		"native_union_y_16bpp_only",
+		"cross_backend_solid",
+		"depth_counter_persist",
+		"depth_frame_global",
+		"cpu_draw_offset",
+		"cpu_draw_offset_vulkan_math"
 	};
 	return mode < PGXP_DIAG_GL_TEST_COUNT ? names[mode] : "invalid";
 }
