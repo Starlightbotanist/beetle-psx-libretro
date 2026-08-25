@@ -484,6 +484,44 @@ static void test_stack_ablation_gates(void)
    PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
 }
 
+static void test_recovery_ambiguity_spatial_gate(void)
+{
+   const uint32_t packed = 0x00A1011Fu; /* native 287,161 */
+   PGXP_value first = PGXP_value_zero;
+   PGXP_value second = PGXP_value_zero;
+   float x, y, z;
+
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+   first.value = second.value = packed;
+   first.flags = second.flags = VALID_012;
+
+   /* Reproduce the R4 tachometer failure: two GTE results share an SXY word,
+    * while the retained first result is nowhere near that native vertex. */
+   PGXP_DiagResetRecovery();
+   first.x = 219.243805f;
+   first.y = 139.115555f;
+   first.z = 1.0f;
+   second.x = 287.75f;
+   second.y = 161.5f;
+   second.z = 1.0f;
+   PGXP_DiagTraceGTE(&first);
+   PGXP_DiagTraceGTE(&second);
+   if (PGXP_DiagRecoverVertex(packed, NULL, 3, &x, &y, &z))
+      fail("non-local ambiguous recovery accepted", 1, 0);
+
+   /* Keep the earlier Spyro experiment intact when ambiguity is confined to
+    * subpixel alternatives around the same architectural coordinate. */
+   PGXP_DiagResetRecovery();
+   first.x = 287.75f;
+   first.y = 161.75f;
+   second.x = 287.5f;
+   second.y = 161.25f;
+   PGXP_DiagTraceGTE(&first);
+   PGXP_DiagTraceGTE(&second);
+   if (!PGXP_DiagRecoverVertex(packed, NULL, 3, &x, &y, &z))
+      fail("local ambiguous recovery rejected", 0, 1);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -520,6 +558,9 @@ int main(void)
 
    printf("[T10] runtime PGXP stack ablation gates\n");
    test_stack_ablation_gates();
+
+   printf("[T11] ambiguous recovery stays within native neighbourhood\n");
+   test_recovery_ambiguity_spatial_gate();
 
    if (failures)
    {

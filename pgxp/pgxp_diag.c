@@ -31,7 +31,9 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_TRACE_STAGES 9u
 #define PGXP_DIAG_RECOVERY_BUCKETS 65536u
 #define PGXP_DIAG_RECOVERY_WAYS 4u
+#define PGXP_DIAG_RECOVERY_LOCAL_DELTA 1.0f
 #define PGXP_DIAG_FLIGHT_RECOVERY_SAMPLES 2048u
+#define PGXP_DIAG_FLIGHT_REJECT_SAMPLES 256u
 #define PGXP_DIAG_FLIGHT_PRIMITIVE_SAMPLES 2048u
 #define PGXP_DIAG_FLIGHT_TRACE_SAMPLES 64u
 #define PGXP_DIAG_RAM_WORDS (2048u * 1024u / 4u)
@@ -555,6 +557,7 @@ static uint64_t recovery_hits;
 static uint64_t recovery_disabled;
 static uint64_t recovery_ambiguous;
 static uint64_t recovery_ambiguous_used;
+static uint64_t recovery_ambiguous_rejected;
 static uint64_t recovery_misses;
 static uint64_t recovery_age_hits[5];
 static uint64_t recovery_old_age[4];
@@ -564,6 +567,7 @@ static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_way_hits[PGXP_DIAG_RECOVERY_WAYS];
 static uint64_t recovery_evictions;
 static uint32_t recovery_flight_samples;
+static uint32_t recovery_reject_samples;
 static uint32_t primitive_flight_samples;
 static uint32_t gl_flight_samples;
 static uint32_t flight_trace_samples;
@@ -1364,6 +1368,7 @@ void PGXP_DiagResetRecovery(void)
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_disabled = 0;
 	recovery_ambiguous_used = 0;
+	recovery_ambiguous_rejected = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
 	memset(recovery_old_age, 0, sizeof(recovery_old_age));
 	recovery_too_old = 0;
@@ -1414,6 +1419,7 @@ void PGXP_DiagInit(void)
 	trace_chain_samples = 0;
 	trace_tracked_samples = 0;
 	recovery_flight_samples = 0;
+	recovery_reject_samples = 0;
 	primitive_flight_samples = 0;
 	gl_flight_samples = 0;
 	flight_trace_samples = 0;
@@ -1850,6 +1856,11 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	PGXP_diag_recovery_vertex* recovery;
 	uint32_t index;
 	uint32_t age;
+	int32_t native_x;
+	int32_t native_y;
+	float dx;
+	float dy;
+	float max_delta;
 	unsigned way;
 	unsigned stage = trace_metadata_valid(stale) ? stale->trace_stage :
 		PGXP_TRACE_NONE;
@@ -1888,11 +1899,45 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	}
 	if (recovery->ambiguous)
 	{
+		native_x = (int16_t)(value & UINT32_C(0xffff));
+		native_y = (int16_t)(value >> 16);
+		dx = recovery->x - (float)native_x;
+		dy = recovery->y - (float)native_y;
+		max_delta = fmaxf(fabsf(dx), fabsf(dy));
 		recovery_ambiguous++;
-		/* Keep the first exact-word result as a bounded experiment.  Multiple
-		 * precise GTE results may quantize to the same native pixel; the first
-		 * remains spatially compatible even though its subpixel/depth identity
-		 * is not proven. */
+		/* Multiple precise GTE results may share one architectural SXY word.
+		 * Retaining the first result repaired real subpixel gaps, but the R4
+		 * flight recorder caught an unrelated HUD quad inheriting a candidate
+		 * 71 native pixels away.  An ambiguous fallback has no provenance with
+		 * which to select a non-local candidate.  Preserve the useful case in
+		 * which the candidates remain in the packed vertex's one-pixel
+		 * neighbourhood, and otherwise fall through to the ordinary cache or
+		 * native coordinate. */
+		if (!isfinite(max_delta) ||
+		    max_delta > PGXP_DIAG_RECOVERY_LOCAL_DELTA)
+		{
+			recovery_ambiguous_rejected++;
+			if (log_cb &&
+			    recovery_reject_samples < PGXP_DIAG_FLIGHT_REJECT_SAMPLES)
+			{
+				log_cb(RETRO_LOG_INFO,
+					"[pgxp_recovery_reject] n=%u mf=%u packet=%llu "
+					"op=%02x stack=%03x slot=%u value=%08x "
+					"native=%d/%d recovered=%.9g/%.9g/%.9g "
+					"delta=%.6f/%.6f max=%.6f record_mf=%u "
+					"age=%u way=%u record_trace=%llu\n",
+					recovery_reject_samples + 1, mode_frame,
+					(unsigned long long)current_packet, current_opcode,
+					PGXP_GetExperimentMask(), slot, value,
+					native_x, native_y, recovery->x, recovery->y,
+					recovery->z, dx, dy, max_delta, recovery->frame,
+					age, way, (unsigned long long)recovery->trace_id);
+				recovery_reject_samples++;
+				if (max_delta > 4.0f)
+					trace_dump_flight_chain(recovery->trace_id);
+			}
+			return 0;
+		}
 		recovery_ambiguous_used++;
 	}
 	*x = recovery->x;
@@ -1906,11 +1951,11 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	if (log_cb &&
 	    recovery_flight_samples < PGXP_DIAG_FLIGHT_RECOVERY_SAMPLES)
 	{
-		int32_t native_x = (int16_t)(value & UINT32_C(0xffff));
-		int32_t native_y = (int16_t)(value >> 16);
-		float dx = recovery->x - (float)native_x;
-		float dy = recovery->y - (float)native_y;
-		float max_delta = fmaxf(fabsf(dx), fabsf(dy));
+		native_x = (int16_t)(value & UINT32_C(0xffff));
+		native_y = (int16_t)(value >> 16);
+		dx = recovery->x - (float)native_x;
+		dy = recovery->y - (float)native_y;
+		max_delta = fmaxf(fabsf(dx), fabsf(dy));
 		log_cb(RETRO_LOG_INFO,
 			"[pgxp_flight_recovery] n=%u mf=%u packet=%llu op=%02x "
 			"stack=%03x slot=%u value=%08x native=%d/%d "
@@ -8128,7 +8173,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
 		"age=%llu/%llu/%llu/%llu/%llu disabled=%llu ambiguous=%llu used=%llu "
-		"misses=%llu "
+		"rejected=%llu misses=%llu "
 		"too_old=%llu\n",
 		(unsigned long long)frame_number,
 		(unsigned long long)recovery_attempts,
@@ -8141,6 +8186,7 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)recovery_disabled,
 		(unsigned long long)recovery_ambiguous,
 		(unsigned long long)recovery_ambiguous_used,
+		(unsigned long long)recovery_ambiguous_rejected,
 		(unsigned long long)recovery_misses,
 		(unsigned long long)recovery_too_old);
 	log_cb(RETRO_LOG_INFO,
@@ -8460,6 +8506,7 @@ void PGXP_DiagFrame(int backend)
 	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
 	recovery_disabled = 0;
 	recovery_ambiguous_used = 0;
+	recovery_ambiguous_rejected = 0;
 	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
 	memset(recovery_old_age, 0, sizeof(recovery_old_age));
 	recovery_too_old = 0;
