@@ -31,6 +31,9 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_TRACE_STAGES 9u
 #define PGXP_DIAG_RECOVERY_BUCKETS 65536u
 #define PGXP_DIAG_RECOVERY_WAYS 4u
+#define PGXP_DIAG_FLIGHT_RECOVERY_SAMPLES 2048u
+#define PGXP_DIAG_FLIGHT_PRIMITIVE_SAMPLES 2048u
+#define PGXP_DIAG_FLIGHT_TRACE_SAMPLES 64u
 #define PGXP_DIAG_RAM_WORDS (2048u * 1024u / 4u)
 #define PGXP_DIAG_WRITER_WIDTHS 4u
 #define PGXP_DIAG_COHERENCE_BUCKETS 16384u
@@ -110,6 +113,7 @@ typedef struct
 
 typedef struct
 {
+	uint64_t trace_id;
 	uint32_t value;
 	uint32_t frame;
 	float x;
@@ -118,6 +122,26 @@ typedef struct
 	uint8_t ambiguous;
 	uint8_t valid;
 } PGXP_diag_recovery_vertex;
+
+typedef struct
+{
+	uint64_t max_delta_packet;
+	uint64_t max_area_ratio_packet;
+	uint64_t max_w_ratio_packet;
+	double max_delta;
+	double max_area_ratio;
+	double max_w_ratio;
+	uint32_t primitives;
+	uint32_t recoveries;
+	uint32_t cache_primitives;
+	uint32_t sign_disagreements;
+	uint32_t nonfinite_primitives;
+	uint32_t feature_mask;
+	uint8_t max_delta_opcode;
+	uint8_t max_area_ratio_opcode;
+	uint8_t max_w_ratio_opcode;
+	uint8_t gl_mode;
+} PGXP_diag_flight_frame;
 
 typedef struct
 {
@@ -539,6 +563,11 @@ static uint64_t recovery_stage_attempts[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
 static uint64_t recovery_way_hits[PGXP_DIAG_RECOVERY_WAYS];
 static uint64_t recovery_evictions;
+static uint32_t recovery_flight_samples;
+static uint32_t primitive_flight_samples;
+static uint32_t gl_flight_samples;
+static uint32_t flight_trace_samples;
+static PGXP_diag_flight_frame flight_frame;
 static PGXP_diag_mem_writer mem_writers[PGXP_DIAG_RAM_WORDS];
 static uint64_t writer_writes[PGXP_DIAG_WRITER_WIDTHS];
 static uint64_t writer_native[PGXP_DIAG_WRITER_WIDTHS];
@@ -1160,6 +1189,43 @@ static void trace_dump_chain(uint64_t id, uint8_t terminal_reason)
 	trace_chain_samples++;
 }
 
+/* The ordinary provenance sampler is intentionally exhausted early in long
+ * runs.  A transient renderer artifact needs a separate, tightly bounded
+ * channel so a late recovery outlier can still preserve its GTE origin. */
+static void trace_dump_flight_chain(uint64_t id)
+{
+	uint64_t first;
+	uint64_t sequence;
+
+	if (!id || !log_cb ||
+	    flight_trace_samples >= PGXP_DIAG_FLIGHT_TRACE_SAMPLES)
+		return;
+	first = trace_sequence > PGXP_TRACE_RING_SIZE ?
+		trace_sequence - PGXP_TRACE_RING_SIZE + 1 : 1;
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_flight_trace] sample=%u mf=%u id=%llu begin=%llu end=%llu\n",
+		flight_trace_samples + 1, mode_frame, (unsigned long long)id,
+		(unsigned long long)first, (unsigned long long)trace_sequence);
+	for (sequence = first; sequence <= trace_sequence; sequence++)
+	{
+		const PGXP_trace_event* event =
+			&trace_ring[(uint32_t)(sequence - 1) &
+				(PGXP_TRACE_RING_SIZE - 1)];
+		if (event->sequence != sequence || event->id != id)
+			continue;
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_flight_trace_event] id=%llu seq=%llu mf=%u "
+			"type=%u reason=%u stage=%u sd=%03x ia=%08x "
+			"native=%08x/%08x shadow=%08x flags=%08x xy=%.3f/%.3f\n",
+			(unsigned long long)id, (unsigned long long)event->sequence,
+			event->frame, event->type, event->reason, event->stage,
+			event->source_dest, event->instr_addr, event->before,
+			event->after, event->shadow_value, event->shadow_flags,
+			event->x, event->y);
+	}
+	flight_trace_samples++;
+}
+
 
 static int vertex_sample_seen(uint32_t addr, uint32_t value)
 {
@@ -1347,6 +1413,11 @@ void PGXP_DiagInit(void)
 	trace_write = 0;
 	trace_chain_samples = 0;
 	trace_tracked_samples = 0;
+	recovery_flight_samples = 0;
+	primitive_flight_samples = 0;
+	gl_flight_samples = 0;
+	flight_trace_samples = 0;
+	memset(&flight_frame, 0, sizeof(flight_frame));
 	PGXP_DiagResetRecovery();
 	memset(mem_writers, 0, sizeof(mem_writers));
 	memset(writer_writes, 0, sizeof(writer_writes));
@@ -1762,6 +1833,7 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 	}
 	else
 	{
+		recovery->trace_id = value->trace_id;
 		recovery->value = value->value;
 		recovery->frame = mode_frame;
 		recovery->x = value->x;
@@ -1830,6 +1902,33 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 	recovery_age_hits[age]++;
 	recovery_stage_hits[stage]++;
 	recovery_way_hits[way]++;
+	flight_frame.recoveries++;
+	if (log_cb &&
+	    recovery_flight_samples < PGXP_DIAG_FLIGHT_RECOVERY_SAMPLES)
+	{
+		int32_t native_x = (int16_t)(value & UINT32_C(0xffff));
+		int32_t native_y = (int16_t)(value >> 16);
+		float dx = recovery->x - (float)native_x;
+		float dy = recovery->y - (float)native_y;
+		float max_delta = fmaxf(fabsf(dx), fabsf(dy));
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_flight_recovery] n=%u mf=%u packet=%llu op=%02x "
+			"stack=%03x slot=%u value=%08x native=%d/%d "
+			"recovered=%.9g/%.9g/%.9g delta=%.6f/%.6f max=%.6f "
+			"record_mf=%u age=%u way=%u ambiguous=%u "
+			"record_trace=%llu stale=%08x/%08x stage=%u trace=%llu\n",
+			recovery_flight_samples + 1, mode_frame,
+			(unsigned long long)current_packet, current_opcode,
+			PGXP_GetExperimentMask(), slot, value, native_x, native_y,
+			recovery->x, recovery->y, recovery->z, dx, dy, max_delta,
+			recovery->frame, age, way, recovery->ambiguous,
+			(unsigned long long)recovery->trace_id,
+			stale ? stale->value : 0, stale ? stale->flags : 0, stage,
+			(unsigned long long)(stale ? stale->trace_id : 0));
+		recovery_flight_samples++;
+		if (max_delta > 4.0f)
+			trace_dump_flight_chain(recovery->trace_id);
+	}
 	return 1;
 	return 0;
 }
@@ -3576,6 +3675,88 @@ void PGXP_DiagGLPrimitive(const void* vertices, unsigned count,
 			output->invalid_w = expected->invalid_w;
 			output->semi_transparent = expected->semi_transparent;
 			output->valid = 1;
+		}
+		for (i = 0; i + 2u < count; i += 3u)
+		{
+			const PGXP_diag_submit_triangle* expected =
+				&submit_triangles[submit_pending_triangle + i / 3u];
+			const float* actual0 =
+				(const float*)(bytes + (i + 0u) * stride_bytes);
+			const float* actual1 =
+				(const float*)(bytes + (i + 1u) * stride_bytes);
+			const float* actual2 =
+				(const float*)(bytes + (i + 2u) * stride_bytes);
+			double scale =
+				(double)(UINT32_C(1) << expected->upscale_shift);
+			double native_area =
+				((double)expected->native_x[1] - expected->native_x[0]) *
+				((double)expected->native_y[2] - expected->native_y[0]) -
+				((double)expected->native_x[2] - expected->native_x[0]) *
+				((double)expected->native_y[1] - expected->native_y[0]);
+			double precise_area =
+				((double)actual1[0] - actual0[0]) *
+				((double)actual2[1] - actual0[1]) -
+				((double)actual2[0] - actual0[0]) *
+				((double)actual1[1] - actual0[1]);
+			precise_area /= scale * scale;
+			double native_magnitude = fabs(native_area);
+			double precise_magnitude = fabs(precise_area);
+			double larger = native_magnitude > precise_magnitude ?
+				native_magnitude : precise_magnitude;
+			double smaller = native_magnitude < precise_magnitude ?
+				native_magnitude : precise_magnitude;
+			double area_ratio = larger /
+				(smaller > (1.0 / 256.0) ? smaller : (1.0 / 256.0));
+			double delta0 = hypot((double)actual0[0] / scale -
+				expected->native_x[0], (double)actual0[1] / scale -
+				expected->native_y[0]);
+			double delta1 = hypot((double)actual1[0] / scale -
+				expected->native_x[1], (double)actual1[1] / scale -
+				expected->native_y[1]);
+			double delta2 = hypot((double)actual2[0] / scale -
+				expected->native_x[2], (double)actual2[1] / scale -
+				expected->native_y[2]);
+			double max_delta = fmax(delta0, fmax(delta1, delta2));
+			double w_min = fmin(actual0[3], fmin(actual1[3], actual2[3]));
+			double w_max = fmax(actual0[3], fmax(actual1[3], actual2[3]));
+			double w_ratio = w_min > 0.0 ? w_max / w_min : HUGE_VAL;
+			int nonfinite =
+				!isfinite(max_delta) || !isfinite(area_ratio) ||
+				!isfinite(actual0[3]) || !isfinite(actual1[3]) ||
+				!isfinite(actual2[3]);
+			if (log_cb &&
+			    gl_flight_samples < PGXP_DIAG_FLIGHT_PRIMITIVE_SAMPLES &&
+			    (max_delta > 4.0 || nonfinite || w_ratio > 64.0 ||
+			     (area_ratio > 16.0 &&
+			      (native_magnitude > 256.0 || precise_magnitude > 256.0))))
+			{
+				log_cb(RETRO_LOG_INFO,
+					"[pgxp_flight_gl] n=%u mf=%u packet=%llu op=%02x "
+					"stack=%03x glmode=%u upscale=%u material=%016llx "
+					"textured=%u gouraud=%u semi=%u invalid_w=%u "
+					"native=%d/%d,%d/%d,%d/%d "
+					"final=%.9g/%.9g,%.9g/%.9g,%.9g/%.9g "
+					"w=%.9g/%.9g/%.9g delta=%.6f/%.6f/%.6f "
+					"area=%.6f/%.6f ratio=%.6f w_ratio=%.6f "
+					"uv=%u/%u,%u/%u,%u/%u nonfinite=%d\n",
+					gl_flight_samples + 1, mode_frame,
+					(unsigned long long)expected->packet, expected->opcode,
+					PGXP_GetExperimentMask(), PGXP_DiagGLGetMode(),
+					expected->upscale_shift,
+					(unsigned long long)material_key, expected->textured,
+					expected->gouraud, expected->semi_transparent,
+					expected->invalid_w, expected->native_x[0],
+					expected->native_y[0], expected->native_x[1],
+					expected->native_y[1], expected->native_x[2],
+					expected->native_y[2], actual0[0], actual0[1],
+					actual1[0], actual1[1], actual2[0], actual2[1],
+					actual0[3], actual1[3], actual2[3], delta0, delta1,
+					delta2, native_area, precise_area, area_ratio, w_ratio,
+					expected->u[0], expected->v[0], expected->u[1],
+					expected->v[1], expected->u[2], expected->v[2],
+					nonfinite);
+				gl_flight_samples++;
+			}
 		}
 	}
 	submit_pending_valid = 0;
@@ -5803,8 +5984,15 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 	int pair_native_fold = 0;
 	int pair_precise_fold = 0;
 	int average_y;
+	int nonfinite = 0;
 	unsigned y_band;
 	unsigned part = quad_part <= 2 ? quad_part : 0;
+	unsigned source_mask = 0;
+	double max_delta = 0.0;
+	double area_ratio;
+	double w_min = 0.0;
+	double w_max = 0.0;
+	double w_ratio = 1.0;
 	unsigned i;
 
 	native_area /= scale2;
@@ -5819,11 +6007,47 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		unsigned j = (i + 1) % 3;
 		int64_t dx = (int64_t)vertices[i].native_x - vertices[j].native_x;
 		int64_t dy = (int64_t)vertices[i].native_y - vertices[j].native_y;
+		double precise_dx =
+			((double)vertices[i].precise_after_x - vertices[i].native_x) /
+			scale;
+		double precise_dy =
+			((double)vertices[i].precise_after_y - vertices[i].native_y) /
+			scale;
+		double delta = hypot(precise_dx, precise_dy);
+		double w = vertices[i].precise_after_w;
 		if (dx < 0) dx = -dx;
 		if (dy < 0) dy = -dy;
 		if (dx >= ((int64_t)1024 << upscale_shift)) oversize_x = 1;
 		if (dy >= ((int64_t)512 << upscale_shift)) oversize_y = 1;
+		if (!isfinite(delta) || !isfinite(w))
+			nonfinite = 1;
+		else
+		{
+			if (delta > max_delta)
+				max_delta = delta;
+			if (!i || w < w_min)
+				w_min = w;
+			if (!i || w > w_max)
+				w_max = w;
+		}
+		if (i < packet_vertex_count &&
+		    packet_vertices[i].source <= PGXP_DIAG_VERTEX_NATIVE)
+			source_mask |= UINT32_C(1) << packet_vertices[i].source;
 	}
+	{
+		double native_magnitude = fabs(native_area);
+		double precise_magnitude = fabs(precise_area);
+		double floor_area = 1.0 / 256.0;
+		double larger = native_magnitude > precise_magnitude ?
+			native_magnitude : precise_magnitude;
+		double smaller = native_magnitude < precise_magnitude ?
+			native_magnitude : precise_magnitude;
+		area_ratio = larger / (smaller > floor_area ? smaller : floor_area);
+	}
+	if (!nonfinite && w_min > 0.0)
+		w_ratio = w_max / w_min;
+	else if (w_min <= 0.0)
+		w_ratio = HUGE_VAL;
 	average_y = (vertices[0].native_y + vertices[1].native_y +
 		vertices[2].native_y) / 3;
 	average_y >>= upscale_shift;
@@ -5850,6 +6074,84 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		window.gpu_oversize_y++;
 	if ((oversize_x || oversize_y) && sign_disagreement)
 		window.gpu_oversize_sign_disagreements++;
+
+	if (!flight_frame.primitives)
+	{
+		flight_frame.feature_mask = PGXP_GetExperimentMask();
+		flight_frame.gl_mode = (uint8_t)PGXP_DiagGLGetMode();
+	}
+	flight_frame.primitives++;
+	if (source_mask & (UINT32_C(1) << PGXP_DIAG_VERTEX_CACHE))
+		flight_frame.cache_primitives++;
+	if (sign_disagreement)
+		flight_frame.sign_disagreements++;
+	if (nonfinite)
+		flight_frame.nonfinite_primitives++;
+	if (max_delta > flight_frame.max_delta)
+	{
+		flight_frame.max_delta = max_delta;
+		flight_frame.max_delta_packet = current_packet;
+		flight_frame.max_delta_opcode = current_opcode;
+	}
+	if (area_ratio > flight_frame.max_area_ratio)
+	{
+		flight_frame.max_area_ratio = area_ratio;
+		flight_frame.max_area_ratio_packet = current_packet;
+		flight_frame.max_area_ratio_opcode = current_opcode;
+	}
+	if (w_ratio > flight_frame.max_w_ratio)
+	{
+		flight_frame.max_w_ratio = w_ratio;
+		flight_frame.max_w_ratio_packet = current_packet;
+		flight_frame.max_w_ratio_opcode = current_opcode;
+	}
+
+	if (log_cb &&
+	    primitive_flight_samples < PGXP_DIAG_FLIGHT_PRIMITIVE_SAMPLES &&
+	    ((source_mask & (UINT32_C(1) << PGXP_DIAG_VERTEX_CACHE)) ||
+	     max_delta > 4.0 || nonfinite || w_ratio > 64.0 ||
+	     (area_ratio > 16.0 &&
+	      (fabs(native_area) > 256.0 || fabs(precise_area) > 256.0))))
+	{
+		unsigned source0 = packet_vertex_count > 0 ?
+			packet_vertices[0].source : 0xffu;
+		unsigned source1 = packet_vertex_count > 1 ?
+			packet_vertices[1].source : 0xffu;
+		unsigned source2 = packet_vertex_count > 2 ?
+			packet_vertices[2].source : 0xffu;
+		unsigned stage0 = packet_vertex_count > 0 ?
+			packet_vertices[0].stage : 0xffu;
+		unsigned stage1 = packet_vertex_count > 1 ?
+			packet_vertices[1].stage : 0xffu;
+		unsigned stage2 = packet_vertex_count > 2 ?
+			packet_vertices[2].stage : 0xffu;
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_flight_primitive] n=%u mf=%u packet=%llu op=%02x "
+			"part=%u stack=%03x glmode=%u source=%u/%u/%u "
+			"stage=%u/%u/%u invalid_w=%d nonfinite=%d "
+			"native=%d/%d,%d/%d,%d/%d "
+			"precise=%.9g/%.9g,%.9g/%.9g,%.9g/%.9g "
+			"w=%.9g/%.9g/%.9g max_delta=%.6f "
+			"area=%.6f/%.6f ratio=%.6f w_range=%.9g/%.9g/%.6f\n",
+			primitive_flight_samples + 1, mode_frame,
+			(unsigned long long)current_packet, current_opcode, part,
+			PGXP_GetExperimentMask(), PGXP_DiagGLGetMode(),
+			source0, source1, source2, stage0, stage1, stage2,
+			invalid_w, nonfinite,
+			vertices[0].native_x, vertices[0].native_y,
+			vertices[1].native_x, vertices[1].native_y,
+			vertices[2].native_x, vertices[2].native_y,
+			vertices[0].precise_after_x, vertices[0].precise_after_y,
+			vertices[1].precise_after_x, vertices[1].precise_after_y,
+			vertices[2].precise_after_x, vertices[2].precise_after_y,
+			vertices[0].precise_after_w, vertices[1].precise_after_w,
+			vertices[2].precise_after_w, max_delta, native_area,
+			precise_area, area_ratio, w_min, w_max, w_ratio);
+		primitive_flight_samples++;
+		if (max_delta > 4.0)
+			for (i = 0; i < packet_vertex_count; i++)
+				trace_dump_flight_chain(packet_vertices[i].trace_id);
+	}
 
 	if (part == 1)
 	{
@@ -5936,6 +6238,29 @@ void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
 		gpu_fold_samples++;
 		gpu_fold_window_samples++;
 	}
+}
+
+static void pgxp_diag_flight_finish_frame(void)
+{
+	if (log_cb && mode_frame && flight_frame.primitives)
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_flight_frame] mf=%u stack=%03x glmode=%u "
+			"primitives=%u recoveries=%u cache_primitives=%u "
+			"sign_disagreements=%u nonfinite=%u "
+			"max_delta=%.6f@%llu/%02x max_area_ratio=%.6f@%llu/%02x "
+			"max_w_ratio=%.6f@%llu/%02x\n",
+			mode_frame, flight_frame.feature_mask, flight_frame.gl_mode,
+			flight_frame.primitives, flight_frame.recoveries,
+			flight_frame.cache_primitives,
+			flight_frame.sign_disagreements,
+			flight_frame.nonfinite_primitives, flight_frame.max_delta,
+			(unsigned long long)flight_frame.max_delta_packet,
+			flight_frame.max_delta_opcode, flight_frame.max_area_ratio,
+			(unsigned long long)flight_frame.max_area_ratio_packet,
+			flight_frame.max_area_ratio_opcode, flight_frame.max_w_ratio,
+			(unsigned long long)flight_frame.max_w_ratio_packet,
+			flight_frame.max_w_ratio_opcode);
+	memset(&flight_frame, 0, sizeof(flight_frame));
 }
 
 void PGXP_DiagLineHack(int32_t average_y, int rejected_w,
@@ -6574,6 +6899,7 @@ void PGXP_DiagFrame(int backend)
 	 * advancing mode_frame so packet ages and the 60-frame aggregate align. */
 	pgxp_diag_tj_finish_frame();
 	pgxp_diag_submit_finish_frame();
+	pgxp_diag_flight_finish_frame();
 	frame_number++;
 	if (backend != last_backend || mode != last_mode ||
 	    feature_mask != last_feature_mask)
