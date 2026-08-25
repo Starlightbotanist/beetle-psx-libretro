@@ -5761,6 +5761,9 @@ static int pgxp_vk_coverage_probe_value(bool textured, bool semi_transparent)
       return semi_transparent ? PgxpVkProbe_SemiFlat :
          PgxpVkProbe_OpaqueFlat;
    }
+   if (mode == PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER)
+      return !textured && !semi_transparent ?
+         PgxpVkProbe_OpaqueFlat : PgxpVkProbe_Off;
    return PgxpVkProbe_Off;
 }
 
@@ -5769,7 +5772,8 @@ static bool pgxp_vk_coverage_probe_enabled(void)
    unsigned mode = PGXP_DiagGLGetMode();
    return (mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID ||
          mode == PGXP_DIAG_GL_TEST_VK_ALL_PRIMITIVE_SOLID ||
-         mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP) &&
+         mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP ||
+         mode == PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER) &&
       (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
 }
 #endif
@@ -19714,7 +19718,9 @@ static void pgxp_vk_solid_finalize(void)
             (unsigned long long)pgxp_vk_solid.quads,
             (unsigned long long)pgxp_vk_solid.lines,
             mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP ?
-               "by_class" : "magenta");
+               "by_class" :
+            mode == PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER ?
+               "opaque_flat_blue" : "magenta");
    memset(&pgxp_vk_solid, 0, sizeof(pgxp_vk_solid));
    pgxp_vk_solid.mode = mode;
 }

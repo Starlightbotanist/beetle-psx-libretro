@@ -42,8 +42,8 @@ layout(location = 6) in mediump vec4 vFog;
 #include "pgxp_fog.h"
 
 #define COVERAGE_PROBE_COLOR \
-	(COVERAGE_PROBE == 2 ? vec3(0.0, 1.0, 1.0) : \
-	 COVERAGE_PROBE == 3 ? vec3(1.0, 1.0, 0.0) : \
+	(COVERAGE_PROBE == 2 ? vec3(1.0, 0.0, 0.0) : \
+	 COVERAGE_PROBE == 3 ? vec3(0.0, 0.0, 1.0) : \
 	 COVERAGE_PROBE == 4 ? vec3(0.0, 1.0, 0.0) : \
 	 vec3(1.0, 0.0, 1.0))
 

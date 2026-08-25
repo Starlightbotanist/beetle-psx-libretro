@@ -286,6 +286,7 @@ enum PGXP_diag_gl_test_mode
 	 * all classes uniformly, then marking their ownership independently. */
 	PGXP_DIAG_GL_TEST_VK_ALL_PRIMITIVE_SOLID,
 	PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP,
+	PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER,
 	PGXP_DIAG_GL_TEST_COUNT
 };
 

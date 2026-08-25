@@ -5216,6 +5216,9 @@ static void check_variables(bool startup)
          else if (strcmp(var.value,
                   "vulkan primitive ownership") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP;
+         else if (strcmp(var.value,
+                  "vulkan opaque flat marker") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }
