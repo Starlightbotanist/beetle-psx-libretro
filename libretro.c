@@ -5219,6 +5219,13 @@ static void check_variables(bool startup)
          else if (strcmp(var.value,
                   "vulkan opaque flat marker") == 0)
             gl_test_mode = PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER;
+         else if (strcmp(var.value,
+                  "cross backend opaque line marker") == 0)
+            gl_test_mode =
+               PGXP_DIAG_GL_TEST_CROSS_BACKEND_OPAQUE_LINE_MARKER;
+         else if (strcmp(var.value,
+                  "gl vulkan line quads") == 0)
+            gl_test_mode = PGXP_DIAG_GL_TEST_GL_VULKAN_LINE_QUADS;
       }
       PGXP_DiagGLSetMode(gl_test_mode);
    }

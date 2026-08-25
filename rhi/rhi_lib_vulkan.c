@@ -5773,7 +5773,16 @@ static bool pgxp_vk_coverage_probe_enabled(void)
    return (mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_SOLID ||
          mode == PGXP_DIAG_GL_TEST_VK_ALL_PRIMITIVE_SOLID ||
          mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP ||
-         mode == PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER) &&
+         mode == PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER ||
+         mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_OPAQUE_LINE_MARKER) &&
+      (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
+}
+
+static bool pgxp_vk_opaque_line_marker_enabled(int blend_mode)
+{
+   return PGXP_DiagGLGetMode() ==
+         PGXP_DIAG_GL_TEST_CROSS_BACKEND_OPAQUE_LINE_MARKER &&
+      blend_mode == -1 &&
       (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
 }
 #endif
@@ -19720,7 +19729,9 @@ static void pgxp_vk_solid_finalize(void)
             mode == PGXP_DIAG_GL_TEST_VK_PRIMITIVE_OWNERSHIP ?
                "by_class" :
             mode == PGXP_DIAG_GL_TEST_VK_OPAQUE_FLAT_MARKER ?
-               "opaque_flat_blue" : "magenta");
+               "opaque_flat_blue" :
+            mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_OPAQUE_LINE_MARKER ?
+               "opaque_line_red" : "magenta");
    memset(&pgxp_vk_solid, 0, sizeof(pgxp_vk_solid));
    pgxp_vk_solid.mode = mode;
 }
@@ -20354,11 +20365,21 @@ void rhi_vulkan_push_line(
       int blend_mode,
       bool mask_test, bool set_mask)
 {
+#if PGXP_DIAG
+   bool line_marker;
+#endif
    if (!renderer)
       return;
 
 #if PGXP_DIAG
-   if (pgxp_vk_coverage_probe_value(false, blend_mode != -1) !=
+   line_marker = pgxp_vk_opaque_line_marker_enabled(blend_mode);
+   if (line_marker)
+   {
+      c0 = 0x000000FFu;
+      c1 = 0x000000FFu;
+      pgxp_vk_solid_note(2, 2, false, false);
+   }
+   else if (pgxp_vk_coverage_probe_value(false, blend_mode != -1) !=
          PgxpVkProbe_Off)
       pgxp_vk_solid_note(2, 2, false, blend_mode != -1);
 #endif

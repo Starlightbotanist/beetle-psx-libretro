@@ -1605,6 +1605,82 @@ static bool gl_pgxp_geometry_active(void)
    return (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_VERTEX_CACHE)) != 0;
 }
 
+#if PGXP_DIAG
+struct gl_pgxp_line_diag_stats
+{
+   unsigned mode;
+   unsigned frames;
+   uint64_t lines;
+   uint64_t opaque;
+   uint64_t semi_transparent;
+   uint64_t degenerate;
+   uint64_t horizontal_major;
+   uint64_t vertical_major;
+};
+
+static struct gl_pgxp_line_diag_stats gl_pgxp_line_diag;
+
+static bool gl_pgxp_line_diag_mode(unsigned mode)
+{
+   return mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_OPAQUE_LINE_MARKER ||
+      mode == PGXP_DIAG_GL_TEST_GL_VULKAN_LINE_QUADS;
+}
+
+static void gl_pgxp_line_diag_note(int16_t p0x, int16_t p0y,
+      int16_t p1x, int16_t p1y, bool semi_transparent)
+{
+   int dx = (int)p1x - (int)p0x;
+   int dy = (int)p1y - (int)p0y;
+
+   gl_pgxp_line_diag.lines++;
+   if (semi_transparent)
+      gl_pgxp_line_diag.semi_transparent++;
+   else
+      gl_pgxp_line_diag.opaque++;
+   if (dx == 0 && dy == 0)
+      gl_pgxp_line_diag.degenerate++;
+   else if (abs(dx) > abs(dy))
+      gl_pgxp_line_diag.horizontal_major++;
+   else
+      gl_pgxp_line_diag.vertical_major++;
+}
+
+static void gl_pgxp_line_diag_finalize(unsigned mode)
+{
+   if (!gl_pgxp_line_diag_mode(mode) || !gl_pgxp_geometry_active())
+   {
+      memset(&gl_pgxp_line_diag, 0, sizeof(gl_pgxp_line_diag));
+      return;
+   }
+   if (gl_pgxp_line_diag.mode != mode)
+   {
+      memset(&gl_pgxp_line_diag, 0, sizeof(gl_pgxp_line_diag));
+      gl_pgxp_line_diag.mode = mode;
+   }
+   if (++gl_pgxp_line_diag.frames < 60u)
+      return;
+   if (log_cb)
+      log_cb(RETRO_LOG_INFO,
+            "[pgxp_gl_line_diag] mode=%u frames=%u "
+            "lines=%llu opaque/semi=%llu/%llu "
+            "shape=degenerate/horizontal_major/vertical_major:%llu/%llu/%llu "
+            "raster=%s color=%s\n",
+            mode, gl_pgxp_line_diag.frames,
+            (unsigned long long)gl_pgxp_line_diag.lines,
+            (unsigned long long)gl_pgxp_line_diag.opaque,
+            (unsigned long long)gl_pgxp_line_diag.semi_transparent,
+            (unsigned long long)gl_pgxp_line_diag.degenerate,
+            (unsigned long long)gl_pgxp_line_diag.horizontal_major,
+            (unsigned long long)gl_pgxp_line_diag.vertical_major,
+            mode == PGXP_DIAG_GL_TEST_GL_VULKAN_LINE_QUADS ?
+               "vulkan_style_triangle_quads" : "native_gl_lines",
+            mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_OPAQUE_LINE_MARKER ?
+               "opaque_red" : "normal");
+   memset(&gl_pgxp_line_diag, 0, sizeof(gl_pgxp_line_diag));
+   gl_pgxp_line_diag.mode = mode;
+}
+#endif
+
 static bool gl_pgxp_depth_counter_persistent(unsigned mode)
 {
    return mode == PGXP_DIAG_GL_TEST_DEPTH_COUNTER_PERSIST ||
@@ -8394,6 +8470,9 @@ void rhi_gl_prepare_frame(void)
    }
 
    mode = PGXP_DiagGLGetMode();
+#if PGXP_DIAG
+   gl_pgxp_line_diag_finalize(mode);
+#endif
    gl_pgxp_depth_mode_sync(renderer, mode);
    /* finalize_frame drains every pending command.  A new emulated frame is
     * therefore the safe point to restart the experimental global ordering
@@ -9596,6 +9675,100 @@ void rhi_gl_push_quad(
    }
 }
 
+#if PGXP_DIAG
+/* Diagnostic parity path: Vulkan does not submit native line primitives.
+ * It expands every PS1 line to a one-native-pixel quad, then emits two
+ * triangles.  OpenGL normally uses GL_LINES with scaled glLineWidth, whose
+ * diamond-exit coverage rules differ structurally.  Mirror Vulkan's
+ * coordinate construction locally for this diagnostic mode. */
+static void gl_pgxp_build_vulkan_line_quad(gl_command_vertex output[4],
+      const gl_command_vertex input[2])
+{
+   float dx = input[1].position[0] - input[0].position[0];
+   float dy = input[1].position[1] - input[0].position[1];
+   float abs_dx;
+   float abs_dy;
+   float fill_dx;
+   float fill_dy;
+   float pad_x0 = 0.0f;
+   float pad_x1 = 0.0f;
+   float pad_y0 = 0.0f;
+   float pad_y1 = 0.0f;
+   float x0;
+   float y0;
+   float x1;
+   float y1;
+
+   if (dx == 0.0f && dy == 0.0f)
+   {
+      output[0] = input[0];
+      output[1] = input[0];
+      output[2] = input[0];
+      output[3] = input[0];
+      output[0].position[0] = input[0].position[0];
+      output[0].position[1] = input[0].position[1];
+      output[1].position[0] = input[0].position[0] + 1.0f;
+      output[1].position[1] = input[0].position[1];
+      output[2].position[0] = input[0].position[0];
+      output[2].position[1] = input[0].position[1] + 1.0f;
+      output[3].position[0] = input[0].position[0] + 1.0f;
+      output[3].position[1] = input[0].position[1] + 1.0f;
+      return;
+   }
+
+   abs_dx = fabsf(dx);
+   abs_dy = fabsf(dy);
+   if (abs_dx > abs_dy)
+   {
+      fill_dx = 0.0f;
+      fill_dy = 1.0f;
+      if (dx > 0.0f)
+      {
+         pad_x1 = 1.0f;
+         pad_y1 = dy / abs_dx;
+      }
+      else
+      {
+         pad_x0 = 1.0f;
+         pad_y0 = -(dy / abs_dx);
+      }
+   }
+   else
+   {
+      fill_dx = 1.0f;
+      fill_dy = 0.0f;
+      if (dy > 0.0f)
+      {
+         pad_y1 = 1.0f;
+         pad_x1 = dx / abs_dy;
+      }
+      else
+      {
+         pad_y0 = 1.0f;
+         pad_x0 = -(dx / abs_dy);
+      }
+   }
+
+   x0 = input[0].position[0] + pad_x0;
+   y0 = input[0].position[1] + pad_y0;
+   x1 = input[1].position[0] + pad_x1;
+   y1 = input[1].position[1] + pad_y1;
+
+   output[0] = input[0];
+   output[1] = input[0];
+   output[2] = input[1];
+   output[3] = input[1];
+   output[0].position[0] = x0;
+   output[0].position[1] = y0;
+   output[1].position[0] = x0 + fill_dx;
+   output[1].position[1] = y0 + fill_dy;
+   output[2].position[0] = x1;
+   output[2].position[1] = y1;
+   output[3].position[0] = x1 + fill_dx;
+   output[3].position[1] = y1 + fill_dy;
+}
+#endif
+
 void rhi_gl_push_line(
       int16_t p0x, int16_t p0y,
       int16_t p1x, int16_t p1y,
@@ -9607,6 +9780,11 @@ void rhi_gl_push_line(
    gl_renderer *renderer;
    gl_semi_transparency_mode semi_transparency_mode = SEMI_TRANSPARENCY_MODE_ADD;
    bool semi_transparent = false;
+#if PGXP_DIAG
+   bool line_marker = false;
+   bool vulkan_line_quad = false;
+   unsigned diag_mode;
+#endif
 
    if (static_renderer.state == GL_STATE_INVALID)
       return;
@@ -9640,6 +9818,19 @@ void rhi_gl_push_line(
       default:
          break;
    }
+
+#if PGXP_DIAG
+   diag_mode = PGXP_DiagGLGetMode();
+   if (gl_pgxp_line_diag_mode(diag_mode) && gl_pgxp_geometry_active())
+   {
+      line_marker =
+         diag_mode == PGXP_DIAG_GL_TEST_CROSS_BACKEND_OPAQUE_LINE_MARKER &&
+         !semi_transparent;
+      vulkan_line_quad =
+         diag_mode == PGXP_DIAG_GL_TEST_GL_VULKAN_LINE_QUADS;
+      gl_pgxp_line_diag_note(p0x, p0y, p1x, p1y, semi_transparent);
+   }
+#endif
 
    {
       gl_command_vertex v[2] = {
@@ -9675,9 +9866,39 @@ void rhi_gl_push_line(
          }
       };
 
-      gl_vram_sync_primitive(renderer, v, 2);
-      push_primitive(renderer, v, 2,
-            GL_LINES, semi_transparency_mode, mask_test, set_mask);
+#if PGXP_DIAG
+      if (line_marker)
+      {
+         int i;
+         for (i = 0; i < 2; i++)
+         {
+            v[i].color[0] = 1.0f;
+            v[i].color[1] = 0.0f;
+            v[i].color[2] = 0.0f;
+         }
+      }
+      if (vulkan_line_quad)
+      {
+         gl_command_vertex quad[4];
+         gl_command_vertex expanded[6];
+         gl_pgxp_build_vulkan_line_quad(quad, v);
+         gl_vram_sync_primitive(renderer, quad, 4);
+         expanded[0] = quad[0];
+         expanded[1] = quad[1];
+         expanded[2] = quad[2];
+         expanded[3] = quad[3];
+         expanded[4] = quad[2];
+         expanded[5] = quad[1];
+         push_primitive(renderer, expanded, 6,
+               GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask);
+      }
+      else
+#endif
+      {
+         gl_vram_sync_primitive(renderer, v, 2);
+         push_primitive(renderer, v, 2,
+               GL_LINES, semi_transparency_mode, mask_test, set_mask);
+      }
    }
 }
 

@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,
-      "Focused GL/Vulkan PGXP coverage diagnostic. Mode 156 renders opaque textured fragments magenta before transparency discard. Vulkan modes 161-163 keep every primitive in its normal queue, shader family, render pass, mask, depth and scissor state. In mode 162: magenta=opaque textured, red=semi-transparent textured, blue=opaque flat, green=semi-transparent flat. Mode 163 leaves the scene normal except for blue opaque-flat fragments.",
+      "Focused GL/Vulkan PGXP coverage diagnostic. Mode 156 renders opaque textured fragments magenta before transparency discard. Vulkan modes 161-163 classify primitive ownership. Mode 164 leaves both backends normal except for red opaque line commands. Mode 165 keeps normal colors and makes OpenGL expand line commands into the same triangle quads used by Vulkan.",
       NULL,
       "pgxp",
       {
@@ -1169,6 +1169,8 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "vulkan all primitive solid", "161: Vulkan All Primitive Classes Magenta" },
          { "vulkan primitive ownership", "162: Vulkan Primitive-Class Ownership" },
          { "vulkan opaque flat marker", "163: Vulkan Opaque-Flat Blue Marker" },
+         { "cross backend opaque line marker", "164: GL/Vulkan Opaque-Line Red Marker" },
+         { "gl vulkan line quads", "165: GL Vulkan-Style Line Quads" },
          { NULL, NULL },
       },
       "off"
