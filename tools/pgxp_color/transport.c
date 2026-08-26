@@ -26,6 +26,7 @@
 #include "../../pgxp/pgxp_gte.h"
 #include "../../pgxp/pgxp_cpu.h"
 #include "../../pgxp/pgxp_diag.h"
+#include "../../pgxp/pgxp_lineage.h"
 #include "../../pgxp/pgxp_mem.h"
 #include "../../pgxp/pgxp_main.h"
 #include "../../pgxp/pgxp_types.h"
@@ -55,6 +56,7 @@ static uint32_t gte_pack(int32_t m1, int32_t m2, int32_t m3, uint8_t cd)
 #define INSTR_RD(rd)          (((uint32_t)(rd) & 0x1F) << 11)
 #define INSTR_RS(rs)          (((uint32_t)(rs) & 0x1F) << 21)
 #define INSTR_SA(sa)          (((uint32_t)(sa) & 0x1F) << 6)
+#define INSTR_OP(op)          (((uint32_t)(op) & 0x3F) << 26)
 
 /* Scratch addresses in tracked RAM. */
 #define LIST_ADDR   0x80100000u
@@ -86,12 +88,13 @@ static void gpu_deliver(const uint32_t* addrs, const uint32_t* words,
    unsigned i;
    for (i = 0; i < n; i++)
    {
-      PGXP_value* shadow = ReadMem(addrs[i]);
-      PGXP_DiagFIFOWrite(i, addrs[i], words[i], shadow);
+      PGXP_LineageFIFOWrite(i, addrs[i], words[i]);
+      PGXP_DiagFIFOWrite(i, addrs[i], words[i], ReadMem(addrs[i]));
       PGXP_WriteFIFO(ReadMem(addrs[i]), i);   /* GPU_WriteCB */
    }
    for (i = 0; i < n; i++)
    {
+      PGXP_LineageCBWrite(i, i);
       PGXP_DiagCBWrite(i, i);
       PGXP_WriteCB(PGXP_ReadFIFO(i), i);      /* ProcessFIFO */
    }
@@ -149,7 +152,7 @@ static void test_mfc2_ori_sw(void)
                with_cmd, packed, 0x38u << 24);
 
    /* sw $t0, 0(rs) */
-   PGXP_CPU_SW(INSTR_RT(8), with_cmd, addr);
+   PGXP_CPU_SW(INSTR_OP(0x2B) | INSTR_RT(8), with_cmd, addr);
 
    gpu_deliver(&addr, &with_cmd, 1);
 
@@ -270,7 +273,7 @@ static void test_untracked_colour(void)
     * colour. PGXP_CPU_SW with an untracked register must clear the
     * tracking, so the stale shadow cannot be reused. */
    cpu_word = 0x30204060u;
-   PGXP_CPU_SW(INSTR_RT(15), cpu_word, addr);   /* $15 never tracked */
+   PGXP_CPU_SW(INSTR_OP(0x2B) | INSTR_RT(15), cpu_word, addr);
 
    gpu_deliver(&addr, &cpu_word, 1);
 
@@ -284,278 +287,119 @@ static void set_cpu_value(unsigned reg, uint32_t value)
    SetValue(&CPU_reg[reg], value);
 }
 
-static void test_mfc2_sll5_sra5(void)
+
+static void test_exact_lineage_transport(void)
 {
    const float precise_x = 123.25f;
    const float precise_y = -45.5f;
    const uint32_t packed = 0xFFD3007Bu;
    const uint32_t sll = packed << 5;
    const uint32_t sra = (uint32_t)((int32_t)sll >> 5);
-   uint32_t instr;
-
-   PGXP_pushSXYZ2f(precise_x, precise_y, 1.f, packed);
-   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
-   if (!CPU_reg[8].trace_id || CPU_reg[8].trace_stage != PGXP_TRACE_MFC2)
-      fail("MFC2 trace identity not attached", CPU_reg[8].trace_stage,
-           PGXP_TRACE_MFC2);
-   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
-   if (!PGXP_CPU_TryMFC2SLL5(instr, sll, packed))
-      fail("MFC2/SLL5 not recognized", 0, 1);
-   PGXP_DiagTraceShift(instr, packed, sll, 0, 0, &CPU_reg[9]);
-   if (CPU_reg[9].x != precise_x || CPU_reg[9].y != precise_y ||
-       CPU_reg[9].value != sll)
-      fail("MFC2/SLL5 lost precise XY", CPU_reg[9].value, sll);
-   if (CPU_reg[9].trace_stage != PGXP_TRACE_SLL5)
-      fail("SLL5 trace stage not advanced", CPU_reg[9].trace_stage,
-           PGXP_TRACE_SLL5);
-
-   instr = INSTR_RT(9) | INSTR_RD(9) | INSTR_SA(5) | 0x03u;
-   if (!PGXP_CPU_TryMFC2SLL5SRA5(instr, sra, sll))
-      fail("MFC2/SLL5/SRA5 not recognized", 0, 1);
-   PGXP_DiagTraceShift(instr, sll, sra, 1, 0, &CPU_reg[9]);
-   if (CPU_reg[9].x != precise_x || CPU_reg[9].y != precise_y ||
-       CPU_reg[9].value != sra)
-      fail("MFC2/SLL5/SRA5 lost precise XY", CPU_reg[9].value, sra);
-   if (CPU_reg[9].trace_stage != PGXP_TRACE_SRA5)
-      fail("SRA5 trace stage not advanced", CPU_reg[9].trace_stage,
-           PGXP_TRACE_SRA5);
-}
-
-static void run_j_shift_mode(unsigned mode, int expect_sll_xy,
-      int expect_sll_w, int expect_sra_w)
-{
-   const uint32_t packed = 0xFFD3007Bu;
-   const uint32_t sll = packed << 5;
-   const uint32_t sra = (uint32_t)((int32_t)sll >> 5);
-   uint32_t instr;
-
-   PGXP_DiagJSetMode(mode);
-   PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
-   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
-
-   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
-   memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
-   PGXP_CPU_DiagShift(instr, packed, sll, 0);
-   if (((CPU_reg[9].flags & VALID_01) == VALID_01) != expect_sll_xy)
-      fail("J mode SLL5 XY policy mismatch", mode, expect_sll_xy);
-   if (((CPU_reg[9].flags & VALID_2) == VALID_2) != expect_sll_w)
-      fail("J mode SLL5 W policy mismatch", mode, expect_sll_w);
-
-   /* Spyro routes this intermediate through tracked memory/scratchpad.  That
-    * deliberately drops the old register-lineage proof while retaining the
-    * trace, exercising J's broadened but exact native-roundtrip path. */
-   PGXP_CPU_SW(INSTR_RT(9), sll, LIST_ADDR2);
-   memset(&CPU_reg[10], 0, sizeof(CPU_reg[10]));
-   PGXP_CPU_LW(INSTR_RT(10), sll, LIST_ADDR2);
-   instr = INSTR_RT(10) | INSTR_RD(10) | INSTR_SA(5) | 0x03u;
-   PGXP_CPU_DiagShift(instr, sll, sra, 1);
-   if ((CPU_reg[10].flags & VALID_01) != VALID_01)
-      fail("J mode lost SRA5 precise XY", mode, VALID_01);
-   if (((CPU_reg[10].flags & VALID_2) == VALID_2) != expect_sra_w)
-      fail("J mode SRA5 W policy mismatch", mode, expect_sra_w);
-}
-
-static void test_j_projection_handoff_modes(void)
-{
-   PGXP_SetExperimentMask((PGXP_FEATURE_ALL & ~PGXP_FEATURE_MFC2_SHIFT) |
-         PGXP_FEATURE_DIAG_SHIFT);
-   run_j_shift_mode(PGXP_DIAG_J_TEST_CURRENT, 1, 1, 1);
-   run_j_shift_mode(PGXP_DIAG_J_TEST_SRA_XY_ONLY, 1, 1, 0);
-   run_j_shift_mode(PGXP_DIAG_J_TEST_ALL_XY_ONLY, 1, 0, 0);
-   run_j_shift_mode(PGXP_DIAG_J_TEST_FINAL_ONLY, 0, 1, 1);
-   run_j_shift_mode(PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY, 0, 1, 0);
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
-}
-
-static void test_j_primitive_scope_modes(void)
-{
-   PGXP_value shadow = PGXP_value_zero;
-
-   PGXP_DiagTraceGTE(&shadow);
-   shadow.trace_stage = PGXP_TRACE_SRA5;
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT);
-   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
-   if (!PGXP_DiagJForceNative(&shadow))
-      fail("J flat scope missed flat polygon", 0, 1);
-   PGXP_DiagPacket(0x30, 6, 0, 0, 0);
-   if (PGXP_DiagJForceNative(&shadow))
-      fail("J flat scope rejected Gouraud", 1, 0);
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD);
-   if (!PGXP_DiagJForceNative(&shadow))
-      fail("J Gouraud scope missed Gouraud", 0, 1);
-   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
-   if (PGXP_DiagJForceNative(&shadow))
-      fail("J Gouraud scope rejected flat", 1, 0);
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL);
-   if (!PGXP_DiagJForceNative(&shadow))
-      fail("J textured-only missed untextured", 0, 1);
-   PGXP_DiagPacket(0x24, 7, 0, 0, 0);
-   if (PGXP_DiagJForceNative(&shadow))
-      fail("J textured-only rejected textured", 1, 0);
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
-   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
-   if (PGXP_DiagJForceNative(&shadow))
-      fail("current J unexpectedly rejected vertex", 1, 0);
-}
-
-static void test_j_native_axis_modes(void)
-{
-   const uint32_t packed = 0xFFD3007Bu;
-   PGXP_value shadow = PGXP_value_zero;
-   OGLVertex output;
-   unsigned mask;
-
-   shadow.x = 123.25f;
-   shadow.y = -45.5f;
-   shadow.z = 32768.0f;
-   shadow.value = packed;
-   shadow.flags = VALID_012;
-   PGXP_DiagTraceGTE(&shadow);
-   shadow.trace_stage = PGXP_TRACE_SRA5;
-   PGXP_WriteCB(&shadow, 0);
-   PGXP_DiagPacket(0x30, 6, 0, 0, 0);
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_XY_KEEP_W);
-   mask = PGXP_DiagJNativeAxisMask(&shadow);
-   if (mask != (PGXP_DIAG_J_NATIVE_X | PGXP_DIAG_J_NATIVE_Y))
-      fail("J native XY mask", mask, 3);
-   PGXP_GetVertex(0, &packed, &output, 0, 0);
-   if (output.x != 123.0f || output.y != -45.0f ||
-       !output.valid_w || output.w != 1.0f)
-      fail("J native XY did not retain W", 0, 1);
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW);
-   mask = PGXP_DiagJNativeAxisMask(&shadow);
-   if (mask != PGXP_DIAG_J_NATIVE_X)
-      fail("J native X mask", mask, PGXP_DIAG_J_NATIVE_X);
-   PGXP_GetVertex(0, &packed, &output, 0, 0);
-   if (output.x != 123.0f || output.y != -45.5f ||
-       !output.valid_w || output.w != 1.0f)
-      fail("J native X damaged Y/W", 0, 1);
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW);
-   mask = PGXP_DiagJNativeAxisMask(&shadow);
-   if (mask != PGXP_DIAG_J_NATIVE_Y)
-      fail("J native Y mask", mask, PGXP_DIAG_J_NATIVE_Y);
-   PGXP_GetVertex(0, &packed, &output, 0, 0);
-   if (output.x != 123.25f || output.y != -45.0f ||
-       !output.valid_w || output.w != 1.0f)
-      fail("J native Y damaged X/W", 0, 1);
-
-   PGXP_DiagPacket(0x34, 9, 0, 0, 0);
-   if (PGXP_DiagJNativeAxisMask(&shadow))
-      fail("J axis mode rejected textured vertex", 1, 0);
-   PGXP_GetVertex(0, &packed, &output, 0, 0);
-   if (output.x != 123.25f || output.y != -45.5f ||
-       !output.valid_w || output.w != 1.0f)
-      fail("J axis mode changed textured vertex", 0, 1);
-
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
-}
-
-static void test_j_isolated_sidecar_transport(void)
-{
-   const float precise_x = 123.25f;
-   const float precise_y = -45.5f;
-   const uint32_t packed = 0xFFD3007Bu;
-   const uint32_t sll = packed << 5;
-   const uint32_t sra = (uint32_t)((int32_t)sll >> 5);
-   const uint32_t sll_addr = 0x1F800000u;
+   const uint32_t scratch_addr = 0x1F800000u;
    const uint32_t final_addr = 0x80106004u;
    uint32_t instr;
    OGLVertex output;
    float recovered_x, recovered_y, recovered_z;
    int recovered_w;
 
-   PGXP_SetExperimentMask((PGXP_FEATURE_ALL &
-         ~(PGXP_FEATURE_MFC2_SHIFT | PGXP_FEATURE_RECENT_RECOVERY)) |
-         PGXP_FEATURE_DIAG_SHIFT);
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_ISOLATED_TEXTURED);
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+   PGXP_LineageReset();
    PGXP_pushSXYZ2f(precise_x, precise_y, 32768.0f, packed);
    PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
 
-   /* I owns direct MFC2 identity moves.  Isolated J must not steal this
-    * stage-1 shadow, but the lineage must remain available if the alias is
-    * subsequently packed through SLL5/SRA5. */
+   /* I owns the direct MFC2 alias and preserves the ordinary CPU shadow. */
    memset(&CPU_reg[7], 0, sizeof(CPU_reg[7]));
    instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(7) | 0x21u;
-   PGXP_CPU_DiagIdentityMove(instr, packed, packed);
+   PGXP_CPU_LineageIdentityMove(instr, packed, packed);
    if ((CPU_reg[7].flags & VALID_01) != VALID_01 ||
        CPU_reg[7].x != precise_x || CPU_reg[7].y != precise_y)
-      fail("isolated J stole stage-1 identity move", 0, 1);
+      fail("identity move lost MFC2 precision", 0, 1);
 
-   instr = INSTR_RT(7) | INSTR_RD(9) | INSTR_SA(5);
+   /* J proves both shifts but never installs their payload in CPU_reg. */
    memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
-   PGXP_CPU_DiagShift(instr, packed, sll, 0);
+   instr = INSTR_RT(7) | INSTR_RD(9) | INSTR_SA(5);
+   PGXP_CPU_LineageShift(instr, packed, sll, 0);
    if ((CPU_reg[9].flags & VALID_01) == VALID_01)
-      fail("isolated SLL5 mutated CPU shadow", 1, 0);
+      fail("SLL5 lineage mutated CPU shadow", 1, 0);
 
-   /* Once SLL5 has created J's stage-2 lineage, exact aliases must advance
-    * only the sidecar.  Reinstalling that payload in CPU_reg would recreate
-    * the Spyro 3 sky regression that isolation is intended to remove. */
    memset(&CPU_reg[11], 0, sizeof(CPU_reg[11]));
    instr = INSTR_RS(9) | INSTR_RT(0) | INSTR_RD(11) | 0x21u;
-   PGXP_CPU_DiagIdentityMove(instr, sll, sll);
+   PGXP_CPU_LineageIdentityMove(instr, sll, sll);
    if ((CPU_reg[11].flags & VALID_01) == VALID_01)
-      fail("isolated stage-2 identity mutated CPU shadow", 1, 0);
-   PGXP_CPU_SW(INSTR_RT(11), sll, sll_addr);
+      fail("stage-2 alias mutated CPU shadow", 1, 0);
+   PGXP_CPU_SW(INSTR_OP(0x2B) | INSTR_RT(11), sll, scratch_addr);
 
    memset(&CPU_reg[10], 0, sizeof(CPU_reg[10]));
-   PGXP_CPU_LW((0x23u << 26) | INSTR_RT(10), sll, sll_addr);
+   PGXP_CPU_LW((0x23u << 26) | INSTR_RT(10), sll, scratch_addr);
    instr = INSTR_RT(10) | INSTR_RD(10) | INSTR_SA(5) | 0x03u;
-   PGXP_CPU_DiagShift(instr, sll, sra, 1);
+   PGXP_CPU_LineageShift(instr, sll, sra, 1);
    if ((CPU_reg[10].flags & VALID_01) == VALID_01)
-      fail("isolated SRA5 mutated CPU shadow", 1, 0);
+      fail("SRA5 lineage mutated CPU shadow", 1, 0);
 
    memset(&CPU_reg[12], 0, sizeof(CPU_reg[12]));
    instr = INSTR_RS(10) | INSTR_RT(0) | INSTR_RD(12) | 0x21u;
-   PGXP_CPU_DiagIdentityMove(instr, sra, sra);
-   if ((CPU_reg[12].flags & VALID_01) == VALID_01)
-      fail("isolated stage-3 identity mutated CPU shadow", 1, 0);
-   PGXP_CPU_SW(INSTR_RT(12), sra, final_addr);
+   PGXP_CPU_LineageIdentityMove(instr, sra, sra);
+   PGXP_CPU_SW(INSTR_OP(0x2B) | INSTR_RT(12), sra, final_addr);
    gpu_deliver(&final_addr, &sra, 1);
 
-   PGXP_DiagPacket(0x24, 7, 0, 0, 0);
+   if (!PGXP_LineageRecoverVertex(0, sra, &recovered_x, &recovered_y,
+       &recovered_z, &recovered_w) || recovered_x != precise_x ||
+       recovered_y != precise_y || recovered_z != 1.0f || !recovered_w)
+      fail("exact sidecar recovery missed", 0, 1);
+   if (PGXP_LineageRecoverVertex(0, sra ^ 1u, &recovered_x, &recovered_y,
+       &recovered_z, &recovered_w))
+      fail("exact sidecar accepted wrong word", 1, 0);
+
    memset(&output, 0, sizeof(output));
    PGXP_GetVertex(0, &sra, &output, 0, 0);
    if (output.x != precise_x || output.y != precise_y ||
        !output.valid_w || output.w != (1.0f / 32768.0f))
-      fail("isolated textured sidecar missed", 0, 1);
+      fail("production lineage GPU handoff missed", 0, 1);
 
-   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
-   if (PGXP_DiagRecoverLineageVertex(0, sra, &recovered_x,
-       &recovered_y, &recovered_z, &recovered_w))
-      fail("textured sidecar leaked to untextured", 1, 0);
+   /* Partial stores share Beetle's ordinary PGXP store helper, but are not
+    * exact word aliases and therefore must only retire the sidecar. */
+   PGXP_CPU_SWL(INSTR_OP(0x2A) | INSTR_RT(12), sra, final_addr);
+   gpu_deliver(&final_addr, &sra, 1);
+   if (PGXP_LineageRecoverVertex(0, sra, &recovered_x, &recovered_y,
+       &recovered_z, &recovered_w))
+      fail("sidecar survived partial store", 1, 0);
 
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_ISOLATED_ALL);
-   if (!PGXP_DiagRecoverLineageVertex(0, sra, &recovered_x,
-       &recovered_y, &recovered_z, &recovered_w))
-      fail("isolated all direct lookup missed", 0, 1);
-   if (PGXP_DiagRecoverLineageVertex(0, sra ^ 1u, &recovered_x,
-       &recovered_y, &recovered_z, &recovered_w))
-      fail("isolated sidecar accepted wrong word", 1, 0);
-   memset(&output, 0, sizeof(output));
-   PGXP_GetVertex(0, &sra, &output, 0, 0);
-   if (output.x != precise_x || output.y != precise_y ||
-       !output.valid_w || output.w != (1.0f / 32768.0f))
-      fail("isolated all sidecar missed", 0, 1);
+   /* A subsequent proven full-word store may establish it again. */
+   PGXP_CPU_SW(INSTR_OP(0x2B) | INSTR_RT(12), sra, final_addr);
+   gpu_deliver(&final_addr, &sra, 1);
+   if (!PGXP_LineageRecoverVertex(0, sra, &recovered_x, &recovered_y,
+       &recovered_z, &recovered_w))
+      fail("sidecar did not survive full SW", 0, 1);
 
-   /* A non-lineage writer must retire the old sidecar even when it writes
-    * the same packed word; identical native SXY values are not unique keys
-    * for subpixel precision. */
+   /* A same-value architectural overwrite without lineage must retire it. */
    PGXP_GTE_SWC2(INSTR_RT(14), sra, final_addr);
    gpu_deliver(&final_addr, &sra, 1);
-   if (PGXP_DiagRecoverLineageVertex(0, sra, &recovered_x,
-       &recovered_y, &recovered_z, &recovered_w))
-      fail("isolated sidecar survived overwrite", 1, 0);
+   if (PGXP_LineageRecoverVertex(0, sra, &recovered_x, &recovered_y,
+       &recovered_z, &recovered_w))
+      fail("sidecar survived unproven overwrite", 1, 0);
 
-   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_EXACT_LINEAGE);
+   PGXP_LineageReset();
+   PGXP_pushSXYZ2f(precise_x, precise_y, 32768.0f, packed);
+   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   PGXP_CPU_LineageShift(instr, packed, sll, 0);
+   if (PGXP_LineageRecoverVertex(0, sra, &recovered_x, &recovered_y,
+       &recovered_z, &recovered_w))
+      fail("exact-lineage feature gate inactive", 1, 0);
+
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_IDENTITY_MOVE);
+   PGXP_LineageReset();
+   PGXP_pushSXYZ2f(precise_x, precise_y, 32768.0f, packed);
+   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+   memset(&CPU_reg[7], 0, sizeof(CPU_reg[7]));
+   instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(7) | 0x21u;
+   PGXP_CPU_LineageIdentityMove(instr, packed, packed);
+   if ((CPU_reg[7].flags & VALID_01) == VALID_01)
+      fail("identity-move feature gate inactive", 1, 0);
+
    PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+   PGXP_LineageReset();
 }
 
 static void test_cpu_math_invariants(void)
@@ -584,6 +428,7 @@ static void test_cpu_math_invariants(void)
       fail("SLTU compared low halves with high unequal", 1, 0);
 }
 
+#if PGXP_DIAG
 static void test_vertex_w_provenance_gate(void)
 {
    const uint32_t packed = 0xFFE4007Bu;
@@ -610,6 +455,7 @@ static void test_vertex_w_provenance_gate(void)
 	if (!out.valid_w || out.w != shadow.z / 32768.0f)
 		fail("GTE-proven W rejected", out.valid_w, 1);
 }
+#endif
 
 static void test_nclip_sign_only(void)
 {
@@ -627,143 +473,6 @@ static void test_nclip_sign_only(void)
       fail("NCLIP native zero lost precise sign", PGXP_NCLIP_sign_only(0, -88), -1);
 }
 
-static void test_stack_ablation_gates(void)
-{
-   const uint32_t packed = 0x00200400u;
-   PGXP_value shadow = PGXP_value_zero;
-   OGLVertex out;
-   uint32_t instr;
-   float x, y, z;
-
-   /* The deterministic half of aef86ba0 can be restored independently. */
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL &
-         ~PGXP_FEATURE_CPU_SHADOW_INVARIANTS);
-   set_cpu_value(1, 0x00010000u);
-   set_cpu_value(2, 0x0000FFFFu);
-   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Au;
-   PGXP_CPU_SLT(instr, 0, 0x00010000u, 0x0000FFFFu);
-   if (CPU_reg[3].x != 1.f)
-      fail("CPU invariant ablation inactive", (uint32_t)CPU_reg[3].x, 1);
-
-   /* B controls the ordinary helper. */
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_MFC2_SHIFT);
-   PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
-   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
-   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
-   if (PGXP_CPU_TryMFC2SLL5(instr, packed << 5, packed))
-      fail("MFC2 shift ablation inactive", 1, 0);
-
-   /* J independently controls the diagnostic implementation of the same
-    * handoff, which otherwise remains capable of repairing the shadow. */
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_DIAG_SHIFT);
-   PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
-   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
-   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
-   memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
-   PGXP_CPU_DiagShift(instr, packed, packed << 5, 0);
-   if ((CPU_reg[9].flags & VALID_01) == VALID_01)
-      fail("diagnostic shift ablation inactive", 1, 0);
-
-   /* 8711cc00 is a separate behavior-changing diagnostic path.  Its own
-    * gate must prevent an exact-zero identity operation from copying the
-    * source shadow into the destination register. */
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_IDENTITY_MOVE);
-   PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
-   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
-   memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
-   instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(9) | 0x21u;
-   PGXP_CPU_DiagIdentityMove(instr, packed, packed);
-   if ((CPU_reg[9].flags & VALID_01) == VALID_01)
-      fail("identity-move ablation inactive", 1, 0);
-
-   /* Current ordering keeps the post-wrap drawing offset; legacy ordering
-    * wraps the offset result. W normalization is independently reversible. */
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
-   shadow.x = 1023.75f;
-   shadow.y = 0.0f;
-   shadow.z = 4096.0f;
-   shadow.value = packed;
-   shadow.flags = VALID_012;
-   PGXP_DiagTraceGTE(&shadow);
-   PGXP_WriteCB(&shadow, 0);
-   memset(&out, 0, sizeof(out));
-   PGXP_GetVertex(0, &packed, &out, 1, 0);
-   if (out.x != 1024.75f || out.w != 0.125f)
-      fail("all-on coordinate/W behavior", (uint32_t)out.valid_w, 1);
-
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL &
-         ~(PGXP_FEATURE_COORD_WRAP | PGXP_FEATURE_W_NORMALIZE));
-   PGXP_WriteCB(&shadow, 0);
-   memset(&out, 0, sizeof(out));
-   PGXP_GetVertex(0, &packed, &out, 1, 0);
-   if (out.x != -1023.25f || out.w != 4096.0f)
-      fail("coordinate/W ablation inactive", (uint32_t)out.valid_w, 1);
-
-   /* Stage-zero W is accepted only when the provenance layer is disabled. */
-   shadow = PGXP_value_zero;
-   shadow.x = 12.25f;
-   shadow.y = -3.5f;
-   shadow.z = 2048.0f;
-   shadow.value = packed;
-   shadow.flags = VALID_012;
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_W_PROVENANCE);
-   PGXP_WriteCB(&shadow, 0);
-   memset(&out, 0, sizeof(out));
-   PGXP_GetVertex(0, &packed, &out, 0, 0);
-   if (!out.valid_w)
-      fail("W provenance ablation inactive", 0, 1);
-
-   /* Recovery history is reset at both transitions and the off state refuses
-    * an otherwise exact, age-zero native-word match. */
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL & ~PGXP_FEATURE_RECENT_RECOVERY);
-   PGXP_DiagTraceGTE(&shadow);
-   if (PGXP_DiagRecoverVertex(packed, NULL, 0, &x, &y, &z))
-      fail("recovery ablation inactive", 1, 0);
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
-   PGXP_DiagTraceGTE(&shadow);
-   if (!PGXP_DiagRecoverVertex(packed, NULL, 0, &x, &y, &z))
-      fail("recovery did not re-enable", 0, 1);
-
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
-}
-
-static void test_recovery_ambiguity_spatial_gate(void)
-{
-   const uint32_t packed = 0x00A1011Fu; /* native 287,161 */
-   PGXP_value first = PGXP_value_zero;
-   PGXP_value second = PGXP_value_zero;
-   float x, y, z;
-
-   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
-   first.value = second.value = packed;
-   first.flags = second.flags = VALID_012;
-
-   /* Reproduce the R4 tachometer failure: two GTE results share an SXY word,
-    * while the retained first result is nowhere near that native vertex. */
-   PGXP_DiagResetRecovery();
-   first.x = 219.243805f;
-   first.y = 139.115555f;
-   first.z = 1.0f;
-   second.x = 287.75f;
-   second.y = 161.5f;
-   second.z = 1.0f;
-   PGXP_DiagTraceGTE(&first);
-   PGXP_DiagTraceGTE(&second);
-   if (PGXP_DiagRecoverVertex(packed, NULL, 3, &x, &y, &z))
-      fail("non-local ambiguous recovery accepted", 1, 0);
-
-   /* Keep the earlier Spyro experiment intact when ambiguity is confined to
-    * subpixel alternatives around the same architectural coordinate. */
-   PGXP_DiagResetRecovery();
-   first.x = 287.75f;
-   first.y = 161.75f;
-   second.x = 287.5f;
-   second.y = 161.25f;
-   PGXP_DiagTraceGTE(&first);
-   PGXP_DiagTraceGTE(&second);
-   if (!PGXP_DiagRecoverVertex(packed, NULL, 3, &x, &y, &z))
-      fail("local ambiguous recovery rejected", 0, 1);
-}
 
 int main(void)
 {
@@ -787,35 +496,21 @@ int main(void)
    printf("[T5] negative control: CPU-composed colour must be refused\n");
    test_untracked_colour();
 
-   printf("[T6] MFC2 -> SLL5 -> SRA5 precision preservation\n");
-   test_mfc2_sll5_sra5();
+   printf("[T6] exact MFC2/shift sidecar and identity transport\n");
+   test_exact_lineage_transport();
 
    printf("[T7] CPU bitwise/comparison invariants\n");
    test_cpu_math_invariants();
 
    printf("[T8] vertex W provenance gate preserves precise XY\n");
+#if PGXP_DIAG
    test_vertex_w_provenance_gate();
+#else
+   printf("    skipped: W provenance instrumentation is diagnostic-only\n");
+#endif
 
    printf("[T9] NCLIP precise sign preserves native magnitude\n");
    test_nclip_sign_only();
-
-   printf("[T10] runtime PGXP stack ablation gates\n");
-   test_stack_ablation_gates();
-
-   printf("[T11] ambiguous recovery stays within native neighbourhood\n");
-   test_recovery_ambiguity_spatial_gate();
-
-   printf("[T12] J projection handoff modes preserve XY and gate W\n");
-   test_j_projection_handoff_modes();
-
-   printf("[T13] J primitive scope modes reject only selected SRA5 vertices\n");
-   test_j_primitive_scope_modes();
-
-   printf("[T14] J keep-W modes replace only selected untextured axes\n");
-   test_j_native_axis_modes();
-
-   printf("[T15] isolated J sidecar survives store/load/FIFO/CB exactly\n");
-   test_j_isolated_sidecar_transport();
 
    if (failures)
    {

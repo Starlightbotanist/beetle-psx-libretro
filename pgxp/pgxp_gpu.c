@@ -27,6 +27,7 @@
 #include "pgxp_gpu.h"
 #include "pgxp_gte.h"
 #include "pgxp_diag.h"
+#include "pgxp_lineage.h"
 #include "pgxp_main.h"
 #include "pgxp_mem.h"
 #include "pgxp_value.h"
@@ -645,10 +646,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	enum PGXP_diag_vertex_source source = PGXP_DIAG_VERTEX_NATIVE;
 	int valid_xy;
 	int value_match;
-	int force_native;
 	int sidecar_valid_w = 0;
 	int sidecar_recovered;
-	unsigned native_axis_mask;
 	float sidecar_x = 0.0f;
 	float sidecar_y = 0.0f;
 	float sidecar_z = 0.0f;
@@ -662,10 +661,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	int16_t psxY = (int16_t)(psxWord >> 16);
 	valid_xy = vert && ((vert->flags & VALID_01) == VALID_01);
 	value_match = vert && (vert->value == psxWord);
-	force_native = PGXP_DiagJForceNative(vert);
-	native_axis_mask = !force_native && valid_xy && value_match ?
-		PGXP_DiagJNativeAxisMask(vert) : 0;
-	sidecar_recovered = !force_native && PGXP_DiagRecoverLineageVertex(
+	sidecar_recovered = PGXP_LineageRecoverVertex(
 		offset, psxWord, &sidecar_x, &sidecar_y, &sidecar_z,
 		&sidecar_valid_w);
 
@@ -680,7 +676,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		pOutput->w = PGXP_NormalizeVertexW(sidecar_z);
 		pOutput->valid_w = sidecar_valid_w;
 	}
-	else if (!force_native && valid_xy && value_match)
+	else if (valid_xy && value_match)
 	{
 		source = PGXP_DIAG_VERTEX_TRACKED;
 		/* There is a value here with valid X and Y coordinates */
@@ -707,28 +703,13 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	}
 	else
 	{
-		float recovered_x;
-		float recovered_y;
-		float recovered_z;
 		/* Look in cache for valid vertex.  The cache holds a smaller
 		 * struct (just x/y/z/tag) than the FIFO/CB, so we use a
 		 * separate local rather than aliasing `vert`.  A non-NULL
 		 * return is already fully validated - current generation,
 		 * unambiguous - so there is no flag test to repeat here. */
 		PGXP_cache_entry* cache_vert;
-		if (!force_native &&
-		    PGXP_DiagRecoverVertex(psxWord, vert, offset, &recovered_x,
-		    &recovered_y, &recovered_z))
-		{
-			source = PGXP_DIAG_VERTEX_CACHE;
-			pOutput->x = PGXP_ApplyVertexPosition(recovered_x, xOffs);
-			pOutput->y = PGXP_ApplyVertexPosition(recovered_y, yOffs);
-			pOutput->z = 0.95f;
-			pOutput->w = PGXP_NormalizeVertexW(recovered_z);
-			pOutput->valid_w = 1;
-		}
-		else if (!force_native &&
-		         (cache_vert = PGXP_GetCachedVertex(psxX, psxY)) != NULL)
+		if ((cache_vert = PGXP_GetCachedVertex(psxX, psxY)) != NULL)
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
 			/* a value is found, it is from the current session and is unambiguous (there was only one value recorded at that position) */
@@ -747,18 +728,6 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			pOutput->valid_w = 0;
 		}
 	}
-	if (native_axis_mask)
-	{
-		if (native_axis_mask & PGXP_DIAG_J_NATIVE_X)
-			pOutput->x = PGXP_ApplyNativeVertexPosition(psxX, xOffs);
-		if (native_axis_mask & PGXP_DIAG_J_NATIVE_Y)
-			pOutput->y = PGXP_ApplyNativeVertexPosition(psxY, yOffs);
-		/* At least one coordinate is now architectural even though the
-		 * transform-proven W remains valid.  Report the hybrid terminal
-		 * conservatively as native in the provenance diagnostics. */
-		source = PGXP_DIAG_VERTEX_NATIVE;
-	}
-
 	PGXP_DiagVertex(source, offset, psxWord, vert, pOutput->x, pOutput->y,
 		pOutput->valid_w ? pOutput->w : 0.0f, psxX + xOffs,
 		psxY + yOffs, pOutput->valid_w,

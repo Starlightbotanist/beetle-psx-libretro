@@ -5,6 +5,7 @@
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
 #include "pgxp_diag.h"
+#include "pgxp_lineage.h"
 #include "pgxp_main.h"
 
 
@@ -17,8 +18,6 @@ PGXP_value CP0_reg_mem[32];
 
 PGXP_value* CPU_reg = CPU_reg_mem;
 PGXP_value* CP0_reg = CP0_reg_mem;
-static uint8_t CPU_reg_mfc2[34];
-static uint8_t CPU_reg_mfc2_sll5[34];
 
 /* Instruction register decoding */
 #define op(_instr)		(_instr >> 26)			/* The op part of the instruction register */
@@ -33,76 +32,6 @@ void PGXP_InitCPU()
 {
 	memset(CPU_reg_mem, 0, sizeof(CPU_reg_mem));
 	memset(CP0_reg_mem, 0, sizeof(CP0_reg_mem));
-	PGXP_CPU_ResetMFC2ShiftTracking();
-}
-
-void PGXP_CPU_ResetMFC2ShiftTracking(void)
-{
-	memset(CPU_reg_mfc2, 0, sizeof(CPU_reg_mfc2));
-	memset(CPU_reg_mfc2_sll5, 0, sizeof(CPU_reg_mfc2_sll5));
-}
-
-void PGXP_CPU_MarkMFC2(uint32_t reg)
-{
-	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
-		return;
-	if (reg < 34)
-	{
-		CPU_reg_mfc2[reg] = 1;
-		CPU_reg_mfc2_sll5[reg] = 0;
-	}
-}
-
-int PGXP_CPU_TryMFC2SLL5(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
-{
-	PGXP_value result;
-	uint32_t sourceReg = rt(instr);
-	uint32_t destReg = rd(instr);
-
-	CPU_reg_mfc2_sll5[destReg] = 0;
-	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
-		return 0;
-	if (sa(instr) != 5 || !CPU_reg_mfc2[sourceReg])
-		return 0;
-
-	Validate(&CPU_reg[sourceReg], rtVal);
-	if ((CPU_reg[sourceReg].flags & VALID_01) != VALID_01 ||
-		CPU_reg[sourceReg].value != rtVal)
-		return 0;
-
-	result = CPU_reg[sourceReg];
-	result.value = rdVal;
-	CPU_reg[destReg] = result;
-	CPU_reg_mfc2[destReg] = 0;
-	CPU_reg_mfc2_sll5[destReg] = 1;
-	return 1;
-}
-
-int PGXP_CPU_TryMFC2SLL5SRA5(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
-{
-	PGXP_value result;
-	uint32_t sourceReg = rt(instr);
-	uint32_t destReg = rd(instr);
-
-	if (!PGXP_FeatureEnabled(PGXP_FEATURE_MFC2_SHIFT))
-	{
-		CPU_reg_mfc2_sll5[destReg] = 0;
-		return 0;
-	}
-	if (sa(instr) != 5 || destReg != sourceReg ||
-		!CPU_reg_mfc2_sll5[sourceReg])
-		return 0;
-
-	CPU_reg_mfc2_sll5[sourceReg] = 0;
-	Validate(&CPU_reg[sourceReg], rtVal);
-	if ((CPU_reg[sourceReg].flags & VALID_01) != VALID_01 ||
-		CPU_reg[sourceReg].value != rtVal)
-		return 0;
-
-	result = CPU_reg[sourceReg];
-	result.value = rdVal;
-	CPU_reg[destReg] = result;
-	return 1;
 }
 
 /* invalidate register (invalid 8 bit read) */
@@ -184,7 +113,7 @@ void PGXP_CPU_ADDI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	CPU_reg[rt(instr)] = ret;
 	CPU_reg[rt(instr)].value = rtVal;
 	if (imm(instr) == 0)
-		PGXP_DiagIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
+		PGXP_LineageIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
 }
 
 void PGXP_CPU_ADDIU(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
@@ -252,7 +181,7 @@ void PGXP_CPU_ORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	ret.value = rtVal;
 	CPU_reg[rt(instr)] = ret;
 	if (imm(instr) == 0)
-		PGXP_DiagIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
+		PGXP_LineageIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
 }
 
 void PGXP_CPU_XORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
@@ -280,7 +209,7 @@ void PGXP_CPU_XORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	ret.value = rtVal;
 	CPU_reg[rt(instr)] = ret;
 	if (imm(instr) == 0)
-		PGXP_DiagIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
+		PGXP_LineageIdentityMove(rt(instr), rs(instr), rsVal, rtVal);
 }
 
 void PGXP_CPU_SLTI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
@@ -376,9 +305,9 @@ void PGXP_CPU_ADD(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 
 	CPU_reg[rd(instr)] = ret;
 	if (rs(instr) == 0)
-		PGXP_DiagIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
+		PGXP_LineageIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
 	else if (rt(instr) == 0)
-		PGXP_DiagIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
+		PGXP_LineageIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
 }
 
 void PGXP_CPU_ADDU(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
@@ -529,9 +458,9 @@ void PGXP_CPU_OR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
 	/* Rd = Rs | Rt */
 	PGXP_CPU_AND(instr, rdVal, rsVal, rtVal);
 	if (rs(instr) == 0)
-		PGXP_DiagIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
+		PGXP_LineageIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
 	else if (rt(instr) == 0)
-		PGXP_DiagIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
+		PGXP_LineageIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
 }
 
 void PGXP_CPU_XOR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
@@ -539,9 +468,9 @@ void PGXP_CPU_XOR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 	/* Rd = Rs ^ Rt */
 	PGXP_CPU_AND(instr, rdVal, rsVal, rtVal);
 	if (rs(instr) == 0)
-		PGXP_DiagIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
+		PGXP_LineageIdentityMove(rd(instr), rt(instr), rtVal, rdVal);
 	else if (rt(instr) == 0)
-		PGXP_DiagIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
+		PGXP_LineageIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
 }
 
 void PGXP_CPU_NOR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
@@ -882,6 +811,7 @@ void PGXP_CPU_SLL(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
+	PGXP_LineageShift(instr, rtVal, rdVal, 0);
 }
 
 void PGXP_CPU_SRL(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
@@ -1086,6 +1016,7 @@ void PGXP_CPU_SRA(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
+	PGXP_LineageShift(instr, rtVal, rdVal, 1);
 }
 
 /* ============================================================
@@ -1445,6 +1376,7 @@ void PGXP_CPU_LW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Rt = Mem[Rs + Im] */
 	ValidateAndCopyMem(&CPU_reg[rt(instr)], addr, rtVal);
+	PGXP_LineageLoad(instr, addr, rtVal);
 	PGXP_DiagCPULoad(instr, addr, rtVal, &CPU_reg[rt(instr)],
 		PGXP_DiagGetMemoryState(addr));
 }
@@ -1462,6 +1394,7 @@ void PGXP_CPU_LH(uint32_t instr, uint16_t rtVal, uint32_t addr)
 	psx_value val;
 	val.sd = (int32_t)(int16_t)rtVal;
 	ValidateAndCopyMem16(&CPU_reg[rt(instr)], addr, val.d, 1);
+	PGXP_LineageLoad(instr, addr, val.d);
 	PGXP_DiagCPULoad(instr, addr, val.d, &CPU_reg[rt(instr)],
 		PGXP_DiagGetMemoryState(addr));
 }
@@ -1473,6 +1406,7 @@ void PGXP_CPU_LHU(uint32_t instr, uint16_t rtVal, uint32_t addr)
 	val.d = rtVal;
 	val.w.h = 0;
 	ValidateAndCopyMem16(&CPU_reg[rt(instr)], addr, val.d, 0);
+	PGXP_LineageLoad(instr, addr, val.d);
 	PGXP_DiagCPULoad(instr, addr, val.d, &CPU_reg[rt(instr)],
 		PGXP_DiagGetMemoryState(addr));
 }
@@ -1481,6 +1415,7 @@ void PGXP_CPU_LHU(uint32_t instr, uint16_t rtVal, uint32_t addr)
 void PGXP_CPU_LB(uint32_t instr, uint8_t rtVal, uint32_t addr)
 {
 	InvalidLoad(addr, instr, 116);
+	PGXP_LineageLoad(instr, addr, (uint32_t)(int32_t)(int8_t)rtVal);
 	PGXP_DiagCPULoad(instr, addr, (uint32_t)(int32_t)(int8_t)rtVal,
 		&CPU_reg[rt(instr)], PGXP_DiagGetMemoryState(addr));
 }
@@ -1488,6 +1423,7 @@ void PGXP_CPU_LB(uint32_t instr, uint8_t rtVal, uint32_t addr)
 void PGXP_CPU_LBU(uint32_t instr, uint8_t rtVal, uint32_t addr)
 {
 	InvalidLoad(addr, instr, 116);
+	PGXP_LineageLoad(instr, addr, rtVal);
 	PGXP_DiagCPULoad(instr, addr, rtVal, &CPU_reg[rt(instr)],
 		PGXP_DiagGetMemoryState(addr));
 }
@@ -1504,20 +1440,18 @@ void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 	/* Mem[Rs + Im] = Rt */
 	Validate(&CPU_reg[rt(instr)], rtVal);
 	WriteMem(&CPU_reg[rt(instr)], addr);
-	/* PGXP_DiagMemoryWrite invalidates any provenance previously attached
-	 * to this RAM word.  Install the exact source lineage only after the
-	 * architectural full-word write has completed. */
-	PGXP_DiagLineageStore(instr, rtVal, addr);
+	/* WriteMem invalidates any exact sidecar previously attached to this
+	 * word. Install the source lineage only after the full-word write. */
+	PGXP_LineageStore(instr, rtVal, addr);
 }
 
-#if PGXP_DIAG
-void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
+void PGXP_CPU_LineageShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic)
 {
-	PGXP_DiagPreserveShift(instr, before, after, arithmetic);
+	PGXP_LineageShift(instr, before, after, arithmetic);
 }
 
-void PGXP_CPU_DiagIdentityMove(uint32_t instr, uint32_t before,
+void PGXP_CPU_LineageIdentityMove(uint32_t instr, uint32_t before,
 		uint32_t after)
 {
 	unsigned source;
@@ -1535,79 +1469,13 @@ void PGXP_CPU_DiagIdentityMove(uint32_t instr, uint32_t before,
 		source = (instr >> 21) & 31;
 		dest = (instr >> 16) & 31;
 	}
-	PGXP_DiagIdentityMove(dest, source, before, after);
+	PGXP_LineageIdentityMove(dest, source, before, after);
 }
-
-void PGXP_CPU_BeginObserveInstruction(uint32_t instr, const uint32_t* gpr)
-{
-	PGXP_DiagBeginInstruction(instr, gpr);
-}
-#endif
 
 void PGXP_CPU_ObserveInstruction(uint32_t instr, const uint32_t* gpr)
 {
-#if PGXP_DIAG
-	PGXP_DiagObserveInstruction(instr, gpr);
-#endif
-	uint32_t primary = op(instr);
-	uint32_t dest = 0;
-	int writes = 0;
-
 	(void)gpr;
-	if (primary == 0)
-	{
-		switch (func(instr))
-		{
-		case 0x00: case 0x02: case 0x03:
-		case 0x04: case 0x06: case 0x07:
-		case 0x09: case 0x10: case 0x12:
-		case 0x20: case 0x21: case 0x22: case 0x23:
-		case 0x24: case 0x25: case 0x26: case 0x27:
-		case 0x2A: case 0x2B:
-			dest = rd(instr);
-			writes = 1;
-			break;
-		}
-	}
-	else if (primary == 0x01)
-	{
-		uint32_t subop = rt(instr);
-		if (subop >= 0x10 && subop <= 0x13)
-		{
-			dest = 31;
-			writes = 1;
-		}
-	}
-	else if (primary == 0x03)
-	{
-		dest = 31;
-		writes = 1;
-	}
-	else if ((primary >= 0x08 && primary <= 0x0F) ||
-		(primary >= 0x20 && primary <= 0x26) || primary == 0x30)
-	{
-		dest = rt(instr);
-		writes = 1;
-	}
-	else if (primary == 0x10 || primary == 0x12)
-	{
-		uint32_t cop_op = rs(instr);
-		if (cop_op == 0 || cop_op == 2)
-		{
-			dest = rt(instr);
-			writes = 1;
-		}
-	}
-
-	if (!writes || dest == 0)
-		return;
-	if (primary == 0x12 && rs(instr) == 0)
-		return;
-	if (primary == 0 && func(instr) == 0x00)
-		return;
-
-	CPU_reg_mfc2[dest] = 0;
-	CPU_reg_mfc2_sll5[dest] = 0;
+	PGXP_LineageObserveInstruction(instr);
 }
 
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)

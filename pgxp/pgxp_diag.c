@@ -29,10 +29,6 @@ extern PGXP_value* GTE_ctrl_reg;
 #define PGXP_DIAG_PRIMITIVE_BUCKETS 32u
 #define PGXP_DIAG_PRIMITIVE_COMPOSITIONS 4u
 #define PGXP_DIAG_TRACE_STAGES 9u
-#define PGXP_DIAG_RECOVERY_BUCKETS 65536u
-#define PGXP_DIAG_RECOVERY_WAYS 4u
-#define PGXP_DIAG_RECOVERY_LOCAL_DELTA 1.0f
-#define PGXP_DIAG_FLIGHT_RECOVERY_SAMPLES 2048u
 #define PGXP_DIAG_FLIGHT_REJECT_SAMPLES 256u
 #define PGXP_DIAG_FLIGHT_PRIMITIVE_SAMPLES 2048u
 #define PGXP_DIAG_FLIGHT_TRACE_SAMPLES 64u
@@ -115,18 +111,6 @@ typedef struct
 
 typedef struct
 {
-	uint64_t trace_id;
-	uint32_t value;
-	uint32_t frame;
-	float x;
-	float y;
-	float z;
-	uint8_t ambiguous;
-	uint8_t valid;
-} PGXP_diag_recovery_vertex;
-
-typedef struct
-{
 	uint64_t max_delta_packet;
 	uint64_t max_area_ratio_packet;
 	uint64_t max_w_ratio_packet;
@@ -186,27 +170,6 @@ typedef struct
 
 typedef struct
 {
-	uint64_t trace_id;
-	uint32_t word_addr;
-	uint32_t mfc2_value;
-	uint32_t sll_value;
-	uint32_t sra_value;
-	uint32_t gte_reg;
-	uint32_t stage;
-	uint32_t valid;
-	uint32_t transform_observed;
-	uint32_t current_value;
-	uint32_t depth;
-	uint32_t chain_hash;
-	uint32_t precise_flags;
-	float precise_x;
-	float precise_y;
-	float precise_z;
-	uint32_t precise_valid;
-} PGXP_diag_lineage;
-
-typedef struct
-{
 	uint32_t addr;
 	uint32_t value;
 	uint32_t shadow_value;
@@ -214,7 +177,6 @@ typedef struct
 	uint32_t shadow_count;
 	PGXP_diag_store8 store8;
 	uint32_t store8_match;
-	PGXP_diag_lineage lineage;
 	PGXP_diag_mem_writer writer;
 } PGXP_diag_gpu_provenance;
 
@@ -489,41 +451,6 @@ typedef struct
 	uint64_t gpu_oversize_x;
 	uint64_t gpu_oversize_y;
 	uint64_t gpu_oversize_sign_disagreements;
-	uint64_t lineage_mfc2;
-	uint64_t lineage_sll5_candidates;
-	uint64_t lineage_sll5_matches;
-	uint64_t lineage_sra5_candidates;
-	uint64_t lineage_sra5_matches;
-	uint64_t lineage_preserve_sll5;
-	uint64_t lineage_preserve_sra5;
-	uint64_t lineage_w_suppressed_sll5;
-	uint64_t lineage_w_suppressed_sra5;
-	uint64_t lineage_xy_deferred_sll5;
-	uint64_t lineage_xy_restored_sra5;
-	uint64_t lineage_native_untextured_flat;
-	uint64_t lineage_native_untextured_gouraud;
-	uint64_t lineage_native_axis_x;
-	uint64_t lineage_native_axis_y;
-	uint64_t lineage_native_axis_w_retained;
-	uint64_t lineage_shift_blocked;
-	uint64_t lineage_identity_candidates;
-	uint64_t lineage_identity_matches;
-	uint64_t lineage_identity_preserve;
-	uint64_t lineage_identity_blocked;
-	uint64_t lineage_drops;
-	uint64_t lineage_transforms;
-	uint64_t lineage_transform_state[4][4];
-	uint64_t lineage_transform_semantic[8];
-	uint64_t lineage_transform_propagated;
-	uint64_t lineage_store2;
-	uint64_t lineage_store3;
-	uint64_t lineage_fifo;
-	uint64_t lineage_sidecar_shift[2];
-	uint64_t lineage_sidecar_load;
-	uint64_t lineage_sidecar_identity;
-	uint64_t lineage_sidecar_attempts;
-	uint64_t lineage_sidecar_hits[2];
-	uint64_t lineage_sidecar_reject[5];
 	uint64_t trace_events[11];
 	uint64_t trace_reasons[PGXP_TRACE_REASON_COUNT];
 	uint64_t trace_terminal[3][PGXP_TRACE_REASON_COUNT];
@@ -545,36 +472,13 @@ static uint32_t vertex_coherence_samples;
 static uint32_t line_hack_samples;
 static uint8_t pending_projection_z_band;
 static uint8_t pending_projection_z_delta;
-static uint32_t lineage_fifo_samples;
-static uint32_t lineage_vertex_samples;
-static uint32_t lineage_drop_samples;
-static uint32_t lineage_transform_samples[128][16];
 static uint32_t vertex_sample_addr[PGXP_DIAG_LOAD_SAMPLES];
 static uint32_t vertex_sample_value[PGXP_DIAG_LOAD_SAMPLES];
 static PGXP_diag_gpu_provenance fifo_provenance[32];
 static PGXP_diag_store8 store8_provenance[PGXP_DIAG_STORE8_SLOTS];
-static PGXP_diag_lineage lineage_reg[32];
-static uint32_t lineage_reg_touched;
-static uint32_t lineage_pre_instr;
-static uint32_t lineage_pre_mask;
-static uint32_t lineage_pre_native[32];
-static PGXP_value lineage_pre_shadow[32];
-static PGXP_diag_lineage lineage_pre_lineage[32];
-static PGXP_diag_lineage lineage_mem[PGXP_DIAG_STORE8_SLOTS];
-static PGXP_diag_lineage lineage_scratch[UINT32_C(0x400) / 4];
 static PGXP_diag_gpu_provenance cb_provenance[16];
 
 static uint32_t gpu_source_word_addr(uint32_t addr);
-
-static PGXP_diag_lineage* pgxp_diag_lineage_memory(uint32_t word_addr)
-{
-	if (word_addr < UINT32_C(0x00200000))
-		return &lineage_mem[word_addr >> 2];
-	if (word_addr >= UINT32_C(0x1f800000) &&
-	    word_addr < UINT32_C(0x1f800400))
-		return &lineage_scratch[(word_addr - UINT32_C(0x1f800000)) >> 2];
-	return NULL;
-}
 static PGXP_diag_coherence_vertex coherence_vertices
 	[PGXP_DIAG_COHERENCE_BUCKETS][PGXP_DIAG_COHERENCE_WAYS];
 static PGXP_trace_event trace_ring[PGXP_TRACE_RING_SIZE];
@@ -584,24 +488,6 @@ static uint32_t trace_write;
 static uint32_t trace_chain_samples;
 static uint32_t trace_tracked_samples;
 static uint64_t trace_tracked_ids[64];
-static PGXP_diag_recovery_vertex recovery_vertices
-	[PGXP_DIAG_RECOVERY_BUCKETS][PGXP_DIAG_RECOVERY_WAYS];
-static uint64_t recovery_attempts;
-static uint64_t recovery_hits;
-static uint64_t recovery_disabled;
-static uint64_t recovery_ambiguous;
-static uint64_t recovery_ambiguous_used;
-static uint64_t recovery_ambiguous_rejected;
-static uint64_t recovery_misses;
-static uint64_t recovery_age_hits[5];
-static uint64_t recovery_old_age[4];
-static uint64_t recovery_too_old;
-static uint64_t recovery_stage_attempts[PGXP_DIAG_TRACE_STAGES];
-static uint64_t recovery_stage_hits[PGXP_DIAG_TRACE_STAGES];
-static uint64_t recovery_way_hits[PGXP_DIAG_RECOVERY_WAYS];
-static uint64_t recovery_evictions;
-static uint32_t recovery_flight_samples;
-static uint32_t recovery_reject_samples;
 static uint32_t primitive_flight_samples;
 static uint32_t gl_flight_samples;
 static uint32_t flight_trace_samples;
@@ -876,7 +762,6 @@ static uint32_t gl_native_samples;
 static uint32_t gl_native_window_samples;
 static unsigned gl_repair_mode = PGXP_DIAG_GL_REPAIR_APPLY ?
 	PGXP_DIAG_GL_TEST_BROAD_REPLAY : PGXP_DIAG_GL_TEST_OFF;
-static unsigned j_test_mode = PGXP_DIAG_J_TEST_CURRENT;
 static uint64_t gl_repair_mode_mask[3];
 /* gl_repair_mode_mask records every selected runtime mode by bit index. */
 typedef char pgxp_diag_gl_mode_mask_must_fit_u192[
@@ -1160,127 +1045,6 @@ unsigned PGXP_DiagGLGetMode(void)
 
 static int trace_metadata_valid(const PGXP_value* value);
 
-static const char* pgxp_diag_j_mode_name(unsigned mode)
-{
-	static const char* const names[PGXP_DIAG_J_TEST_COUNT] = {
-		"current",
-		"sra-xy-only",
-		"all-shifts-xy-only",
-		"final-only",
-		"final-only-xy-only",
-		"native-untextured-flat",
-		"native-untextured-gouraud",
-		"native-untextured-all",
-		"native-untextured-xy-keep-w",
-		"native-untextured-x-keep-yw",
-		"native-untextured-y-keep-xw",
-		"isolated-all-exact",
-		"isolated-textured-exact"
-	};
-	return mode < PGXP_DIAG_J_TEST_COUNT ? names[mode] : "invalid";
-}
-
-void PGXP_DiagJSetMode(unsigned mode)
-{
-	if (mode >= PGXP_DIAG_J_TEST_COUNT)
-		mode = PGXP_DIAG_J_TEST_CURRENT;
-	if (mode == j_test_mode)
-		return;
-	j_test_mode = mode;
-	if (log_cb)
-		log_cb(RETRO_LOG_INFO,
-			"[pgxp_j_test_mode] mf=%u mode=%u name=%s\n",
-			mode_frame, mode, pgxp_diag_j_mode_name(mode));
-}
-
-unsigned PGXP_DiagJGetMode(void)
-{
-	return j_test_mode;
-}
-
-static int pgxp_diag_j_is_isolated(void)
-{
-	return j_test_mode == PGXP_DIAG_J_TEST_ISOLATED_ALL ||
-		j_test_mode == PGXP_DIAG_J_TEST_ISOLATED_TEXTURED;
-}
-
-int PGXP_DiagJForceNative(const PGXP_value* value)
-{
-	int textured;
-	int gouraud;
-	int reject = 0;
-
-	/* J's final SRA5 handoff improves Spyro's textured ground, but matched
-	 * device logs show that it increases untextured shared-edge disagreement
-	 * by an order of magnitude.  These modes safely decline only J-derived
-	 * precision at consumption time: they never substitute another vertex. */
-	if (!trace_metadata_valid(value) ||
-	    value->trace_stage != PGXP_TRACE_SRA5)
-		return 0;
-	textured = (current_opcode & 0x04) != 0;
-	gouraud = (current_opcode & 0x10) != 0;
-	if (textured)
-		return 0;
-
-	switch (j_test_mode)
-	{
-		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT:
-			reject = !gouraud;
-			break;
-		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD:
-			reject = gouraud;
-			break;
-		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL:
-			reject = 1;
-			break;
-		default:
-			break;
-	}
-	if (reject)
-	{
-		if (gouraud)
-			window.lineage_native_untextured_gouraud++;
-		else
-			window.lineage_native_untextured_flat++;
-	}
-	return reject;
-}
-
-unsigned PGXP_DiagJNativeAxisMask(const PGXP_value* value)
-{
-	unsigned mask = 0;
-
-	/* Retain J's proven W and replace only selected screen components with
-	 * the architectural packed coordinate.  This separates mode 7's loss of
-	 * W from its X/Y fallback and tests whether both axes are needed for the
-	 * mixed precise/native sky mesh.  Textured geometry is never touched. */
-	if (!trace_metadata_valid(value) ||
-	    value->trace_stage != PGXP_TRACE_SRA5 ||
-	    (current_opcode & 0x04) != 0)
-		return 0;
-
-	switch (j_test_mode)
-	{
-		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_XY_KEEP_W:
-			mask = PGXP_DIAG_J_NATIVE_X | PGXP_DIAG_J_NATIVE_Y;
-			break;
-		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW:
-			mask = PGXP_DIAG_J_NATIVE_X;
-			break;
-		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW:
-			mask = PGXP_DIAG_J_NATIVE_Y;
-			break;
-		default:
-			break;
-	}
-	if (mask & PGXP_DIAG_J_NATIVE_X)
-		window.lineage_native_axis_x++;
-	if (mask & PGXP_DIAG_J_NATIVE_Y)
-		window.lineage_native_axis_y++;
-	if (mask)
-		window.lineage_native_axis_w_retained++;
-	return mask;
-}
 
 static int trace_metadata_valid(const PGXP_value* value)
 {
@@ -1521,22 +1285,6 @@ static uint32_t invalid_register_mask(void)
 	return mask;
 }
 
-void PGXP_DiagResetRecovery(void)
-{
-	memset(recovery_vertices, 0, sizeof(recovery_vertices));
-	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
-	recovery_disabled = 0;
-	recovery_ambiguous_used = 0;
-	recovery_ambiguous_rejected = 0;
-	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
-	memset(recovery_old_age, 0, sizeof(recovery_old_age));
-	recovery_too_old = 0;
-	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
-	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
-	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
-	recovery_evictions = 0;
-}
-
 void PGXP_DiagInit(void)
 {
 	memset(&window, 0, sizeof(window));
@@ -1549,15 +1297,6 @@ void PGXP_DiagInit(void)
 	memset(load_samples, 0, sizeof(load_samples));
 	memset(fifo_provenance, 0, sizeof(fifo_provenance));
 	memset(store8_provenance, 0, sizeof(store8_provenance));
-	memset(lineage_reg, 0, sizeof(lineage_reg));
-	lineage_reg_touched = 0;
-	lineage_pre_instr = 0;
-	lineage_pre_mask = 0;
-	memset(lineage_pre_native, 0, sizeof(lineage_pre_native));
-	memset(lineage_pre_shadow, 0, sizeof(lineage_pre_shadow));
-	memset(lineage_pre_lineage, 0, sizeof(lineage_pre_lineage));
-	memset(lineage_mem, 0, sizeof(lineage_mem));
-	memset(lineage_scratch, 0, sizeof(lineage_scratch));
 	memset(cb_provenance, 0, sizeof(cb_provenance));
 	memset(coherence_vertices, 0, sizeof(coherence_vertices));
 	dispatch_samples = 0;
@@ -1568,23 +1307,15 @@ void PGXP_DiagInit(void)
 	line_hack_samples = 0;
 	pending_projection_z_band = 0;
 	pending_projection_z_delta = 0;
-	lineage_fifo_samples = 0;
-	lineage_vertex_samples = 0;
-	lineage_drop_samples = 0;
-	memset(lineage_transform_samples, 0,
-		sizeof(lineage_transform_samples));
 	trace_next_id = 1;
 	trace_sequence = 0;
 	trace_write = 0;
 	trace_chain_samples = 0;
 	trace_tracked_samples = 0;
-	recovery_flight_samples = 0;
-	recovery_reject_samples = 0;
 	primitive_flight_samples = 0;
 	gl_flight_samples = 0;
 	flight_trace_samples = 0;
 	memset(&flight_frame, 0, sizeof(flight_frame));
-	PGXP_DiagResetRecovery();
 	memset(mem_writers, 0, sizeof(mem_writers));
 	memset(writer_writes, 0, sizeof(writer_writes));
 	memset(writer_native, 0, sizeof(writer_native));
@@ -1748,36 +1479,6 @@ void PGXP_DiagCPUDispatch(uint32_t instr, uint32_t addr, unsigned dest,
 	uint32_t after_flags = dest < 32 ? CPU_reg[dest].flags : 0;
 	uint16_t after_gflags = dest < 32 ? CPU_reg[dest].gFlags : 0;
 
-	if (dest < 32)
-	{
-		uint32_t bit = UINT32_C(1) << dest;
-		if (!(lineage_reg_touched & bit))
-		{
-			if (lineage_reg[dest].valid)
-			{
-				uint32_t expected = lineage_reg[dest].current_value;
-				window.lineage_drops++;
-				if (lineage_drop_samples < PGXP_DIAG_LOAD_SAMPLES &&
-				    log_cb)
-				{
-					log_cb(RETRO_LOG_INFO,
-						"[pgxp_lineage_drop] n=%u mf=%u instr=%08x "
-						"op=%02x func=%02x rs=%u rt=%u rd=%u dest=%u "
-						"stage=%u gte=%u old=%08x new=%08x flags=%08x\n",
-						lineage_drop_samples + 1, mode_frame, instr,
-						instr >> 26, instr & 0x3f,
-						(instr >> 21) & 31, (instr >> 16) & 31,
-						(instr >> 11) & 31, dest,
-						lineage_reg[dest].stage,
-						lineage_reg[dest].gte_reg, expected,
-						CPU_reg[dest].value, CPU_reg[dest].flags);
-					lineage_drop_samples++;
-				}
-			}
-			memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
-		}
-		lineage_reg_touched &= ~bit;
-	}
 
 	if (dispatch_samples >= 32 || !log_cb)
 		return;
@@ -1802,23 +1503,6 @@ void PGXP_DiagCPULoad(uint32_t instr, uint32_t addr, uint32_t value,
 	unsigned reg = (instr >> 16) & 0x1f;
 	int invalid_result = (result->flags & VALID_01) != VALID_01;
 
-	/* Isolated J never writes its precise payload into CPU_reg.  Restore only
-	 * its exact sidecar on an aligned LW of the same architectural word; LWL,
-	 * LWR and sub-word loads deliberately cannot inherit this provenance. */
-	if (pgxp_diag_j_is_isolated() && (instr >> 26) == 0x23)
-	{
-		uint32_t word_addr = gpu_source_word_addr(addr);
-		PGXP_diag_lineage* source =
-			pgxp_diag_lineage_memory(word_addr);
-		lineage_reg_touched |= UINT32_C(1) << reg;
-		memset(&lineage_reg[reg], 0, sizeof(lineage_reg[reg]));
-		if (source && source->valid && source->word_addr == word_addr &&
-		    source->current_value == value)
-		{
-			lineage_reg[reg] = *source;
-			window.lineage_sidecar_load++;
-		}
-	}
 
 	if (memory_state < 0 ||
 	    (unsigned)memory_state >= PGXP_DIAG_MEMORY_STATES)
@@ -1873,20 +1557,12 @@ void PGXP_DiagMemoryWrite(uint32_t addr, const PGXP_value* value,
 		int valid_address, int full_word)
 {
 	uint32_t segment = addr >> 24;
-	uint32_t word_addr = gpu_source_word_addr(addr);
-	PGXP_diag_lineage* lineage =
-		pgxp_diag_lineage_memory(word_addr);
 	unsigned width = full_word ? 1u : 2u;
 
 	window.mem_writes++;
 	if (!valid_address)
 		window.mem_invalid_writes++;
 	hash_event(2, addr, value ? value->value : 0);
-	/* Every architectural write invalidates the previous exact sidecar.
-	 * PGXP_CPU_SW reinstalls source lineage after WriteMem returns; direct
-	 * GTE and partial writes intentionally leave the entry empty. */
-	if (valid_address && lineage)
-		memset(lineage, 0, sizeof(*lineage));
 	if (!value || (segment != 0x00 && segment != 0x80 && segment != 0xa0))
 		return;
 	{
@@ -1917,77 +1593,9 @@ static uint32_t gpu_source_word_addr(uint32_t addr)
 	}
 }
 
-void PGXP_DiagMFC2(uint32_t instr, uint32_t value,
-		const PGXP_value* precise)
-{
-	uint32_t dest = (instr >> 16) & 31;
-	PGXP_diag_lineage* lineage = &lineage_reg[dest];
-
-	memset(lineage, 0, sizeof(*lineage));
-	window.lineage_mfc2++;
-	lineage->mfc2_value = value;
-	lineage->gte_reg = (instr >> 11) & 31;
-	lineage->stage = 1;
-	lineage->valid = 1;
-	lineage->current_value = value;
-	lineage->chain_hash = UINT32_C(2166136261) ^ instr ^ value;
-	if (precise && precise->value == value &&
-	    (precise->flags & VALID_01) == VALID_01 &&
-	    isfinite(precise->x) && isfinite(precise->y) &&
-	    isfinite(precise->z))
-	{
-		lineage->trace_id = precise->trace_id;
-		lineage->precise_flags = precise->flags;
-		lineage->precise_x = precise->x;
-		lineage->precise_y = precise->y;
-		lineage->precise_z = precise->z;
-		lineage->precise_valid = 1;
-	}
-	lineage_reg_touched |= UINT32_C(1) << dest;
-}
-
-void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
-		int arithmetic)
-{
-	uint32_t source = (instr >> 16) & 31;
-	uint32_t dest = (instr >> 11) & 31;
-	uint32_t shift = (instr >> 6) & 31;
-	PGXP_diag_lineage prior = lineage_reg[source];
-
-	lineage_reg_touched |= UINT32_C(1) << dest;
-	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
-	if (!arithmetic && shift == 5)
-		window.lineage_sll5_candidates++;
-	else if (arithmetic && shift == 5 && dest == source)
-		window.lineage_sra5_candidates++;
-	if (!arithmetic && shift == 5 && prior.valid && prior.stage == 1 &&
-	    prior.mfc2_value == before)
-	{
-		lineage_reg[dest] = prior;
-		lineage_reg[dest].sll_value = after;
-		lineage_reg[dest].stage = 2;
-		lineage_reg[dest].current_value = after;
-		lineage_reg[dest].depth++;
-		window.lineage_sll5_matches++;
-	}
-	else if (arithmetic && shift == 5 && dest == source &&
-	         prior.valid && prior.stage == 2 && prior.sll_value == before)
-	{
-		lineage_reg[dest] = prior;
-		lineage_reg[dest].sra_value = after;
-		lineage_reg[dest].stage = 3;
-		lineage_reg[dest].current_value = after;
-		lineage_reg[dest].depth++;
-		window.lineage_sra5_matches++;
-	}
-}
 
 void PGXP_DiagTraceGTE(PGXP_value* value)
 {
-	PGXP_diag_recovery_vertex* recovery;
-	uint32_t index;
-	unsigned way;
-	unsigned replace = PGXP_DIAG_RECOVERY_WAYS;
 	if (!value)
 		return;
 	/* A GTE result starts a fresh provenance chain. */
@@ -2001,181 +1609,8 @@ void PGXP_DiagTraceGTE(PGXP_value* value)
 	value->trace_stage = PGXP_TRACE_GTE;
 	trace_record(PGXP_TRACE_EVENT_GTE, 0, value->trace_id,
 		value->trace_stage, 0, 0, value->value, value->value, value);
-	index = (value->value * UINT32_C(2654435761)) >> 16;
-	recovery = NULL;
-	for (way = 0; way < PGXP_DIAG_RECOVERY_WAYS; way++)
-	{
-		PGXP_diag_recovery_vertex* candidate = &recovery_vertices[index][way];
-		if (candidate->valid && candidate->value == value->value)
-		{
-			recovery = candidate;
-			break;
-		}
-		if (!candidate->valid)
-		{
-			if (replace == PGXP_DIAG_RECOVERY_WAYS ||
-			    recovery_vertices[index][replace].valid)
-				replace = way;
-			continue;
-		}
-		if (replace == PGXP_DIAG_RECOVERY_WAYS ||
-		    (recovery_vertices[index][replace].valid &&
-		     candidate->frame < recovery_vertices[index][replace].frame))
-			replace = way;
-	}
-	if (!recovery)
-	{
-		recovery = &recovery_vertices[index][replace];
-		if (recovery->valid)
-			recovery_evictions++;
-	}
-	if (recovery->valid && recovery->frame == mode_frame &&
-	    recovery->value == value->value)
-	{
-		if (recovery->x != value->x || recovery->y != value->y ||
-		    recovery->z != value->z)
-			recovery->ambiguous = 1;
-	}
-	else
-	{
-		recovery->trace_id = value->trace_id;
-		recovery->value = value->value;
-		recovery->frame = mode_frame;
-		recovery->x = value->x;
-		recovery->y = value->y;
-		recovery->z = value->z;
-		recovery->ambiguous = 0;
-		recovery->valid = 1;
-	}
 }
 
-int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
-		unsigned slot, float* x, float* y, float* z)
-{
-	PGXP_diag_recovery_vertex* recovery;
-	uint32_t index;
-	uint32_t age;
-	int32_t native_x;
-	int32_t native_y;
-	float dx;
-	float dy;
-	float max_delta;
-	unsigned way;
-	unsigned stage = trace_metadata_valid(stale) ? stale->trace_stage :
-		PGXP_TRACE_NONE;
-
-	recovery_attempts++;
-	if (!PGXP_FeatureEnabled(PGXP_FEATURE_RECENT_RECOVERY))
-	{
-		recovery_disabled++;
-		return 0;
-	}
-	if (stage >= PGXP_DIAG_TRACE_STAGES)
-		stage = PGXP_TRACE_NONE;
-	recovery_stage_attempts[stage]++;
-	index = (value * UINT32_C(2654435761)) >> 16;
-	recovery = NULL;
-	for (way = 0; way < PGXP_DIAG_RECOVERY_WAYS; way++)
-	{
-		PGXP_diag_recovery_vertex* candidate = &recovery_vertices[index][way];
-		if (candidate->valid && candidate->value == value)
-		{
-			recovery = candidate;
-			break;
-		}
-	}
-	if (!recovery || recovery->frame > mode_frame)
-	{
-		recovery_misses++;
-		return 0;
-	}
-	age = mode_frame - recovery->frame;
-	if (age > 4)
-	{
-		recovery_too_old++;
-		recovery_old_age[age < 8 ? age - 5 : 3]++;
-		return 0;
-	}
-	if (recovery->ambiguous)
-	{
-		native_x = (int16_t)(value & UINT32_C(0xffff));
-		native_y = (int16_t)(value >> 16);
-		dx = recovery->x - (float)native_x;
-		dy = recovery->y - (float)native_y;
-		max_delta = fmaxf(fabsf(dx), fabsf(dy));
-		recovery_ambiguous++;
-		/* Multiple precise GTE results may share one architectural SXY word.
-		 * Retaining the first result repaired real subpixel gaps, but the R4
-		 * flight recorder caught an unrelated HUD quad inheriting a candidate
-		 * 71 native pixels away.  An ambiguous fallback has no provenance with
-		 * which to select a non-local candidate.  Preserve the useful case in
-		 * which the candidates remain in the packed vertex's one-pixel
-		 * neighbourhood, and otherwise fall through to the ordinary cache or
-		 * native coordinate. */
-		if (!isfinite(max_delta) ||
-		    max_delta > PGXP_DIAG_RECOVERY_LOCAL_DELTA)
-		{
-			recovery_ambiguous_rejected++;
-			if (log_cb &&
-			    recovery_reject_samples < PGXP_DIAG_FLIGHT_REJECT_SAMPLES)
-			{
-				log_cb(RETRO_LOG_INFO,
-					"[pgxp_recovery_reject] n=%u mf=%u packet=%llu "
-					"op=%02x stack=%03x slot=%u value=%08x "
-					"native=%d/%d recovered=%.9g/%.9g/%.9g "
-					"delta=%.6f/%.6f max=%.6f record_mf=%u "
-					"age=%u way=%u record_trace=%llu\n",
-					recovery_reject_samples + 1, mode_frame,
-					(unsigned long long)current_packet, current_opcode,
-					PGXP_GetExperimentMask(), slot, value,
-					native_x, native_y, recovery->x, recovery->y,
-					recovery->z, dx, dy, max_delta, recovery->frame,
-					age, way, (unsigned long long)recovery->trace_id);
-				recovery_reject_samples++;
-				if (max_delta > 4.0f)
-					trace_dump_flight_chain(recovery->trace_id);
-			}
-			return 0;
-		}
-		recovery_ambiguous_used++;
-	}
-	*x = recovery->x;
-	*y = recovery->y;
-	*z = recovery->z;
-	recovery_hits++;
-	recovery_age_hits[age]++;
-	recovery_stage_hits[stage]++;
-	recovery_way_hits[way]++;
-	flight_frame.recoveries++;
-	if (log_cb &&
-	    recovery_flight_samples < PGXP_DIAG_FLIGHT_RECOVERY_SAMPLES)
-	{
-		native_x = (int16_t)(value & UINT32_C(0xffff));
-		native_y = (int16_t)(value >> 16);
-		dx = recovery->x - (float)native_x;
-		dy = recovery->y - (float)native_y;
-		max_delta = fmaxf(fabsf(dx), fabsf(dy));
-		log_cb(RETRO_LOG_INFO,
-			"[pgxp_flight_recovery] n=%u mf=%u packet=%llu op=%02x "
-			"stack=%03x slot=%u value=%08x native=%d/%d "
-			"recovered=%.9g/%.9g/%.9g delta=%.6f/%.6f max=%.6f "
-			"record_mf=%u age=%u way=%u ambiguous=%u "
-			"record_trace=%llu stale=%08x/%08x stage=%u trace=%llu\n",
-			recovery_flight_samples + 1, mode_frame,
-			(unsigned long long)current_packet, current_opcode,
-			PGXP_GetExperimentMask(), slot, value, native_x, native_y,
-			recovery->x, recovery->y, recovery->z, dx, dy, max_delta,
-			recovery->frame, age, way, recovery->ambiguous,
-			(unsigned long long)recovery->trace_id,
-			stale ? stale->value : 0, stale ? stale->flags : 0, stage,
-			(unsigned long long)(stale ? stale->trace_id : 0));
-		recovery_flight_samples++;
-		if (max_delta > 4.0f)
-			trace_dump_flight_chain(recovery->trace_id);
-	}
-	return 1;
-	return 0;
-}
 
 void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value)
 {
@@ -2208,397 +1643,6 @@ void PGXP_DiagTraceShift(uint32_t instr, uint32_t before, uint32_t after,
 		instr, before, after, value);
 }
 
-int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
-		uint32_t after, int arithmetic)
-{
-	uint32_t source = (instr >> 16) & 31;
-	uint32_t dest = (instr >> 11) & 31;
-	int final_only = j_test_mode == PGXP_DIAG_J_TEST_FINAL_ONLY ||
-		j_test_mode == PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY;
-	int dormant_sll5;
-	PGXP_value result;
-
-	/* This diagnostic lineage implementation is behaviorally independent
-	 * from d85d3347's ordinary Memory-mode helper.  Keep candidate accounting
-	 * while disabled, but clear the destination lineage so no later identity
-	 * operation can turn observation state back into rendering state. */
-	if (!PGXP_FeatureEnabled(PGXP_FEATURE_DIAG_SHIFT))
-	{
-		PGXP_DiagShift(instr, before, after, arithmetic);
-		lineage_reg_touched |= UINT32_C(1) << dest;
-		memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
-		window.lineage_shift_blocked++;
-		return 0;
-	}
-
-	/* The isolated modes use the exact native lineage as a transport proof
-	 * only.  They intentionally leave CPU_reg untouched, so J cannot affect
-	 * later CPU-side PGXP operations, NCLIP inputs, or unrelated memory
-	 * shadows.  The original MFC2 payload is recovered only at the GPU. */
-	if (pgxp_diag_j_is_isolated())
-	{
-		unsigned expected_stage = arithmetic ? 3u : 2u;
-		PGXP_DiagShift(instr, before, after, arithmetic);
-		if (lineage_reg[dest].valid &&
-		    lineage_reg[dest].stage == expected_stage &&
-		    lineage_reg[dest].precise_valid)
-			window.lineage_sidecar_shift[arithmetic ? 1 : 0]++;
-		else
-			window.lineage_shift_blocked++;
-		return 0;
-	}
-
-	Validate(&CPU_reg[source], before);
-	result = CPU_reg[source];
-	PGXP_DiagShift(instr, before, after, arithmetic);
-	dormant_sll5 = final_only && arithmetic && (instr >> 6 & 31) == 5 &&
-		result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
-		result.trace_reserved[0] == 0 && result.trace_reserved[5] != 0;
-	if ((result.flags & VALID_01) != VALID_01 && !dormant_sll5)
-	{
-		PGXP_DiagTraceShift(instr, before, after, arithmetic, 2, &result);
-		return 0;
-	}
-	if (result.value != before)
-	{
-		PGXP_DiagTraceShift(instr, before, after, arithmetic, 3, &result);
-		return 0;
-	}
-	/* In diagnostic mode, a traced SLL5 can prove the SRA5 handoff even
-	 * when the legacy lineage table was not updated for this register. */
-	if (arithmetic && (instr >> 6 & 31) == 5 &&
-	    result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
-	    result.trace_reserved[0] != 0)
-	{
-		PGXP_DiagTraceShift(instr, before, after, arithmetic, 5, &result);
-		return 0;
-	}
-    if (arithmetic && (instr >> 6 & 31) == 5 &&
-        result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
-        result.trace_reserved[0] == 0 && result.trace_reserved[5] != 0)
-    {
-        uint32_t original_mfc2;
-        memcpy(&original_mfc2, result.trace_reserved + 1,
-            sizeof(original_mfc2));
-        if (after != original_mfc2)
-        {
-            PGXP_DiagTraceShift(instr, before, after, arithmetic, 7, &result);
-            return 0;
-        }
-    }
-	if ((!lineage_reg[dest].valid ||
-	     lineage_reg[dest].stage != (arithmetic ? 3u : 2u)) &&
-	    !(arithmetic && (instr >> 6 & 31) == 5 &&
-	      result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
-	      result.trace_reserved[0] == 0 && result.trace_reserved[5] != 0))
-	{
-		PGXP_DiagTraceShift(instr, before, after, arithmetic, 4, &result);
-		return 0;
-	}
-
-	result.value = after;
-	PGXP_DiagTraceShift(instr, before, after, arithmetic, 0, &result);
-	/* In final-only modes, retain the precise payload and trace through the
-	 * SLL5 intermediate but do not expose that shifted architectural word as
-	 * a renderable precise vertex.  The exact inverse proof above restores
-	 * X/Y only after SRA5 reproduces the root MFC2 word. */
-	if (final_only)
-	{
-		if (arithmetic)
-		{
-			result.flags |= VALID_01;
-			window.lineage_xy_restored_sra5++;
-		}
-		else
-		{
-			result.flags &= ~VALID_01;
-			window.lineage_xy_deferred_sll5++;
-		}
-	}
-	/* Keep J's proven subpixel X/Y while testing whether carrying its GTE W
-	 * across the CPU packing handoff creates projection-domain seams against
-	 * neighbouring CPU-generated/native vertices.  Invalidating VALID_2 is
-	 * sufficient: the shared vertex path then uses W=1 without discarding X/Y. */
-	if (j_test_mode == PGXP_DIAG_J_TEST_ALL_XY_ONLY ||
-	    (arithmetic &&
-	     (j_test_mode == PGXP_DIAG_J_TEST_SRA_XY_ONLY ||
-	      j_test_mode == PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY)))
-	{
-		result.flags &= ~VALID_2;
-		if (arithmetic)
-			window.lineage_w_suppressed_sra5++;
-		else
-			window.lineage_w_suppressed_sll5++;
-	}
-	CPU_reg[dest] = result;
-	if (arithmetic)
-		window.lineage_preserve_sra5++;
-	else
-		window.lineage_preserve_sll5++;
-	return 1;
-}
-
-void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
-		uint32_t before, uint32_t after)
-{
-	PGXP_diag_lineage prior = lineage_reg[source];
-	PGXP_value result;
-	uint32_t expected;
-
-	window.lineage_identity_candidates++;
-	lineage_reg_touched |= UINT32_C(1) << dest;
-	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
-	if (!PGXP_FeatureEnabled(PGXP_FEATURE_IDENTITY_MOVE))
-	{
-		window.lineage_identity_blocked++;
-		return;
-	}
-	/* Keep an isolated J shift chain isolated across exact move aliases.  A
-	 * stage-1 MFC2 value is not J-derived: identity-move preservation (I)
-	 * must still copy that ordinary GTE shadow into CPU_reg for consumers
-	 * such as GT2's wheel geometry.  Falling through for stage 1 preserves
-	 * both the ordinary shadow and this lineage, so a later SLL5 can still
-	 * enter the isolated J sidecar.  Only post-SLL5/SRA5 stages must remain
-	 * sidecar-only to avoid reintroducing J's CPU-shadow contamination. */
-	if (pgxp_diag_j_is_isolated() && prior.precise_valid &&
-	    (prior.stage == 2 || prior.stage == 3))
-	{
-		if (source != 0 && before == after &&
-		    prior.current_value == before)
-		{
-			window.lineage_identity_matches++;
-			lineage_reg[dest] = prior;
-			window.lineage_identity_preserve++;
-			window.lineage_sidecar_identity++;
-		}
-		return;
-	}
-	if (source == 0 || before != after || !prior.valid)
-		return;
-	expected = prior.current_value;
-	if (expected != before)
-		return;
-	window.lineage_identity_matches++;
-
-	Validate(&CPU_reg[source], before);
-	result = CPU_reg[source];
-	if ((result.flags & VALID_01) != VALID_01 || result.value != before)
-		return;
-	result.value = after;
-	CPU_reg[dest] = result;
-	trace_record(PGXP_TRACE_EVENT_CPU, 0, result.trace_id,
-		result.trace_stage, (uint16_t)((source << 5) | dest), 0,
-		before, after, &result);
-	lineage_reg[dest] = prior;
-	window.lineage_identity_preserve++;
-	return;
-}
-
-void PGXP_DiagBeginInstruction(uint32_t instr, const uint32_t* gpr)
-{
-	uint32_t rs = (instr >> 21) & 31;
-	uint32_t rt = (instr >> 16) & 31;
-
-	lineage_pre_instr = instr;
-	lineage_pre_mask = (UINT32_C(1) << rs) | (UINT32_C(1) << rt);
-	lineage_pre_shadow[rs] = CPU_reg[rs];
-	lineage_pre_shadow[rt] = CPU_reg[rt];
-	lineage_pre_native[rs] = gpr[rs];
-	lineage_pre_native[rt] = gpr[rt];
-	lineage_pre_lineage[rs] = lineage_reg[rs];
-	lineage_pre_lineage[rt] = lineage_reg[rt];
-}
-
-void PGXP_DiagObserveInstruction(uint32_t instr, const uint32_t* gpr)
-{
-	uint32_t primary = instr >> 26;
-	uint32_t special = instr & 63;
-	uint32_t dest = 0, source = 0, other = 0;
-	uint32_t expected, transform_class, semantic = 0;
-	uint32_t source_state, result_state;
-	uint32_t* transition_samples;
-	PGXP_diag_lineage prior;
-	const PGXP_value *source_shadow, *other_shadow, *result_shadow;
-	int identity = 0;
-
-	if (primary == 0)
-	{
-		switch (special)
-		{
-			case 0x00: case 0x02: case 0x03:
-				dest = (instr >> 11) & 31; source = (instr >> 16) & 31; break;
-			case 0x04: case 0x06: case 0x07:
-				dest = (instr >> 11) & 31; source = (instr >> 16) & 31;
-				other = (instr >> 21) & 31; break;
-			case 0x20: case 0x21: case 0x22: case 0x23:
-			case 0x24: case 0x25: case 0x26: case 0x27:
-			case 0x2a: case 0x2b:
-				dest = (instr >> 11) & 31; source = (instr >> 21) & 31;
-				other = (instr >> 16) & 31;
-				identity = (special == 0x20 || special == 0x21 ||
-					special == 0x25 || special == 0x26) &&
-					(source == 0 || other == 0);
-				break;
-			default: return;
-		}
-	}
-	else
-	{
-		switch (primary)
-		{
-			case 0x08: case 0x09: case 0x0a: case 0x0b:
-			case 0x0c: case 0x0d: case 0x0e:
-				dest = (instr >> 16) & 31; source = (instr >> 21) & 31;
-				identity = (primary == 0x08 || primary == 0x09 ||
-					primary == 0x0d || primary == 0x0e) &&
-					(instr & 0xffff) == 0;
-				break;
-			default: return;
-		}
-	}
-	if (dest == 0 || identity)
-		return;
-
-	/* PGXP_DiagPreserveShift runs before the architectural GPR write and
-	 * has already advanced a recognized pair to stage 2 or 3.  Replacing
-	 * it below with the BEGIN_OPF snapshot would roll the lineage back to
-	 * stage 1, making every following SRA5 miss. */
-	if (primary == 0 &&
-	    ((special == 0x00 && lineage_reg[dest].valid &&
-	      lineage_reg[dest].stage == 2) ||
-	     (special == 0x03 && lineage_reg[dest].valid &&
-	      lineage_reg[dest].stage == 3)))
-		return;
-
-	/* In Memory Only mode, a non-identity CPU write leaves CPU_reg[dest]
-	 * unchanged. Mark any traced shadow there as stale while retaining its
-	 * trace metadata for the diagnostic ledger. */
-	if (trace_metadata_valid(&CPU_reg[dest]))
-		CPU_reg[dest].trace_reserved[0] = 1;
-
-	if (lineage_pre_instr != instr)
-		return;
-	if (!lineage_pre_lineage[source].valid &&
-	    lineage_pre_lineage[other].valid)
-		source = other;
-	if (!(lineage_pre_mask & (UINT32_C(1) << source)) ||
-	    !lineage_pre_lineage[source].valid)
-		return;
-
-	prior = lineage_pre_lineage[source];
-	expected = prior.current_value;
-	source_shadow = &lineage_pre_shadow[source];
-	other_shadow = &lineage_pre_shadow[other];
-	result_shadow = &CPU_reg[dest];
-	source_state = (((source_shadow->flags & VALID_01) == VALID_01) ? 2u : 0u) |
-		(source_shadow->value == expected);
-	result_state = (((result_shadow->flags & VALID_01) == VALID_01) ? 2u : 0u) |
-		(result_shadow->value == gpr[dest]);
-
-	if (gpr[dest] == expected)
-		semantic = 1;
-	else if (other && gpr[dest] == lineage_pre_native[other])
-		semantic = 2;
-	else if (other && (gpr[dest] ==
-		((expected & 0xffff) | (lineage_pre_native[other] & 0xffff0000)) ||
-		gpr[dest] == ((lineage_pre_native[other] & 0xffff) | (expected & 0xffff0000))))
-		semantic = 3;
-	else if ((gpr[dest] & 0xffff) == (expected & 0xffff) ||
-		(gpr[dest] & 0xffff0000) == (expected & 0xffff0000))
-		semantic = 4;
-	else if (primary == 0 && special <= 7)
-		semantic = 5;
-	else if ((primary == 0 && (special == 0x2a || special == 0x2b)) ||
-		primary == 0x0a || primary == 0x0b)
-		semantic = 6;
-	else
-		semantic = 7;
-
-	window.lineage_transforms++;
-	window.lineage_transform_state[source_state][result_state]++;
-	window.lineage_transform_semantic[semantic]++;
-	if (result_state == 3)
-		window.lineage_transform_propagated++;
-	if (trace_metadata_valid(source_shadow))
-	{
-		int result_trace_valid = trace_metadata_valid(result_shadow);
-		uint8_t trace_reason = result_trace_valid &&
-			result_shadow->trace_id == source_shadow->trace_id ? 0 :
-			(!result_trace_valid ? 1 : 5);
-		if ((result_shadow->flags & VALID_01) != VALID_01)
-			trace_reason = 2;
-		else if (result_shadow->value != gpr[dest])
-			trace_reason = 3;
-		trace_record(PGXP_TRACE_EVENT_CPU, trace_reason,
-			source_shadow->trace_id, source_shadow->trace_stage,
-			(uint16_t)((source << 5) | dest), instr, expected,
-			gpr[dest], result_shadow);
-	}
-
-	transform_class = primary == 0 ? special : 0x40 + primary;
-	transition_samples = &lineage_transform_samples[transform_class]
-		[source_state * 4 + result_state];
-	if (*transition_samples < 4 && log_cb)
-	{
-		log_cb(RETRO_LOG_INFO,
-			"[pgxp_lineage_transform] class=%u n=%u mf=%u instr=%08x "
-			"op=%02x func=%02x rs=%u rt=%u rd=%u src=%u dest=%u "
-			"stage=%u depth=%u chain=%08x gte=%u value=%08x other=%08x "
-			"result=%08x state=%u/%u semantic=%u "
-			"src_shadow=%08x/%08x/%.3f/%.3f "
-			"other_shadow=%08x/%08x/%.3f/%.3f "
-			"result_shadow=%08x/%08x/%.3f/%.3f\n",
-			transform_class, *transition_samples + 1, mode_frame, instr,
-			primary, special, (instr >> 21) & 31, (instr >> 16) & 31,
-			(instr >> 11) & 31, source, dest, prior.stage, prior.depth,
-			prior.chain_hash, prior.gte_reg, expected, lineage_pre_native[other], gpr[dest],
-			source_state, result_state, semantic,
-			source_shadow->value, source_shadow->flags,
-			source_shadow->x, source_shadow->y,
-			other_shadow->value, other_shadow->flags,
-			other_shadow->x, other_shadow->y,
-			result_shadow->value, result_shadow->flags,
-			result_shadow->x, result_shadow->y);
-		(*transition_samples)++;
-	}
-
-	lineage_reg[dest] = prior;
-	lineage_reg[dest].current_value = gpr[dest];
-	lineage_reg[dest].depth++;
-	lineage_reg[dest].transform_observed = 1;
-	lineage_reg[dest].chain_hash =
-		(prior.chain_hash ^ instr ^ gpr[dest]) * UINT32_C(16777619);
-	lineage_reg_touched |= UINT32_C(1) << dest;
-}
-
-void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
-{
-	uint32_t source = (instr >> 16) & 31;
-	uint32_t word_addr = gpu_source_word_addr(addr);
-	PGXP_diag_lineage* dest = pgxp_diag_lineage_memory(word_addr);
-	const PGXP_diag_lineage* prior = &lineage_reg[source];
-	const PGXP_value* shadow = &CPU_reg[source];
-
-	trace_record(PGXP_TRACE_EVENT_STORE,
-		!shadow->trace_id ? 1 : ((shadow->flags & VALID_01) != VALID_01 ? 2 :
-		(shadow->value != value ? 3 : 0)), shadow->trace_id,
-		shadow->trace_stage, (uint8_t)source, addr, value, shadow->value, shadow);
-
-	if (!dest)
-		return;
-	uint32_t expected = prior->current_value;
-
-	memset(dest, 0, sizeof(*dest));
-	if (prior->valid && expected == value)
-	{
-		*dest = *prior;
-		dest->word_addr = word_addr;
-		if (prior->stage == 3)
-			window.lineage_store3++;
-		else
-			window.lineage_store2++;
-	}
-}
 
 void PGXP_DiagStore8(uint32_t addr, uint8_t value,
 		uint32_t invalid_count, const PGXP_value* shadow)
@@ -2607,7 +1651,6 @@ void PGXP_DiagStore8(uint32_t addr, uint8_t value,
 	PGXP_diag_store8* provenance = &store8_provenance
 		[(word_addr >> 2) & (PGXP_DIAG_STORE8_SLOTS - 1)];
 	PGXP_diag_mem_writer* writer = NULL;
-	PGXP_diag_lineage* lineage = pgxp_diag_lineage_memory(word_addr);
 
 	provenance->word_addr = word_addr;
 	provenance->byte_addr = addr;
@@ -2618,8 +1661,6 @@ void PGXP_DiagStore8(uint32_t addr, uint8_t value,
 	provenance->invalid_count = invalid_count;
 	provenance->mode_frame = mode_frame;
 	provenance->valid = 1;
-	if (lineage)
-		memset(lineage, 0, sizeof(*lineage));
 	if (word_addr < UINT32_C(0x00200000))
 	{
 		writer = &mem_writers[word_addr >> 2];
@@ -2658,43 +1699,13 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 
 	{
 		uint32_t word_addr = gpu_source_word_addr(addr);
-		PGXP_diag_lineage* lineage =
-			pgxp_diag_lineage_memory(word_addr);
 		const PGXP_diag_store8* store8 = &store8_provenance
 			[(word_addr >> 2) & (PGXP_DIAG_STORE8_SLOTS - 1)];
 
 		memset(&provenance->store8, 0, sizeof(provenance->store8));
-		memset(&provenance->lineage, 0, sizeof(provenance->lineage));
 		memset(&provenance->writer, 0, sizeof(provenance->writer));
 		if (word_addr < UINT32_C(0x00200000))
 			provenance->writer = mem_writers[word_addr >> 2];
-		if (lineage)
-		{
-			provenance->lineage = *lineage;
-			if (!provenance->lineage.valid ||
-			    provenance->lineage.word_addr != word_addr ||
-			    provenance->lineage.current_value != value)
-				memset(&provenance->lineage, 0,
-					sizeof(provenance->lineage));
-			if (provenance->lineage.valid)
-			{
-				window.lineage_fifo++;
-				if (lineage_fifo_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
-				{
-					log_cb(RETRO_LOG_INFO,
-						"[pgxp_lineage_fifo] n=%u mf=%u pos=%u "
-						"addr=%08x value=%08x stage=%u gte=%u "
-						"mfc2=%08x sll=%08x sra=%08x\n",
-						lineage_fifo_samples + 1, mode_frame, pos,
-						addr, value, provenance->lineage.stage,
-						provenance->lineage.gte_reg,
-						provenance->lineage.mfc2_value,
-						provenance->lineage.sll_value,
-						provenance->lineage.sra_value);
-					lineage_fifo_samples++;
-				}
-			}
-		}
 		provenance->store8_match = 0;
 		if (store8->valid && store8->word_addr == word_addr)
 		{
@@ -2718,64 +1729,6 @@ void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos)
 	}
 }
 
-int PGXP_DiagRecoverLineageVertex(unsigned slot, uint32_t value,
-		float* x, float* y, float* z, int* valid_w)
-{
-	const PGXP_diag_gpu_provenance* provenance;
-	const PGXP_diag_lineage* lineage;
-	uint32_t word_addr;
-	int textured;
-
-	if (!pgxp_diag_j_is_isolated())
-		return 0;
-	window.lineage_sidecar_attempts++;
-	textured = (current_opcode & 0x04) != 0;
-	if (j_test_mode == PGXP_DIAG_J_TEST_ISOLATED_TEXTURED && !textured)
-	{
-		window.lineage_sidecar_reject[0]++;
-		return 0;
-	}
-	if (slot >= 16)
-	{
-		window.lineage_sidecar_reject[1]++;
-		return 0;
-	}
-	provenance = &cb_provenance[slot];
-	lineage = &provenance->lineage;
-	if (!lineage->valid)
-	{
-		window.lineage_sidecar_reject[1]++;
-		return 0;
-	}
-	word_addr = gpu_source_word_addr(provenance->addr);
-	if (lineage->word_addr != word_addr ||
-	    lineage->current_value != value || provenance->value != value)
-	{
-		window.lineage_sidecar_reject[2]++;
-		return 0;
-	}
-	if ((lineage->stage != 2 && lineage->stage != 3) ||
-	    lineage->transform_observed)
-	{
-		window.lineage_sidecar_reject[3]++;
-		return 0;
-	}
-	if (!lineage->precise_valid || !lineage->trace_id ||
-	    (lineage->precise_flags & VALID_01) != VALID_01 ||
-	    !isfinite(lineage->precise_x) || !isfinite(lineage->precise_y) ||
-	    !isfinite(lineage->precise_z))
-	{
-		window.lineage_sidecar_reject[4]++;
-		return 0;
-	}
-
-	*x = lineage->precise_x;
-	*y = lineage->precise_y;
-	*z = lineage->precise_z;
-	*valid_w = (lineage->precise_flags & VALID_2) == VALID_2;
-	window.lineage_sidecar_hits[textured ? 1 : 0]++;
-	return 1;
-}
 
 void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
 		unsigned tex_mode, int mask_eval)
@@ -7025,22 +5978,6 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 			}
 		}
 	}
-	if (cb_provenance[slot].lineage.valid &&
-	    lineage_vertex_samples < PGXP_DIAG_LOAD_SAMPLES && log_cb)
-	{
-		log_cb(RETRO_LOG_INFO,
-			"[pgxp_lineage_vertex] n=%u mf=%u slot=%u source=%u "
-			"psx=%08x shadow=%08x flags=%08x valid=%d/%d "
-			"stage=%u gte=%u mfc2=%08x sll=%08x sra=%08x\n",
-			lineage_vertex_samples + 1, mode_frame, slot, source,
-			value, shadow->value, shadow->flags, valid_xy, value_match,
-			cb_provenance[slot].lineage.stage,
-			cb_provenance[slot].lineage.gte_reg,
-			cb_provenance[slot].lineage.mfc2_value,
-			cb_provenance[slot].lineage.sll_value,
-			cb_provenance[slot].lineage.sra_value);
-		lineage_vertex_samples++;
-	}
 	if (source == PGXP_DIAG_VERTEX_NATIVE)
 	{
 		writer_native[writer_width]++;
@@ -7093,16 +6030,6 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 				cb_provenance[slot].shadow_flags,
 				cb_provenance[slot].shadow_count);
 			log_cb(RETRO_LOG_INFO,
-				"[pgxp_vertex_lineage] n=%u mf=%u slot=%u seen=%u "
-				"stage=%u gte=%u mfc2=%08x sll=%08x sra=%08x\n",
-				vertex_samples + 1, mode_frame, slot,
-				cb_provenance[slot].lineage.valid,
-				cb_provenance[slot].lineage.stage,
-				cb_provenance[slot].lineage.gte_reg,
-				cb_provenance[slot].lineage.mfc2_value,
-				cb_provenance[slot].lineage.sll_value,
-				cb_provenance[slot].lineage.sra_value);
-			log_cb(RETRO_LOG_INFO,
 				"[pgxp_vertex_store8] n=%u mf=%u slot=%u seen=%u match=%u "
 				"store_mf=%u addr=%08x byte=%02x before=%08x flags=%08x "
 				"count=%u\n",
@@ -7124,16 +6051,11 @@ void PGXP_DiagVertex(enum PGXP_diag_vertex_source source,
 		log_cb(RETRO_LOG_INFO,
 			"[pgxp_vertex_cache] n=%u mf=%u slot=%u psx=%08x "
 			"ram_shadow=%08x flags=%08x valid=%d/%d "
-			"cache_xyz=%.3f/%.3f/%.3f src_addr=%08x src_psx=%08x "
-			"lineage=%u/%u/%u/%08x\n",
+			"cache_xyz=%.3f/%.3f/%.3f src_addr=%08x src_psx=%08x\n",
 			cache_vertex_samples + 1, mode_frame, slot, value,
 			shadow->value, shadow->flags, valid_xy, value_match,
 			x, y, w, cb_provenance[slot].addr,
-			cb_provenance[slot].value,
-			cb_provenance[slot].lineage.valid,
-			cb_provenance[slot].lineage.stage,
-			cb_provenance[slot].lineage.depth,
-			cb_provenance[slot].lineage.chain_hash);
+			cb_provenance[slot].value);
 		cache_vertex_samples++;
 	}
 	hash_event((uint8_t)(4 + source), value, (uint32_t)valid_w);
@@ -7755,81 +6677,6 @@ void PGXP_DiagFrame(int backend)
 					(unsigned long long)window.rendered_z_band[source][2],
 					(unsigned long long)window.rendered_z_band[source][3]);
 	}
-	log_cb(RETRO_LOG_INFO,
-		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
-		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
-		"w_suppressed=%llu/%llu xy_deferred=%llu/%llu "
-		"native_untextured=%llu/%llu native_axis=%llu/%llu/%llu j_mode=%u "
-		"blocked=%llu/%llu identity=%llu/%llu/%llu drops=%llu transforms=%llu "
-		"store=%llu/%llu fifo=%llu\n",
-		(unsigned long long)frame_number,
-		(unsigned long long)window.lineage_mfc2,
-		(unsigned long long)window.lineage_sll5_matches,
-		(unsigned long long)window.lineage_sll5_candidates,
-		(unsigned long long)window.lineage_sra5_matches,
-		(unsigned long long)window.lineage_sra5_candidates,
-		(unsigned long long)window.lineage_preserve_sll5,
-		(unsigned long long)window.lineage_preserve_sra5,
-		(unsigned long long)window.lineage_w_suppressed_sll5,
-		(unsigned long long)window.lineage_w_suppressed_sra5,
-		(unsigned long long)window.lineage_xy_deferred_sll5,
-		(unsigned long long)window.lineage_xy_restored_sra5,
-		(unsigned long long)window.lineage_native_untextured_flat,
-		(unsigned long long)window.lineage_native_untextured_gouraud,
-		(unsigned long long)window.lineage_native_axis_x,
-		(unsigned long long)window.lineage_native_axis_y,
-		(unsigned long long)window.lineage_native_axis_w_retained,
-		j_test_mode,
-		(unsigned long long)window.lineage_shift_blocked,
-		(unsigned long long)window.lineage_identity_blocked,
-		(unsigned long long)window.lineage_identity_matches,
-		(unsigned long long)window.lineage_identity_candidates,
-		(unsigned long long)window.lineage_identity_preserve,
-		(unsigned long long)window.lineage_drops,
-		(unsigned long long)window.lineage_transforms,
-		(unsigned long long)window.lineage_store2,
-		(unsigned long long)window.lineage_store3,
-		(unsigned long long)window.lineage_fifo);
-	log_cb(RETRO_LOG_INFO,
-		"[pgxp_lineage_sidecar] f=%llu mode=%u shift=%llu/%llu "
-		"load=%llu identity=%llu attempts=%llu hits=untextured/textured:%llu/%llu "
-		"reject=class/provenance/value/transform/payload:%llu/%llu/%llu/%llu/%llu\n",
-		(unsigned long long)frame_number, j_test_mode,
-		(unsigned long long)window.lineage_sidecar_shift[0],
-		(unsigned long long)window.lineage_sidecar_shift[1],
-		(unsigned long long)window.lineage_sidecar_load,
-		(unsigned long long)window.lineage_sidecar_identity,
-		(unsigned long long)window.lineage_sidecar_attempts,
-		(unsigned long long)window.lineage_sidecar_hits[0],
-		(unsigned long long)window.lineage_sidecar_hits[1],
-		(unsigned long long)window.lineage_sidecar_reject[0],
-		(unsigned long long)window.lineage_sidecar_reject[1],
-		(unsigned long long)window.lineage_sidecar_reject[2],
-		(unsigned long long)window.lineage_sidecar_reject[3],
-		(unsigned long long)window.lineage_sidecar_reject[4]);
-	{
-		uint32_t state;
-		for (state = 0; state < 4; state++)
-			log_cb(RETRO_LOG_INFO,
-				"[pgxp_lineage_state] f=%llu src=%u result=%llu/%llu/%llu/%llu\n",
-				(unsigned long long)frame_number, state,
-				(unsigned long long)window.lineage_transform_state[state][0],
-				(unsigned long long)window.lineage_transform_state[state][1],
-				(unsigned long long)window.lineage_transform_state[state][2],
-				(unsigned long long)window.lineage_transform_state[state][3]);
-	}
-	log_cb(RETRO_LOG_INFO,
-		"[pgxp_lineage_semantic] f=%llu propagated=%llu kind=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n",
-		(unsigned long long)frame_number,
-		(unsigned long long)window.lineage_transform_propagated,
-		(unsigned long long)window.lineage_transform_semantic[0],
-		(unsigned long long)window.lineage_transform_semantic[1],
-		(unsigned long long)window.lineage_transform_semantic[2],
-		(unsigned long long)window.lineage_transform_semantic[3],
-		(unsigned long long)window.lineage_transform_semantic[4],
-		(unsigned long long)window.lineage_transform_semantic[5],
-		(unsigned long long)window.lineage_transform_semantic[6],
-		(unsigned long long)window.lineage_transform_semantic[7]);
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_trace_ledger] f=%llu gte=%llu mfc2=%llu sll=%llu "
 		"sra=%llu cpu=%llu store=%llu load=%llu fifo=%llu cb=%llu vertex=%llu\n",
@@ -8538,65 +7385,6 @@ void PGXP_DiagFrame(int backend)
 		}
 	}
 	log_cb(RETRO_LOG_INFO,
-		"[pgxp_recovery_summary] f=%llu attempts=%llu hits=%llu "
-		"age=%llu/%llu/%llu/%llu/%llu disabled=%llu ambiguous=%llu used=%llu "
-		"rejected=%llu misses=%llu "
-		"too_old=%llu\n",
-		(unsigned long long)frame_number,
-		(unsigned long long)recovery_attempts,
-		(unsigned long long)recovery_hits,
-		(unsigned long long)recovery_age_hits[0],
-		(unsigned long long)recovery_age_hits[1],
-		(unsigned long long)recovery_age_hits[2],
-		(unsigned long long)recovery_age_hits[3],
-		(unsigned long long)recovery_age_hits[4],
-		(unsigned long long)recovery_disabled,
-		(unsigned long long)recovery_ambiguous,
-		(unsigned long long)recovery_ambiguous_used,
-		(unsigned long long)recovery_ambiguous_rejected,
-		(unsigned long long)recovery_misses,
-		(unsigned long long)recovery_too_old);
-	log_cb(RETRO_LOG_INFO,
-		"[pgxp_recovery_old_age] f=%llu age5=%llu age6=%llu age7=%llu "
-		"age8plus=%llu\n",
-		(unsigned long long)frame_number,
-		(unsigned long long)recovery_old_age[0],
-		(unsigned long long)recovery_old_age[1],
-		(unsigned long long)recovery_old_age[2],
-		(unsigned long long)recovery_old_age[3]);
-	log_cb(RETRO_LOG_INFO,
-		"[pgxp_recovery_stage] f=%llu attempts=%llu/%llu/%llu/%llu/"
-		"%llu/%llu/%llu/%llu/%llu hits=%llu/%llu/%llu/%llu/%llu/"
-		"%llu/%llu/%llu/%llu\n",
-		(unsigned long long)frame_number,
-		(unsigned long long)recovery_stage_attempts[0],
-		(unsigned long long)recovery_stage_attempts[1],
-		(unsigned long long)recovery_stage_attempts[2],
-		(unsigned long long)recovery_stage_attempts[3],
-		(unsigned long long)recovery_stage_attempts[4],
-		(unsigned long long)recovery_stage_attempts[5],
-		(unsigned long long)recovery_stage_attempts[6],
-		(unsigned long long)recovery_stage_attempts[7],
-		(unsigned long long)recovery_stage_attempts[8],
-		(unsigned long long)recovery_stage_hits[0],
-		(unsigned long long)recovery_stage_hits[1],
-		(unsigned long long)recovery_stage_hits[2],
-		(unsigned long long)recovery_stage_hits[3],
-		(unsigned long long)recovery_stage_hits[4],
-		(unsigned long long)recovery_stage_hits[5],
-		(unsigned long long)recovery_stage_hits[6],
-		(unsigned long long)recovery_stage_hits[7],
-		(unsigned long long)recovery_stage_hits[8]);
-	log_cb(RETRO_LOG_INFO,
-		"[pgxp_recovery_hash] f=%llu way=%llu/%llu/%llu/%llu "
-		"evictions=%llu\n",
-		(unsigned long long)frame_number,
-		(unsigned long long)recovery_way_hits[0],
-		(unsigned long long)recovery_way_hits[1],
-		(unsigned long long)recovery_way_hits[2],
-		(unsigned long long)recovery_way_hits[3],
-		(unsigned long long)recovery_evictions);
-	log_cb(RETRO_LOG_INFO,
 		"[pgxp_writer_summary] f=%llu writes=%llu/%llu/%llu/%llu "
 		"native=%llu/%llu/%llu/%llu tracked_invalid_w=%llu samples=%u\n",
 		(unsigned long long)frame_number,
@@ -8870,17 +7658,6 @@ void PGXP_DiagFrame(int backend)
 	memset(submit_link_uv_error, 0, sizeof(submit_link_uv_error));
 	submit_window_samples = 0;
 	pgxp_diag_gl_reset_window();
-	recovery_attempts = recovery_hits = recovery_ambiguous = recovery_misses = 0;
-	recovery_disabled = 0;
-	recovery_ambiguous_used = 0;
-	recovery_ambiguous_rejected = 0;
-	memset(recovery_age_hits, 0, sizeof(recovery_age_hits));
-	memset(recovery_old_age, 0, sizeof(recovery_old_age));
-	recovery_too_old = 0;
-	memset(recovery_stage_attempts, 0, sizeof(recovery_stage_attempts));
-	memset(recovery_stage_hits, 0, sizeof(recovery_stage_hits));
-	memset(recovery_way_hits, 0, sizeof(recovery_way_hits));
-	recovery_evictions = 0;
 	memset(writer_writes, 0, sizeof(writer_writes));
 	memset(writer_native, 0, sizeof(writer_native));
 	memset(writer_native_reason, 0, sizeof(writer_native_reason));

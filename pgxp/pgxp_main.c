@@ -2,6 +2,7 @@
 #include "pgxp_cpu.h"
 #include "pgxp_diag.h"
 #include "pgxp_gpu.h"
+#include "pgxp_lineage.h"
 #include "pgxp_mem.h"
 #include "pgxp_gte.h"
 
@@ -19,6 +20,7 @@ void PGXP_Init(void)
 	PGXP_InitMem();
 	PGXP_InitCPU();
 	PGXP_InitGTE();
+	PGXP_LineageInit();
 	PGXP_DiagInit();
 }
 
@@ -43,6 +45,11 @@ static void apply_modes(uint32_t new_modes)
 	 * disabled. Retire them rather than let a stale one match by chance. */
 	if (!old_modes && new_modes)
 		PGXP_InvalidateVertexFIFO();
+	/* The exact-lineage sidecar is not architectural state. Any transition
+	 * that changes how CPU/GTE memory tracking runs retires the old proof. */
+	if ((old_modes ^ new_modes) &
+	    (PGXP_MODE_MEMORY | PGXP_MODE_CPU | PGXP_MODE_GTE))
+		PGXP_LineageReset();
 }
 
 void PGXP_SetModes(uint32_t modes)
@@ -69,8 +76,7 @@ void PGXP_SetExperimentMask(uint32_t mask)
 	/* Runtime option changes must not make stale, feature-specific history
 	 * eligible when a layer is re-enabled.  These resets do not disturb the
 	 * ordinary PGXP shadow registers or vertex cache. */
-	if (changed & PGXP_FEATURE_MFC2_SHIFT)
-		PGXP_CPU_ResetMFC2ShiftTracking();
-	if (changed & PGXP_FEATURE_RECENT_RECOVERY)
-		PGXP_DiagResetRecovery();
+	if (changed & (PGXP_FEATURE_IDENTITY_MOVE |
+	               PGXP_FEATURE_EXACT_LINEAGE))
+		PGXP_LineageReset();
 }

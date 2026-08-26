@@ -876,34 +876,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled"
    },
    {
-      BEETLE_OPT(pgxp_stack_mfc2_shift),
-      "PGXP Stack B: MFC2 Shift Preservation",
-      NULL,
-      "Ablation control for d85d3347's ordinary Memory-mode helper. Preserves precise GTE coordinates through the common MFC2 to SLL5 to SRA5 vertex-packing sequence. Stack J independently controls the later diagnostic implementation of this handoff. Restart content after changing it.",
-      NULL,
-      "pgxp",
-      {
-         { "enabled",  NULL },
-         { "disabled", NULL },
-         { NULL, NULL },
-      },
-      "enabled"
-   },
-   {
-      BEETLE_OPT(pgxp_stack_recovery),
-      "PGXP Stack C: Four-Frame Vertex Recovery",
-      NULL,
-      "Recovers an exact native vertex word from GTE results observed within the last four frames when ordinary PGXP provenance fails. This was the principal Spyro 3 sky completion layer.",
-      NULL,
-      "pgxp",
-      {
-         { "enabled",  NULL },
-         { "disabled", NULL },
-         { NULL, NULL },
-      },
-      "enabled"
-   },
-   {
       BEETLE_OPT(pgxp_stack_coord_wrap),
       "PGXP Stack D: Coordinate Wrap Ordering",
       NULL,
@@ -988,10 +960,10 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled"
    },
    {
-      BEETLE_OPT(pgxp_stack_diag_shift),
-      "PGXP Stack J: Traced Shift Handoff",
+      BEETLE_OPT(pgxp_stack_exact_lineage),
+      "PGXP Stack J: Exact Shift Lineage",
       NULL,
-      "Ablation control for the diagnostic SLL5/SRA5 preservation family introduced at 2b03b799 and broadened at e966b182, including the later stale-shadow and native-roundtrip safety gates. This separate behavior path produced the original Spyro ground breakthrough even when the ordinary Stack B helper declined a shift. Restart content after changing it.",
+      "Carries exact MFC2/SLL5/SRA5 provenance beside architectural CPU and memory state, then restores the original precise GTE vertex only at a proven GPU consumer. This is the production version of the mode-11 transport validated at 5ce29e32; it never installs shifted precision in the CPU shadow. Restart content after changing it.",
       NULL,
       "pgxp",
       {
@@ -1000,32 +972,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { NULL, NULL },
       },
       "enabled"
-   },
-   {
-      BEETLE_OPT(pgxp_j_test),
-      "PGXP J Isolated Transport Test",
-      NULL,
-      "Focused replacement for Stack J's CPU-shadow mutation. Isolated modes carry an exact MFC2/SLL5/SRA5 proof beside native data and recover the original precise vertex only at GPU consumption. The textured mode refuses all untextured recovery. Use with Stack B and Stack C disabled, and Stack J enabled. Restart content after changing it.",
-      NULL,
-      "pgxp",
-      {
-         { "current",            "0: Current J (X/Y/W)" },
-#if 0
-         /* Completed late-consumption probes remain implemented and parsed
-          * for historical reproduction, but are hidden from the constrained
-          * RetroArch value list. */
-         { "native flat",        "5: Native J Untextured Flat" },
-         { "native gouraud",     "6: Native J Untextured Gouraud" },
-         { "native untextured",  "7: J Textured Geometry Only" },
-         { "native xy keep w",   "8: Native J Untextured X/Y; Keep W" },
-         { "native x keep yw",   "9: Native J Untextured X; Keep Y/W" },
-         { "native y keep xw",   "10: Native J Untextured Y; Keep X/W" },
-#endif
-         { "isolated all",       "11: Isolated Exact All" },
-         { "isolated textured",  "12: Isolated Exact Textured" },
-         { NULL, NULL },
-      },
-      "current"
    },
    {
       BEETLE_OPT(pgxp_gl_test),

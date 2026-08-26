@@ -40,11 +40,6 @@ extern PGXP_value* CP0_reg;
 #define CPU_Lo CPU_reg[34]
 
 void PGXP_InitCPU();
-void PGXP_CPU_ResetMFC2ShiftTracking(void);
-void PGXP_CPU_MarkMFC2(uint32_t reg);
-int PGXP_CPU_TryMFC2SLL5(uint32_t instr, uint32_t rdVal, uint32_t rtVal);
-int PGXP_CPU_TryMFC2SLL5SRA5(uint32_t instr, uint32_t rdVal,
-	uint32_t rtVal);
 
 // -- CPU functions
 
@@ -65,17 +60,10 @@ void PGXP_CPU_LBU(uint32_t instr, uint8_t rtVal, uint32_t addr);
 void PGXP_CPU_SWL(uint32_t instr, uint32_t rtVal, uint32_t addr);
 void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr);
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr);
-#if PGXP_DIAG
-void PGXP_CPU_DiagShift(uint32_t instr, uint32_t before,
+void PGXP_CPU_LineageShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic);
-void PGXP_CPU_DiagIdentityMove(uint32_t instr, uint32_t before,
+void PGXP_CPU_LineageIdentityMove(uint32_t instr, uint32_t before,
 		uint32_t after);
-void PGXP_CPU_BeginObserveInstruction(uint32_t instr, const uint32_t* gpr);
-#else
-#define PGXP_CPU_DiagShift(instr, before, after, arithmetic) ((void)0)
-#define PGXP_CPU_DiagIdentityMove(instr, before, after) ((void)0)
-#define PGXP_CPU_BeginObserveInstruction(instr, gpr) ((void)0)
-#endif
 void PGXP_CPU_ObserveInstruction(uint32_t instr, const uint32_t* gpr);
 
 // Store 16-bit

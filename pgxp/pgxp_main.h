@@ -38,19 +38,17 @@
 #define PGXP_TEXTURE_CORRECTION (1 << 5)
 #define PGXP_NCLIP_IMPL (1 << 6)
 
-/* Diagnostic ablation switches for the independently-audited PGXP
- * improvement layers.  All bits enabled is the exact mode-88 behavior. */
+/* Runtime ablation switches for the independently audited PGXP improvement
+ * layers. B and C were retired; J is now the production exact-lineage path. */
 #define PGXP_FEATURE_CPU_SHADOW_INVARIANTS (UINT32_C(1) << 0)
-#define PGXP_FEATURE_MFC2_SHIFT             (UINT32_C(1) << 1)
-#define PGXP_FEATURE_RECENT_RECOVERY         (UINT32_C(1) << 2)
 #define PGXP_FEATURE_COORD_WRAP              (UINT32_C(1) << 3)
 #define PGXP_FEATURE_W_NORMALIZE             (UINT32_C(1) << 4)
 #define PGXP_FEATURE_W_PROVENANCE            (UINT32_C(1) << 5)
 #define PGXP_FEATURE_NCLIP_SIGN_ONLY         (UINT32_C(1) << 6)
 #define PGXP_FEATURE_GL_COVERAGE              (UINT32_C(1) << 7)
 #define PGXP_FEATURE_IDENTITY_MOVE            (UINT32_C(1) << 8)
-#define PGXP_FEATURE_DIAG_SHIFT               (UINT32_C(1) << 9)
-#define PGXP_FEATURE_ALL                     (UINT32_C(0x3FF))
+#define PGXP_FEATURE_EXACT_LINEAGE            (UINT32_C(1) << 9)
+#define PGXP_FEATURE_ALL                     (UINT32_C(0x3F9))
 
 #ifdef __cplusplus
 extern "C" {

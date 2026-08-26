@@ -32,6 +32,7 @@ retro_input_state_t dbg_input_state_cb = 0;
 #include "pgxp/pgxp_main.h"
 #include "pgxp/pgxp_gte.h"
 #include "pgxp/pgxp_diag.h"
+#include "pgxp/pgxp_lineage.h"
 
 #include "deps/openbios/openbios.bin.h"
 
@@ -4773,70 +4774,34 @@ static void check_variables(bool startup)
 
       PGXP_STACK_OPTION(pgxp_stack_cpu_invariants,
             PGXP_FEATURE_CPU_SHADOW_INVARIANTS);
-      PGXP_STACK_OPTION(pgxp_stack_mfc2_shift, PGXP_FEATURE_MFC2_SHIFT);
-      PGXP_STACK_OPTION(pgxp_stack_recovery, PGXP_FEATURE_RECENT_RECOVERY);
       PGXP_STACK_OPTION(pgxp_stack_coord_wrap, PGXP_FEATURE_COORD_WRAP);
       PGXP_STACK_OPTION(pgxp_stack_w_normalize, PGXP_FEATURE_W_NORMALIZE);
       PGXP_STACK_OPTION(pgxp_stack_w_provenance, PGXP_FEATURE_W_PROVENANCE);
       PGXP_STACK_OPTION(pgxp_stack_nclip_sign, PGXP_FEATURE_NCLIP_SIGN_ONLY);
       PGXP_STACK_OPTION(pgxp_stack_gl_coverage, PGXP_FEATURE_GL_COVERAGE);
       PGXP_STACK_OPTION(pgxp_stack_identity_move, PGXP_FEATURE_IDENTITY_MOVE);
-      PGXP_STACK_OPTION(pgxp_stack_diag_shift, PGXP_FEATURE_DIAG_SHIFT);
+      PGXP_STACK_OPTION(pgxp_stack_exact_lineage,
+            PGXP_FEATURE_EXACT_LINEAGE);
 #undef PGXP_STACK_OPTION
 
       PGXP_SetExperimentMask(stack_mask);
       if (stack_mask != logged_stack_mask)
       {
          log_cb(RETRO_LOG_INFO,
-               "[pgxp_stack] mask=%03x cpu_invariants=%u mfc2_shift=%u "
-               "recovery=%u coord_wrap=%u w_normalize=%u w_provenance=%u "
+               "[pgxp_stack] mask=%03x cpu_invariants=%u "
+               "coord_wrap=%u w_normalize=%u w_provenance=%u "
                "nclip_sign=%u gl_coverage=%u identity_move=%u "
-               "diag_shift=%u\n",
+               "exact_lineage=%u\n",
                stack_mask,
                (stack_mask & PGXP_FEATURE_CPU_SHADOW_INVARIANTS) != 0,
-               (stack_mask & PGXP_FEATURE_MFC2_SHIFT) != 0,
-               (stack_mask & PGXP_FEATURE_RECENT_RECOVERY) != 0,
                (stack_mask & PGXP_FEATURE_COORD_WRAP) != 0,
                (stack_mask & PGXP_FEATURE_W_NORMALIZE) != 0,
                (stack_mask & PGXP_FEATURE_W_PROVENANCE) != 0,
                (stack_mask & PGXP_FEATURE_NCLIP_SIGN_ONLY) != 0,
                (stack_mask & PGXP_FEATURE_GL_COVERAGE) != 0,
                (stack_mask & PGXP_FEATURE_IDENTITY_MOVE) != 0,
-               (stack_mask & PGXP_FEATURE_DIAG_SHIFT) != 0);
+               (stack_mask & PGXP_FEATURE_EXACT_LINEAGE) != 0);
          logged_stack_mask = stack_mask;
-      }
-
-      {
-         unsigned j_test_mode = PGXP_DIAG_J_TEST_CURRENT;
-         var.key = BEETLE_OPT(pgxp_j_test);
-         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-         {
-            if (strcmp(var.value, "sra xy-only") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_SRA_XY_ONLY;
-            else if (strcmp(var.value, "all shifts xy-only") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_ALL_XY_ONLY;
-            else if (strcmp(var.value, "final only") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_FINAL_ONLY;
-            else if (strcmp(var.value, "final xy-only") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY;
-            else if (strcmp(var.value, "native flat") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT;
-            else if (strcmp(var.value, "native gouraud") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD;
-            else if (strcmp(var.value, "native untextured") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL;
-            else if (strcmp(var.value, "native xy keep w") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_XY_KEEP_W;
-            else if (strcmp(var.value, "native x keep yw") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW;
-            else if (strcmp(var.value, "native y keep xw") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW;
-            else if (strcmp(var.value, "isolated all") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_ISOLATED_ALL;
-            else if (strcmp(var.value, "isolated textured") == 0)
-               j_test_mode = PGXP_DIAG_J_TEST_ISOLATED_TEXTURED;
-         }
-         PGXP_DiagJSetMode(j_test_mode);
       }
    }
 
@@ -7283,10 +7248,10 @@ bool retro_serialize(void *data, size_t size)
 
 bool retro_unserialize(const void *data, size_t size)
 {
-   /* The fog sidecar ring is keyed by a push counter that restarts with the
-    * loaded state while counts inside RAM shadows survive; stale slots must
-    * not satisfy post-load lookups. */
+   /* These sidecars are derived provenance rather than architectural state;
+    * neither may survive a timeline replacement. */
    PGXP_GTE_InvalidateFogRing();
+   PGXP_LineageReset();
    StateMem st;
    bool okay;
 

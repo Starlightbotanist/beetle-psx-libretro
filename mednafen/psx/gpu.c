@@ -51,6 +51,7 @@
 
 #include "../pgxp/pgxp_main.h"
 #include "../pgxp/pgxp_gpu.h"
+#include "../pgxp/pgxp_lineage.h"
 #include "../pgxp/pgxp_mem.h"
 #include "../pgxp/pgxp_diag.h"
 
@@ -1541,6 +1542,7 @@ static void ProcessFIFO(uint32_t in_count)
    {
       if(PGXP_enabled())
       {
+         PGXP_LineageCBWrite(i, GPU_BlitterFIFO.read_pos);
          PGXP_DiagCBWrite(i, GPU_BlitterFIFO.read_pos);
          PGXP_WriteCB(PGXP_ReadFIFO(GPU_BlitterFIFO.read_pos), i);
       }
@@ -1588,6 +1590,7 @@ static INLINE void GPU_WriteCB(uint32_t InData, uint32_t addr)
    if(PGXP_enabled())
    {
       PGXP_value* shadow = ReadMem(addr);
+      PGXP_LineageFIFOWrite(GPU_BlitterFIFO.write_pos, addr, InData);
       PGXP_DiagFIFOWrite(GPU_BlitterFIFO.write_pos, addr, InData, shadow);
       PGXP_WriteFIFO(shadow, GPU_BlitterFIFO.write_pos);
    }

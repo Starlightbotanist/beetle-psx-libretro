@@ -338,6 +338,7 @@ SOURCES_C +=   $(CORE_DIR)/pgxp/pgxp_cpu.c \
                $(CORE_DIR)/pgxp/pgxp_diag.c \
                $(CORE_DIR)/pgxp/pgxp_gpu.c \
                $(CORE_DIR)/pgxp/pgxp_gte.c \
+               $(CORE_DIR)/pgxp/pgxp_lineage.c \
                $(CORE_DIR)/pgxp/pgxp_main.c \
                $(CORE_DIR)/pgxp/pgxp_mem.c \
                $(CORE_DIR)/pgxp/pgxp_value.c
