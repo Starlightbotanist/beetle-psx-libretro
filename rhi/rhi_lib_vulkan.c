@@ -6016,6 +6016,25 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       BlitInfoVec_clear(&self->queue.unscaled_masked_blits);
    }
 
+   static void renderer_set_opaque_primitive_spec_constants(Renderer *self,
+         int trans_mode)
+   {
+      CommandBuffer *cmd = cbh_get(&self->cmd);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_TransMode, trans_mode);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode, FilterMode_NearestNeighbor);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAdd);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Scaling, self->scaling);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Shift, 0);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_OffsetUV, 0);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_HotSource,
+            (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_hdr_overbright_hot : 0);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_MaskTest, 0);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PreciseColor,
+            (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_pgxp_color : 0);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PgxpFog,
+            (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+   }
+
    static void renderer_render_semi_transparent_opaque_texture_primitives(Renderer *self){
       BufferVertexVec *vertices = &self->queue.semi_transparent_opaque;
       PrimitiveInfoVec *scissors = &self->queue.semi_transparent_opaque_scissor;
