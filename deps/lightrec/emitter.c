@@ -3470,30 +3470,75 @@ static _Bool pgxp_cpu_tracked(union code c)
 	}
 }
 
-/* Emit a PGXP CPU-tracking call after a tracked non-memory op.  The
- * instruction's GPR fields are stored back to state->regs.gpr[] so the
- * wrapper observes the post-execution values, then the single-arg wrapper is
- * invoked (LUT entry + offset, identical encoding to C_WRAPPER_RW_GENERIC). */
+/* Save the operands consumed by a tracked instruction. The wrapper runs after
+ * execution, when a destination may already have overwritten rs or rt. */
+static void rec_pgxp_cpu_capture(struct lightrec_cstate *state,
+		const struct block *block, u16 offset)
+{
+	struct regcache *reg_cache = state->reg_cache;
+	jit_state_t *_jit = block->_jit;
+	union code c = block->opcode_list[offset].c;
+	u8 reg;
+
+	jit_note(__FILE__, __LINE__);
+	if (c.r.rs && c.i.op != OP_LUI &&
+	    (c.i.op != OP_SPECIAL ||
+	     (c.r.op != OP_SPECIAL_SLL && c.r.op != OP_SPECIAL_SRL &&
+	      c.r.op != OP_SPECIAL_SRA && c.r.op != OP_SPECIAL_MFHI &&
+	      c.r.op != OP_SPECIAL_MFLO))) {
+		reg = lightrec_alloc_reg_in(reg_cache, _jit, c.r.rs, 0);
+		jit_stxi_i(lightrec_offset(pgxp_rs), LIGHTREC_REG_STATE, reg);
+		lightrec_free_reg(reg_cache, reg);
+	}
+
+	if (c.i.op == OP_SPECIAL && c.r.rt && c.r.op != OP_SPECIAL_MFHI &&
+	    c.r.op != OP_SPECIAL_MTHI && c.r.op != OP_SPECIAL_MFLO &&
+	    c.r.op != OP_SPECIAL_MTLO) {
+		reg = lightrec_alloc_reg_in(reg_cache, _jit, c.r.rt, 0);
+		jit_stxi_i(lightrec_offset(pgxp_rt), LIGHTREC_REG_STATE, reg);
+		lightrec_free_reg(reg_cache, reg);
+	}
+}
+
+/* Emit a PGXP CPU-tracking call after a tracked non-memory op. Sources were
+ * captured before execution; materialize only the results the callback uses. */
 static void rec_pgxp_cpu_track(struct lightrec_cstate *state,
 			       const struct block *block, u16 offset)
 {
 	struct regcache *reg_cache = state->reg_cache;
 	jit_state_t *_jit = block->_jit;
 	union code c = block->opcode_list[offset].c;
-	u32 lut_entry;
 
 	jit_note(__FILE__, __LINE__);
 
-	/* Sync the registers the tracker will read back to the GPR file. */
-	lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rd, false);
-	lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rs, false);
-	lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rt, false);
-	lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_HI, false);
-	lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_LO, false);
+	if (c.i.op == OP_SPECIAL) {
+		switch (c.r.op) {
+		case OP_SPECIAL_MTHI:
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_HI, false);
+			break;
+		case OP_SPECIAL_MTLO:
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_LO, false);
+			break;
+		case OP_SPECIAL_MULT: case OP_SPECIAL_MULTU:
+		case OP_SPECIAL_DIV:  case OP_SPECIAL_DIVU:
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_HI, false);
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_LO, false);
+			break;
+		case OP_SPECIAL_MFHI:
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rd, false);
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_HI, false);
+			break;
+		case OP_SPECIAL_MFLO:
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rd, false);
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_LO, false);
+			break;
+		default:
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rd, false);
+			break;
+		}
+	}
 
-	lut_entry = lightrec_get_lut_entry(block);
-	call_to_c_wrapper(state, block, (lut_entry << 16) | offset,
-			  C_WRAPPER_PGXP_CPU);
+	call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_PGXP_CPU);
 }
 
 void lightrec_rec_opcode(struct lightrec_cstate *state,
@@ -3522,6 +3567,8 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 
 	if (likely(op->opcode)) {
 		f = rec_standard[op->i.op];
+		if (state->state->ops.pgxp_cpu && pgxp_cpu_tracked(op->c))
+			rec_pgxp_cpu_capture(state, block, offset);
 
 		if (!HAS_DEFAULT_ELM && unlikely(!f))
 			unknown_opcode(state, block, offset);

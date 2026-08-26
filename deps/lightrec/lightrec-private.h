@@ -173,6 +173,8 @@ struct lightrec_cstate {
 struct lightrec_state {
 	struct lightrec_registers regs;
 	u32 temp_reg;
+	u32 pgxp_rs;
+	u32 pgxp_rt;
 	u32 curr_pc;
 	u32 next_pc;
 	uintptr_t wrapper_regs[NUM_TEMPS];
