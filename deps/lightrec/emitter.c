@@ -25,7 +25,7 @@ static void rec_REGIMM(struct lightrec_cstate *state, const struct block *block,
 static void rec_CP0(struct lightrec_cstate *state, const struct block *block, u16 offset);
 static void rec_CP2(struct lightrec_cstate *state, const struct block *block, u16 offset);
 static void rec_META(struct lightrec_cstate *state, const struct block *block, u16 offset);
-static _Bool pgxp_cpu_tracked_load(union code c);
+static _Bool pgxp_cpu_tracked_memory(union code c);
 static void rec_cp2_do_mtc2(struct lightrec_cstate *state,
 			    const struct block *block, u16 offset, u8 reg, u8 in_reg);
 static void rec_cp2_do_mfc2(struct lightrec_cstate *state,
@@ -1812,6 +1812,14 @@ static void rec_store(struct lightrec_cstate *state,
 	union code c = block->opcode_list[offset].c;
 	bool is_swc2 = c.i.op == OP_SWC2;
 
+	/* PGXP CPU mode records memory operations through the map callbacks.
+	 * Keep tracked stores on that path instead of emitting a direct host
+	 * memory access that bypasses the shadow state update. */
+	if (state->state->ops.pgxp_cpu && pgxp_cpu_tracked_memory(c)) {
+		rec_io(state, block, offset, true, false);
+		return;
+	}
+
 	if (is_swc2) {
 		switch (mode) {
 		case LIGHTREC_IO_RAM:
@@ -2329,6 +2337,14 @@ static void rec_load(struct lightrec_cstate *state, const struct block *block,
 	const struct opcode *op = &block->opcode_list[offset];
 	u32 flags = op->flags;
 
+	/* PGXP CPU mode records memory operations through the map callbacks.
+	 * Keep tracked loads on that path instead of emitting a direct host
+	 * memory access that bypasses the shadow state update. */
+	if (state->state->ops.pgxp_cpu && pgxp_cpu_tracked_memory(op->c)) {
+		rec_io(state, block, offset, false, true);
+		return;
+	}
+
 	switch (LIGHTREC_FLAGS_GET_IO_MODE(flags)) {
 	case LIGHTREC_IO_RAM:
 		rec_load_ram(state, block, offset, code, swap_code, is_unsigned);
@@ -2393,36 +2409,6 @@ static void rec_load(struct lightrec_cstate *state, const struct block *block,
 		lightrec_discard_reg_if_loaded(state->reg_cache, REG_TEMP);
 	}
 
-	/* PGXP CPU-mode tracking for direct-path loads.  Wrapper-path loads
-	 * are tracked in lightrec_rw_helper(); the direct (inline) load paths
-	 * reach here.  The loaded value is now in the output register; sync it
-	 * (and the address base) back to the register file so the C wrapper
-	 * observes the loaded result, then emit the tracking call.  LWC2 is a
-	 * GTE load with no PGXP_CPU tracker, so it is excluded. */
-	if (state->state->ops.pgxp_cpu && op->i.op != OP_LWC2 &&
-	    pgxp_cpu_tracked_load(op->c)) {
-		struct regcache *reg_cache = state->reg_cache;
-		jit_state_t *_jit = block->_jit;
-		bool load_delay = op_flag_load_delay(op->flags) &&
-				  !state->no_load_delay;
-
-		jit_note(__FILE__, __LINE__);
-
-		/* Non-delayed loads land in gpr[rt]; delayed loads stash the
-		 * value in REG_TEMP until the delay resolves. Sync whichever
-		 * holds the loaded value, plus the address base in rs. */
-		if (load_delay)
-			lightrec_clean_reg_if_loaded(reg_cache, _jit,
-						     REG_TEMP, false);
-		else if (op->c.i.rt)
-			lightrec_clean_reg_if_loaded(reg_cache, _jit,
-						     op->c.i.rt, false);
-		lightrec_clean_reg_if_loaded(reg_cache, _jit, op->c.i.rs, false);
-
-		call_to_c_wrapper(state, block,
-				  (lightrec_get_lut_entry(block) << 16) | offset,
-				  C_WRAPPER_PGXP_CPU);
-	}
 }
 
 static void rec_LB(struct lightrec_cstate *state, const struct block *block, u16 offset)
@@ -3435,12 +3421,14 @@ static void rec_META(struct lightrec_cstate *state,
 		(*f)(state, block, offset);
 }
 
-/* Loads tracked by PGXP CPU mode (have a PGXP_CPU_L* tracker). */
-static _Bool pgxp_cpu_tracked_load(union code c)
+/* Memory operations tracked by PGXP CPU mode. */
+static _Bool pgxp_cpu_tracked_memory(union code c)
 {
 	switch (c.i.op) {
 	case OP_LB:  case OP_LBU: case OP_LH:  case OP_LHU:
 	case OP_LWL: case OP_LWR: case OP_LW:
+	case OP_SB:  case OP_SH:  case OP_SWL: case OP_SW:
+	case OP_SWR:
 		return true;
 	default:
 		return false;
@@ -3476,14 +3464,6 @@ static _Bool pgxp_cpu_tracked(union code c)
 	case OP_SLTI:  case OP_SLTIU:
 	case OP_ANDI:  case OP_ORI:
 	case OP_XORI:  case OP_LUI:
-		return true;
-	/* Stores: tracked value (rt) and address base (rs) are both live in
-	 * the GPR file at this point and unmodified by the store, so they can
-	 * be read after a regcache clean.  Loads are not yet handled here:
-	 * their tracked result is subject to load-delay and is produced by the
-	 * rec_io path, so they need separate handling. */
-	case OP_SB:  case OP_SH:  case OP_SWL: case OP_SW:
-	case OP_SWR:
 		return true;
 	default:
 		return false;

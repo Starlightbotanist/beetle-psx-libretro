@@ -443,21 +443,6 @@ static void lightrec_rw_helper(struct lightrec_state *state,
 			state->regs.gpr[op.i.rt] = ret;
 		}
 
-		/* PGXP CPU-mode load tracking.  `ret` is the loaded value
-		 * regardless of whether it was committed to gpr[rt] or held
-		 * in temp_reg for the load delay, so it is the correct value
-		 * to track here.  OP_META_LWU is a lightrec-internal unaligned
-		 * helper with no PGXP tracker, so skip it. */
-		if (state->ops.pgxp_cpu && op.i.op != OP_META_LWU) {
-			u32 addr = state->regs.gpr[op.i.rs] + (u32)(s16)op.i.imm;
-
-			(*state->ops.pgxp_cpu)(state, op.opcode,
-					       ret, state->regs.gpr[op.i.rs],
-					       state->regs.gpr[op.i.rt],
-					       state->regs.gpr[REG_HI],
-					       state->regs.gpr[REG_LO],
-					       addr);
-		}
 		fallthrough;
 	default:
 		break;
