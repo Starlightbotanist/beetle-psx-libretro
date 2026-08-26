@@ -292,6 +292,31 @@ static void test_cpu_result_initialization(void)
       fail("AND result metadata not initialized", CPU_reg[3].count, 0);
 }
 
+static void test_cpu_comparison_ordering(void)
+{
+   uint32_t instr;
+
+   set_cpu_value(1, 0x00010000u);
+   set_cpu_value(2, 0x0000FFFFu);
+
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Au;
+   PGXP_CPU_SLT(instr, 0, 0x00010000u, 0x0000FFFFu);
+   if (CPU_reg[3].x != 0.f)
+      fail("SLT used low half with unequal high halves", 1, 0);
+
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Bu;
+   PGXP_CPU_SLTU(instr, 0, 0x00010000u, 0x0000FFFFu);
+   if (CPU_reg[3].x != 0.f)
+      fail("SLTU used low half with unequal high halves", 1, 0);
+
+   set_cpu_value(1, 0x00000001u);
+   set_cpu_value(2, 0x00000002u);
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Au;
+   PGXP_CPU_SLT(instr, 1, 0x00000001u, 0x00000002u);
+   if (CPU_reg[3].x != 1.f)
+      fail("SLT did not compare equal-high low halves", 0, 1);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -316,6 +341,9 @@ int main(void)
 
    printf("[T6] CPU result initialization\n");
    test_cpu_result_initialization();
+
+   printf("[T7] CPU comparison ordering\n");
+   test_cpu_comparison_ordering();
 
    if (failures)
    {

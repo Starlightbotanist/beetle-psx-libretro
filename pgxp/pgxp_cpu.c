@@ -476,7 +476,10 @@ void PGXP_CPU_SLT(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 	ret.y = 0.f;
 	ret.compFlags[1] = VALID;
 
-	ret.x = (CPU_reg[rs(instr)].y < CPU_reg[rt(instr)].y) ? 1.f : (f16Unsign(CPU_reg[rs(instr)].x) < f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	ret.x = (CPU_reg[rs(instr)].y < CPU_reg[rt(instr)].y) ? 1.f :
+		(CPU_reg[rs(instr)].y > CPU_reg[rt(instr)].y) ? 0.f :
+		(f16Unsign(CPU_reg[rs(instr)].x) <
+		 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
@@ -500,7 +503,12 @@ void PGXP_CPU_SLTU(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVa
 	ret.y = 0.f;
 	ret.compFlags[1] = VALID;
 
-	ret.x = (f16Unsign(CPU_reg[rs(instr)].y) < f16Unsign(CPU_reg[rt(instr)].y)) ? 1.f : (f16Unsign(CPU_reg[rs(instr)].x) < f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
+	ret.x = (f16Unsign(CPU_reg[rs(instr)].y) <
+		 f16Unsign(CPU_reg[rt(instr)].y)) ? 1.f :
+		(f16Unsign(CPU_reg[rs(instr)].y) >
+		 f16Unsign(CPU_reg[rt(instr)].y)) ? 0.f :
+		(f16Unsign(CPU_reg[rs(instr)].x) <
+		 f16Unsign(CPU_reg[rt(instr)].x)) ? 1.f : 0.f;
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
