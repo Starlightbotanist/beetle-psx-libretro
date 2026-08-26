@@ -12,6 +12,7 @@
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
 #include "rhi_defer.h"
 #include "tt_trace.h"
+#include <features/features_cpu.h>
 #include <retro_inline.h>
 #include <math.h>
 #include "rhi_tt.h"
@@ -12331,6 +12332,10 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
          size_t size)
    {
       RhiSpirvResourceLayout reflected;
+      retro_time_t start_usec;
+      retro_time_t module_usec;
+      retro_time_t reflect_usec;
+      VkResult module_res;
       RHI_STATIC_ASSERT(sizeof(reflected) == sizeof(self->layout),
             "reflection layout mirror size mismatch");
       self->device = device;
@@ -12354,15 +12359,26 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
       info.codeSize = size;
       info.pCode = data;
 
-      LOGI("Creating shader module.\n");
-      if (vkCreateShaderModule(device_get_device(device), &info, NULL, &self->module) != VK_SUCCESS)
+      start_usec = cpu_features_get_time_usec();
+      module_res = vkCreateShaderModule(device_get_device(device), &info, NULL, &self->module);
+      module_usec = cpu_features_get_time_usec() - start_usec;
+      LOGI("[Vulkan pipeline diagnostic] shader_module hash=%016llx bytes=%llu result=%d elapsed_us=%lld\n",
+            (unsigned long long)hash, (unsigned long long)size,
+            (int)module_res, (long long)module_usec);
+      if (module_res != VK_SUCCESS)
          LOGE("Failed to create shader module.\n");
 
       /* SPIR-V reflection is done in a separate C++ shim
        * (rhi_spirv_reflect.cpp) so this translation unit does not depend on
        * SPIRV-Cross. The shim writes a POD layout whose fields mirror
        * ResourceLayout; copy it across. */
+      start_usec = cpu_features_get_time_usec();
       rhi_spirv_reflect(data, size / sizeof(uint32_t), &reflected);
+      reflect_usec = cpu_features_get_time_usec() - start_usec;
+      LOGI("[Vulkan pipeline diagnostic] spirv_reflect hash=%016llx words=%llu elapsed_us=%lld\n",
+            (unsigned long long)hash,
+            (unsigned long long)(size / sizeof(uint32_t)),
+            (long long)reflect_usec);
       memcpy(&self->layout, &reflected, sizeof(self->layout));
       }
    }
@@ -14115,6 +14131,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          Hash hash)
    {
       VkPipeline compute_pipeline;
+      VkResult res;
+      retro_time_t start_usec;
+      retro_time_t elapsed_usec;
       const Shader *shader = program_get_shader(self->current_program, ShaderStage_Compute);
       VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
       info.layout = pipeline_layout_get_layout(program_get_pipeline_layout(self->current_program));
@@ -14152,8 +14171,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
 
 
-      LOGI("Creating compute pipeline.\n");
-      if (vkCreateComputePipelines(device_get_device(self->device), VK_NULL_HANDLE, 1, &info, NULL, &compute_pipeline) != VK_SUCCESS)
+      start_usec = cpu_features_get_time_usec();
+      res = vkCreateComputePipelines(device_get_device(self->device), VK_NULL_HANDLE, 1, &info, NULL, &compute_pipeline);
+      elapsed_usec = cpu_features_get_time_usec() - start_usec;
+      LOGI("[Vulkan pipeline diagnostic] compute_pipeline cache=miss program=%016llx pipeline=%016llx result=%d elapsed_us=%lld\n",
+            (unsigned long long)self->current_program->intrusive_node.key,
+            (unsigned long long)hash, (int)res, (long long)elapsed_usec);
+      if (res != VK_SUCCESS)
          LOGE("Failed to create compute pipeline!\n");
 
       return program_add_pipeline(self->current_program, hash, compute_pipeline);
@@ -14166,6 +14190,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       uint32_t attr_mask;
       VkPipeline pipeline;
       VkResult res;
+      retro_time_t start_usec;
+      retro_time_t elapsed_usec;
       /* Viewport state */
       VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
       vp.viewportCount = 1;
@@ -14327,8 +14353,15 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       pipe.stageCount = num_stages;
 
 
-      LOGI("Creating graphics pipeline.\n");
+      start_usec = cpu_features_get_time_usec();
       res = vkCreateGraphicsPipelines(device_get_device(self->device), VK_NULL_HANDLE, 1, &pipe, NULL, &pipeline);
+      elapsed_usec = cpu_features_get_time_usec() - start_usec;
+      LOGI("[Vulkan pipeline diagnostic] graphics_pipeline cache=miss program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u stages=%u result=%d elapsed_us=%lld\n",
+            (unsigned long long)self->current_program->intrusive_node.key,
+            (unsigned long long)hash,
+            (unsigned long long)self->compatible_render_pass->intrusive_node.key,
+            self->current_subpass, num_stages, (int)res,
+            (long long)elapsed_usec);
       if (res != VK_SUCCESS)
          LOGE("Failed to create graphics pipeline!\n");
 
