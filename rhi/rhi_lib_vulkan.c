@@ -77,6 +77,10 @@ extern int   psx_hdr_multipass;
  * (16F) scaled framebuffer, which is allocated before HDR negotiation
  * completes. Non-zero = a 30-bit/HDR format was requested. */
 extern int   psx_color_format;
+#ifdef ANDROID
+extern char retro_save_directory[4096];
+extern char retro_base_directory[4096];
+#endif
 
 /* VOLK_GENERATE_PROTOTYPES_H */
 #if defined(VK_VERSION_1_0)
@@ -452,6 +456,10 @@ PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR;
 
 #include <rthreads/rthreads.h>
 #include <streams/file_stream.h>
+#ifdef ANDROID
+#include <encodings/crc32.h>
+#include <file/file_path.h>
+#endif
 
 /* C89-compatible compile-time assertion. C89 has no static_assert /
  * _Static_assert; emit a typedef whose array size is negative when the
@@ -4699,8 +4707,8 @@ static void cbh_move(struct CommandBufferHandle *dst,
          VkQueue graphics_queue;
          VkQueue compute_queue;
          VkQueue transfer_queue;
-         /* Shared driver compiler cache. It is intentionally memory-only for
-          * this first-run checkpoint; persistence can reuse the same object. */
+         /* Shared driver compiler cache. Android seeds it from validated
+          * persistent data and writes the expanded cache on clean shutdown. */
          VkPipelineCache pipeline_cache;
 
          uint64_t cookie;
@@ -15877,6 +15885,283 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return self->per_frame.items[self->frame_context_index];
    }
 
+#ifdef ANDROID
+#define VULKAN_PIPELINE_CACHE_DIR_NAME "Beetle PSX HW"
+#define VULKAN_PIPELINE_CACHE_FILE_NAME "vulkan_pipeline_cache_v1.bin"
+#define VULKAN_PIPELINE_CACHE_FILE_MAGIC "BPSXVKC1"
+#define VULKAN_PIPELINE_CACHE_FILE_VERSION 1u
+#define VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE 24u
+#define VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE (16u * 1024u * 1024u)
+
+   struct RhiPipelineCacheHeaderV1
+   {
+      uint32_t header_size;
+      uint32_t header_version;
+      uint32_t vendor_id;
+      uint32_t device_id;
+      uint8_t uuid[VK_UUID_SIZE];
+   };
+   RHI_STATIC_ASSERT(sizeof(struct RhiPipelineCacheHeaderV1) == 32,
+         pipeline_cache_header_must_be_32_bytes);
+
+   static uint32_t pipeline_cache_read_u32_le(const uint8_t *data)
+   {
+      return (uint32_t)data[0] |
+         ((uint32_t)data[1] << 8) |
+         ((uint32_t)data[2] << 16) |
+         ((uint32_t)data[3] << 24);
+   }
+
+   static void pipeline_cache_write_u32_le(uint8_t *data, uint32_t value)
+   {
+      data[0] = (uint8_t)(value >> 0);
+      data[1] = (uint8_t)(value >> 8);
+      data[2] = (uint8_t)(value >> 16);
+      data[3] = (uint8_t)(value >> 24);
+   }
+
+   static bool device_pipeline_cache_build_path(char *path,
+         size_t path_size, bool create_dir)
+   {
+      const char *root = retro_save_directory[0] != '\0'
+         ? retro_save_directory : retro_base_directory;
+      char cache_dir[PATH_MAX_LENGTH];
+      size_t needed;
+
+      if (!root || root[0] == '\0')
+      {
+         LOGI("[Vulkan pipeline cache] persistence disabled: no writable frontend directory\n");
+         return false;
+      }
+
+      needed = strlen(root) + 1 + strlen(VULKAN_PIPELINE_CACHE_DIR_NAME) + 1;
+      if (needed > sizeof(cache_dir))
+      {
+         LOGE("[Vulkan pipeline cache] persistence disabled: directory path is too long\n");
+         return false;
+      }
+      fill_pathname_join_special(cache_dir, root,
+            VULKAN_PIPELINE_CACHE_DIR_NAME, sizeof(cache_dir));
+
+      if (create_dir && !path_mkdir(cache_dir))
+      {
+         LOGE("[Vulkan pipeline cache] could not create cache directory: %s\n",
+               cache_dir);
+         return false;
+      }
+
+      needed = strlen(cache_dir) + 1 + strlen(VULKAN_PIPELINE_CACHE_FILE_NAME) + 1;
+      if (needed > path_size)
+      {
+         LOGE("[Vulkan pipeline cache] persistence disabled: file path is too long\n");
+         return false;
+      }
+      fill_pathname_join_special(path, cache_dir,
+            VULKAN_PIPELINE_CACHE_FILE_NAME, path_size);
+      return true;
+   }
+
+   static bool device_pipeline_cache_data_compatible(const Device *self,
+         const void *data, size_t size)
+   {
+      struct RhiPipelineCacheHeaderV1 header;
+
+      if (size < sizeof(header))
+         return false;
+      memcpy(&header, data, sizeof(header));
+      return header.header_size >= sizeof(header) &&
+         header.header_size <= size &&
+         header.header_version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+         header.vendor_id == self->gpu_props.vendorID &&
+         header.device_id == self->gpu_props.deviceID &&
+         memcmp(header.uuid, self->gpu_props.pipelineCacheUUID,
+               VK_UUID_SIZE) == 0;
+   }
+
+   static void *device_pipeline_cache_load(Device *self, size_t *data_size)
+   {
+      char path[PATH_MAX_LENGTH];
+      RFILE *file;
+      int64_t file_size;
+      int64_t bytes_read;
+      uint8_t *file_data;
+      uint8_t *payload;
+      uint32_t file_version;
+      uint32_t payload_size;
+      uint32_t payload_crc;
+
+      *data_size = 0;
+      if (!device_pipeline_cache_build_path(path, sizeof(path), false))
+         return NULL;
+
+      file = filestream_open(path, RETRO_VFS_FILE_ACCESS_READ,
+            RETRO_VFS_FILE_ACCESS_HINT_NONE);
+      if (!file)
+      {
+         LOGI("[Vulkan pipeline cache] cold start; no cache at %s\n", path);
+         return NULL;
+      }
+
+      file_size = filestream_get_size(file);
+      if (file_size < (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + 32u) ||
+          file_size > (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE +
+             VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE))
+      {
+         LOGI("[Vulkan pipeline cache] ignored invalid cache size=%lld path=%s\n",
+               (long long)file_size, path);
+         filestream_close(file);
+         return NULL;
+      }
+
+      file_data = (uint8_t *)malloc((size_t)file_size);
+      if (!file_data)
+      {
+         LOGE("[Vulkan pipeline cache] could not allocate %lld bytes for load\n",
+               (long long)file_size);
+         filestream_close(file);
+         return NULL;
+      }
+
+      bytes_read = filestream_read(file, file_data, file_size);
+      filestream_close(file);
+      if (bytes_read != file_size)
+      {
+         LOGI("[Vulkan pipeline cache] ignored short read=%lld expected=%lld path=%s\n",
+               (long long)bytes_read, (long long)file_size, path);
+         free(file_data);
+         return NULL;
+      }
+
+      file_version = pipeline_cache_read_u32_le(file_data + 8);
+      payload_size = pipeline_cache_read_u32_le(file_data + 12);
+      payload_crc = pipeline_cache_read_u32_le(file_data + 16);
+      if (memcmp(file_data, VULKAN_PIPELINE_CACHE_FILE_MAGIC, 8) != 0 ||
+          file_version != VULKAN_PIPELINE_CACHE_FILE_VERSION ||
+          payload_size != (uint32_t)(file_size -
+             VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE) ||
+          encoding_crc32(0, file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE,
+             payload_size) != payload_crc)
+      {
+         LOGI("[Vulkan pipeline cache] ignored corrupt or unknown cache path=%s\n",
+               path);
+         free(file_data);
+         return NULL;
+      }
+
+      if (!device_pipeline_cache_data_compatible(self,
+            file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE, payload_size))
+      {
+         LOGI("[Vulkan pipeline cache] ignored incompatible GPU/driver cache path=%s\n",
+               path);
+         free(file_data);
+         return NULL;
+      }
+
+      payload = (uint8_t *)malloc(payload_size);
+      if (!payload)
+      {
+         LOGE("[Vulkan pipeline cache] could not allocate %u-byte payload\n",
+               payload_size);
+         free(file_data);
+         return NULL;
+      }
+      memcpy(payload, file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE,
+            payload_size);
+      free(file_data);
+      *data_size = payload_size;
+      LOGI("[Vulkan pipeline cache] loaded bytes=%u path=%s\n",
+            payload_size, path);
+      return payload;
+   }
+
+   static void device_pipeline_cache_save(Device *self)
+   {
+      char path[PATH_MAX_LENGTH];
+      char temp_path[PATH_MAX_LENGTH];
+      size_t data_size = 0;
+      size_t actual_size;
+      uint8_t *file_data;
+      VkResult result;
+      int temp_length;
+
+      if (self->device == VK_NULL_HANDLE ||
+          self->pipeline_cache == VK_NULL_HANDLE)
+         return;
+      if (!device_pipeline_cache_build_path(path, sizeof(path), true))
+         return;
+
+      temp_length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+      if (temp_length < 0 || (size_t)temp_length >= sizeof(temp_path))
+      {
+         LOGE("[Vulkan pipeline cache] could not construct temporary path\n");
+         return;
+      }
+
+      result = vkGetPipelineCacheData(self->device, self->pipeline_cache,
+            &data_size, NULL);
+      if (result != VK_SUCCESS || data_size == 0 ||
+          data_size > VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE)
+      {
+         LOGE("[Vulkan pipeline cache] save size query failed result=%d bytes=%llu\n",
+               (int)result, (unsigned long long)data_size);
+         return;
+      }
+
+      file_data = (uint8_t *)malloc(
+            VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + data_size);
+      if (!file_data)
+      {
+         LOGE("[Vulkan pipeline cache] could not allocate %llu bytes for save\n",
+               (unsigned long long)data_size);
+         return;
+      }
+
+      actual_size = data_size;
+      result = vkGetPipelineCacheData(self->device, self->pipeline_cache,
+            &actual_size, file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE);
+      if (result != VK_SUCCESS || actual_size == 0 ||
+          actual_size > data_size ||
+          !device_pipeline_cache_data_compatible(self,
+             file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE, actual_size))
+      {
+         LOGE("[Vulkan pipeline cache] save data query failed result=%d bytes=%llu\n",
+               (int)result, (unsigned long long)actual_size);
+         free(file_data);
+         return;
+      }
+
+      memcpy(file_data, VULKAN_PIPELINE_CACHE_FILE_MAGIC, 8);
+      pipeline_cache_write_u32_le(file_data + 8,
+            VULKAN_PIPELINE_CACHE_FILE_VERSION);
+      pipeline_cache_write_u32_le(file_data + 12, (uint32_t)actual_size);
+      pipeline_cache_write_u32_le(file_data + 16,
+            encoding_crc32(0,
+               file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE,
+               actual_size));
+      pipeline_cache_write_u32_le(file_data + 20, 0);
+
+      if (!filestream_write_file(temp_path, file_data,
+            (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + actual_size)))
+      {
+         LOGE("[Vulkan pipeline cache] could not write temporary cache: %s\n",
+               temp_path);
+         filestream_delete(temp_path);
+         free(file_data);
+         return;
+      }
+      free(file_data);
+
+      if (filestream_rename(temp_path, path) != 0)
+      {
+         LOGE("[Vulkan pipeline cache] atomic replace failed: %s\n", path);
+         filestream_delete(temp_path);
+         return;
+      }
+      LOGI("[Vulkan pipeline cache] saved bytes=%llu path=%s\n",
+            (unsigned long long)actual_size, path);
+   }
+#endif
+
    static void device_init(Device *self)
    {
       /* Device is malloc'd with uninitialised storage; in the C++ source it was
@@ -15949,6 +16234,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    static void device_deinit(Device *self)
    {
       device_wait_idle_nolock(self);
+#ifdef ANDROID
+      device_pipeline_cache_save(self);
+#endif
 
       framebuffer_allocator_clear(&self->framebuffer_allocator);
       attachment_allocator_clear(&self->transient_allocator);
@@ -16226,15 +16514,39 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->instance = context_get_instance(context);
       self->gpu = context_get_gpu(context);
       self->device = context_get_device(context);
+      self->mem_props = *context_get_mem_props(context);
+      self->gpu_props = *context_get_gpu_props(context);
 
-      /* Even an empty cache lets related first-run pipeline variants share
-       * driver compiler work. Every create call below receives this handle. */
+      /* Every pipeline create receives one shared driver cache. Android seeds
+       * it from validated persistent data; a bad driver blob is never fatal,
+       * since creation is retried with an empty cache. */
       {
          VkPipelineCacheCreateInfo cache_info = {
             VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
          };
-         VkResult cache_result = vkCreatePipelineCache(
+         VkResult cache_result;
+#ifdef ANDROID
+         size_t initial_data_size;
+         void *initial_data = device_pipeline_cache_load(self,
+               &initial_data_size);
+         cache_info.initialDataSize = initial_data_size;
+         cache_info.pInitialData = initial_data;
+#endif
+         cache_result = vkCreatePipelineCache(
                self->device, &cache_info, NULL, &self->pipeline_cache);
+#ifdef ANDROID
+         if (cache_result != VK_SUCCESS && initial_data)
+         {
+            LOGE("[Vulkan pipeline cache] driver rejected persistent data result=%d; retrying empty\n",
+                  (int)cache_result);
+            self->pipeline_cache = VK_NULL_HANDLE;
+            cache_info.initialDataSize = 0;
+            cache_info.pInitialData = NULL;
+            cache_result = vkCreatePipelineCache(
+                  self->device, &cache_info, NULL, &self->pipeline_cache);
+         }
+         free(initial_data);
+#endif
          if (cache_result != VK_SUCCESS)
          {
             self->pipeline_cache = VK_NULL_HANDLE;
@@ -16242,7 +16554,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   (int)cache_result);
          }
          else
+         {
+#ifdef ANDROID
+            LOGI("[Vulkan pipeline cache] created driver cache initial_bytes=%llu\n",
+                  (unsigned long long)initial_data_size);
+#else
             LOGI("[Vulkan pipeline cache] created in-memory driver cache\n");
+#endif
+         }
       }
 
       self->graphics_queue_family_index = context_get_graphics_queue_family(context);
@@ -16251,9 +16570,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->compute_queue = context_get_compute_queue(context);
       self->transfer_queue_family_index = context_get_transfer_queue_family(context);
       self->transfer_queue = context_get_transfer_queue(context);
-
-      self->mem_props = *context_get_mem_props(context);
-      self->gpu_props = *context_get_gpu_props(context);
 
       device_init_workarounds(self);
 
