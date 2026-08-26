@@ -479,12 +479,31 @@ static void test_j_isolated_sidecar_transport(void)
    PGXP_pushSXYZ2f(precise_x, precise_y, 32768.0f, packed);
    PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
 
-   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   /* I owns direct MFC2 identity moves.  Isolated J must not steal this
+    * stage-1 shadow, but the lineage must remain available if the alias is
+    * subsequently packed through SLL5/SRA5. */
+   memset(&CPU_reg[7], 0, sizeof(CPU_reg[7]));
+   instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(7) | 0x21u;
+   PGXP_CPU_DiagIdentityMove(instr, packed, packed);
+   if ((CPU_reg[7].flags & VALID_01) != VALID_01 ||
+       CPU_reg[7].x != precise_x || CPU_reg[7].y != precise_y)
+      fail("isolated J stole stage-1 identity move", 0, 1);
+
+   instr = INSTR_RT(7) | INSTR_RD(9) | INSTR_SA(5);
    memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
    PGXP_CPU_DiagShift(instr, packed, sll, 0);
    if ((CPU_reg[9].flags & VALID_01) == VALID_01)
       fail("isolated SLL5 mutated CPU shadow", 1, 0);
-   PGXP_CPU_SW(INSTR_RT(9), sll, sll_addr);
+
+   /* Once SLL5 has created J's stage-2 lineage, exact aliases must advance
+    * only the sidecar.  Reinstalling that payload in CPU_reg would recreate
+    * the Spyro 3 sky regression that isolation is intended to remove. */
+   memset(&CPU_reg[11], 0, sizeof(CPU_reg[11]));
+   instr = INSTR_RS(9) | INSTR_RT(0) | INSTR_RD(11) | 0x21u;
+   PGXP_CPU_DiagIdentityMove(instr, sll, sll);
+   if ((CPU_reg[11].flags & VALID_01) == VALID_01)
+      fail("isolated stage-2 identity mutated CPU shadow", 1, 0);
+   PGXP_CPU_SW(INSTR_RT(11), sll, sll_addr);
 
    memset(&CPU_reg[10], 0, sizeof(CPU_reg[10]));
    PGXP_CPU_LW((0x23u << 26) | INSTR_RT(10), sll, sll_addr);
@@ -492,7 +511,13 @@ static void test_j_isolated_sidecar_transport(void)
    PGXP_CPU_DiagShift(instr, sll, sra, 1);
    if ((CPU_reg[10].flags & VALID_01) == VALID_01)
       fail("isolated SRA5 mutated CPU shadow", 1, 0);
-   PGXP_CPU_SW(INSTR_RT(10), sra, final_addr);
+
+   memset(&CPU_reg[12], 0, sizeof(CPU_reg[12]));
+   instr = INSTR_RS(10) | INSTR_RT(0) | INSTR_RD(12) | 0x21u;
+   PGXP_CPU_DiagIdentityMove(instr, sra, sra);
+   if ((CPU_reg[12].flags & VALID_01) == VALID_01)
+      fail("isolated stage-3 identity mutated CPU shadow", 1, 0);
+   PGXP_CPU_SW(INSTR_RT(12), sra, final_addr);
    gpu_deliver(&final_addr, &sra, 1);
 
    PGXP_DiagPacket(0x24, 7, 0, 0, 0);

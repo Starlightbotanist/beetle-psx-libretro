@@ -2353,9 +2353,15 @@ void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
 		window.lineage_identity_blocked++;
 		return;
 	}
-	/* Keep an isolated J chain isolated across exact move aliases.  The
-	 * architectural word and precise sidecar advance, but CPU_reg does not. */
-	if (pgxp_diag_j_is_isolated() && prior.precise_valid)
+	/* Keep an isolated J shift chain isolated across exact move aliases.  A
+	 * stage-1 MFC2 value is not J-derived: identity-move preservation (I)
+	 * must still copy that ordinary GTE shadow into CPU_reg for consumers
+	 * such as GT2's wheel geometry.  Falling through for stage 1 preserves
+	 * both the ordinary shadow and this lineage, so a later SLL5 can still
+	 * enter the isolated J sidecar.  Only post-SLL5/SRA5 stages must remain
+	 * sidecar-only to avoid reintroducing J's CPU-shadow contamination. */
+	if (pgxp_diag_j_is_isolated() && prior.precise_valid &&
+	    (prior.stage == 2 || prior.stage == 3))
 	{
 		if (source != 0 && before == after &&
 		    prior.current_value == before)
