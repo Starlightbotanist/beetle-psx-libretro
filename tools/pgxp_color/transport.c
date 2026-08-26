@@ -365,6 +365,22 @@ static void test_vertex_offset_ordering(void)
       fail("native vertex offset was re-wrapped", 1, 0);
 }
 
+static void test_nclip_magnitude(void)
+{
+   if (PGXP_NCLIP_preserve_magnitude(1234, -77) != -1234)
+      fail("NCLIP positive orientation replacement", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(-4321, 88) != 4321)
+      fail("NCLIP negative orientation replacement", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(1234, 77) != 1234)
+      fail("NCLIP changed matching magnitude", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(1234, 0) != 1234)
+      fail("NCLIP replaced native result with zero", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(0, -88) != -1)
+      fail("NCLIP lost orientation at native zero", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(INT32_MIN, 1) != INT32_MAX)
+      fail("NCLIP overflowed reversed minimum", 0, 1);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -395,6 +411,9 @@ int main(void)
 
    printf("[T8] vertex offset ordering\n");
    test_vertex_offset_ordering();
+
+   printf("[T9] NCLIP native magnitude preservation\n");
+   test_nclip_magnitude();
 
    if (failures)
    {

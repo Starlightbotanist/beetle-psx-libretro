@@ -77,6 +77,8 @@ void	PGXP_RTPS(uint32_t _n, uint32_t _v);
 
 int		PGXP_NCLIP_valid(uint32_t sxy0, uint32_t sxy1, uint32_t sxy2);
 double	PGXP_NCLIP();
+int32_t PGXP_NCLIP_preserve_magnitude(int32_t native_value,
+		int32_t precise_value);
 
 // Data transfer tracking
 void	PGXP_GTE_MFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal);		// copy GTE data reg to GPR reg (MFC2)
