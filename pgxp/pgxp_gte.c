@@ -379,7 +379,7 @@ void PGXP_GTE_MFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
 	CPU_reg[rt(instr)].value = rtVal;
 	PGXP_DiagTraceMFC2(instr, &CPU_reg[rt(instr)]);
 	PGXP_CPU_MarkMFC2(rt(instr));
-	PGXP_DiagMFC2(instr, rtVal);
+	PGXP_DiagMFC2(instr, rtVal, &CPU_reg[rt(instr)]);
 }
 
 void PGXP_GTE_MTC2(uint32_t instr, uint32_t rdVal, uint32_t rtVal)

@@ -186,6 +186,7 @@ typedef struct
 
 typedef struct
 {
+	uint64_t trace_id;
 	uint32_t word_addr;
 	uint32_t mfc2_value;
 	uint32_t sll_value;
@@ -197,6 +198,11 @@ typedef struct
 	uint32_t current_value;
 	uint32_t depth;
 	uint32_t chain_hash;
+	uint32_t precise_flags;
+	float precise_x;
+	float precise_y;
+	float precise_z;
+	uint32_t precise_valid;
 } PGXP_diag_lineage;
 
 typedef struct
@@ -512,6 +518,12 @@ typedef struct
 	uint64_t lineage_store2;
 	uint64_t lineage_store3;
 	uint64_t lineage_fifo;
+	uint64_t lineage_sidecar_shift[2];
+	uint64_t lineage_sidecar_load;
+	uint64_t lineage_sidecar_identity;
+	uint64_t lineage_sidecar_attempts;
+	uint64_t lineage_sidecar_hits[2];
+	uint64_t lineage_sidecar_reject[5];
 	uint64_t trace_events[11];
 	uint64_t trace_reasons[PGXP_TRACE_REASON_COUNT];
 	uint64_t trace_terminal[3][PGXP_TRACE_REASON_COUNT];
@@ -549,7 +561,20 @@ static uint32_t lineage_pre_native[32];
 static PGXP_value lineage_pre_shadow[32];
 static PGXP_diag_lineage lineage_pre_lineage[32];
 static PGXP_diag_lineage lineage_mem[PGXP_DIAG_STORE8_SLOTS];
+static PGXP_diag_lineage lineage_scratch[UINT32_C(0x400) / 4];
 static PGXP_diag_gpu_provenance cb_provenance[16];
+
+static uint32_t gpu_source_word_addr(uint32_t addr);
+
+static PGXP_diag_lineage* pgxp_diag_lineage_memory(uint32_t word_addr)
+{
+	if (word_addr < UINT32_C(0x00200000))
+		return &lineage_mem[word_addr >> 2];
+	if (word_addr >= UINT32_C(0x1f800000) &&
+	    word_addr < UINT32_C(0x1f800400))
+		return &lineage_scratch[(word_addr - UINT32_C(0x1f800000)) >> 2];
+	return NULL;
+}
 static PGXP_diag_coherence_vertex coherence_vertices
 	[PGXP_DIAG_COHERENCE_BUCKETS][PGXP_DIAG_COHERENCE_WAYS];
 static PGXP_trace_event trace_ring[PGXP_TRACE_RING_SIZE];
@@ -1148,7 +1173,9 @@ static const char* pgxp_diag_j_mode_name(unsigned mode)
 		"native-untextured-all",
 		"native-untextured-xy-keep-w",
 		"native-untextured-x-keep-yw",
-		"native-untextured-y-keep-xw"
+		"native-untextured-y-keep-xw",
+		"isolated-all-exact",
+		"isolated-textured-exact"
 	};
 	return mode < PGXP_DIAG_J_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -1169,6 +1196,12 @@ void PGXP_DiagJSetMode(unsigned mode)
 unsigned PGXP_DiagJGetMode(void)
 {
 	return j_test_mode;
+}
+
+static int pgxp_diag_j_is_isolated(void)
+{
+	return j_test_mode == PGXP_DIAG_J_TEST_ISOLATED_ALL ||
+		j_test_mode == PGXP_DIAG_J_TEST_ISOLATED_TEXTURED;
 }
 
 int PGXP_DiagJForceNative(const PGXP_value* value)
@@ -1524,6 +1557,7 @@ void PGXP_DiagInit(void)
 	memset(lineage_pre_shadow, 0, sizeof(lineage_pre_shadow));
 	memset(lineage_pre_lineage, 0, sizeof(lineage_pre_lineage));
 	memset(lineage_mem, 0, sizeof(lineage_mem));
+	memset(lineage_scratch, 0, sizeof(lineage_scratch));
 	memset(cb_provenance, 0, sizeof(cb_provenance));
 	memset(coherence_vertices, 0, sizeof(coherence_vertices));
 	dispatch_samples = 0;
@@ -1768,6 +1802,24 @@ void PGXP_DiagCPULoad(uint32_t instr, uint32_t addr, uint32_t value,
 	unsigned reg = (instr >> 16) & 0x1f;
 	int invalid_result = (result->flags & VALID_01) != VALID_01;
 
+	/* Isolated J never writes its precise payload into CPU_reg.  Restore only
+	 * its exact sidecar on an aligned LW of the same architectural word; LWL,
+	 * LWR and sub-word loads deliberately cannot inherit this provenance. */
+	if (pgxp_diag_j_is_isolated() && (instr >> 26) == 0x23)
+	{
+		uint32_t word_addr = gpu_source_word_addr(addr);
+		PGXP_diag_lineage* source =
+			pgxp_diag_lineage_memory(word_addr);
+		lineage_reg_touched |= UINT32_C(1) << reg;
+		memset(&lineage_reg[reg], 0, sizeof(lineage_reg[reg]));
+		if (source && source->valid && source->word_addr == word_addr &&
+		    source->current_value == value)
+		{
+			lineage_reg[reg] = *source;
+			window.lineage_sidecar_load++;
+		}
+	}
+
 	if (memory_state < 0 ||
 	    (unsigned)memory_state >= PGXP_DIAG_MEMORY_STATES)
 		memory_state = 0;
@@ -1821,12 +1873,20 @@ void PGXP_DiagMemoryWrite(uint32_t addr, const PGXP_value* value,
 		int valid_address, int full_word)
 {
 	uint32_t segment = addr >> 24;
+	uint32_t word_addr = gpu_source_word_addr(addr);
+	PGXP_diag_lineage* lineage =
+		pgxp_diag_lineage_memory(word_addr);
 	unsigned width = full_word ? 1u : 2u;
 
 	window.mem_writes++;
 	if (!valid_address)
 		window.mem_invalid_writes++;
 	hash_event(2, addr, value ? value->value : 0);
+	/* Every architectural write invalidates the previous exact sidecar.
+	 * PGXP_CPU_SW reinstalls source lineage after WriteMem returns; direct
+	 * GTE and partial writes intentionally leave the entry empty. */
+	if (valid_address && lineage)
+		memset(lineage, 0, sizeof(*lineage));
 	if (!value || (segment != 0x00 && segment != 0x80 && segment != 0xa0))
 		return;
 	{
@@ -1857,7 +1917,8 @@ static uint32_t gpu_source_word_addr(uint32_t addr)
 	}
 }
 
-void PGXP_DiagMFC2(uint32_t instr, uint32_t value)
+void PGXP_DiagMFC2(uint32_t instr, uint32_t value,
+		const PGXP_value* precise)
 {
 	uint32_t dest = (instr >> 16) & 31;
 	PGXP_diag_lineage* lineage = &lineage_reg[dest];
@@ -1870,6 +1931,18 @@ void PGXP_DiagMFC2(uint32_t instr, uint32_t value)
 	lineage->valid = 1;
 	lineage->current_value = value;
 	lineage->chain_hash = UINT32_C(2166136261) ^ instr ^ value;
+	if (precise && precise->value == value &&
+	    (precise->flags & VALID_01) == VALID_01 &&
+	    isfinite(precise->x) && isfinite(precise->y) &&
+	    isfinite(precise->z))
+	{
+		lineage->trace_id = precise->trace_id;
+		lineage->precise_flags = precise->flags;
+		lineage->precise_x = precise->x;
+		lineage->precise_y = precise->y;
+		lineage->precise_z = precise->z;
+		lineage->precise_valid = 1;
+	}
 	lineage_reg_touched |= UINT32_C(1) << dest;
 }
 
@@ -2158,6 +2231,23 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 		return 0;
 	}
 
+	/* The isolated modes use the exact native lineage as a transport proof
+	 * only.  They intentionally leave CPU_reg untouched, so J cannot affect
+	 * later CPU-side PGXP operations, NCLIP inputs, or unrelated memory
+	 * shadows.  The original MFC2 payload is recovered only at the GPU. */
+	if (pgxp_diag_j_is_isolated())
+	{
+		unsigned expected_stage = arithmetic ? 3u : 2u;
+		PGXP_DiagShift(instr, before, after, arithmetic);
+		if (lineage_reg[dest].valid &&
+		    lineage_reg[dest].stage == expected_stage &&
+		    lineage_reg[dest].precise_valid)
+			window.lineage_sidecar_shift[arithmetic ? 1 : 0]++;
+		else
+			window.lineage_shift_blocked++;
+		return 0;
+	}
+
 	Validate(&CPU_reg[source], before);
 	result = CPU_reg[source];
 	PGXP_DiagShift(instr, before, after, arithmetic);
@@ -2261,6 +2351,20 @@ void PGXP_DiagIdentityMove(unsigned dest, unsigned source,
 	if (!PGXP_FeatureEnabled(PGXP_FEATURE_IDENTITY_MOVE))
 	{
 		window.lineage_identity_blocked++;
+		return;
+	}
+	/* Keep an isolated J chain isolated across exact move aliases.  The
+	 * architectural word and precise sidecar advance, but CPU_reg does not. */
+	if (pgxp_diag_j_is_isolated() && prior.precise_valid)
+	{
+		if (source != 0 && before == after &&
+		    prior.current_value == before)
+		{
+			window.lineage_identity_matches++;
+			lineage_reg[dest] = prior;
+			window.lineage_identity_preserve++;
+			window.lineage_sidecar_identity++;
+		}
 		return;
 	}
 	if (source == 0 || before != after || !prior.valid)
@@ -2465,7 +2569,7 @@ void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 {
 	uint32_t source = (instr >> 16) & 31;
 	uint32_t word_addr = gpu_source_word_addr(addr);
-	PGXP_diag_lineage* dest;
+	PGXP_diag_lineage* dest = pgxp_diag_lineage_memory(word_addr);
 	const PGXP_diag_lineage* prior = &lineage_reg[source];
 	const PGXP_value* shadow = &CPU_reg[source];
 
@@ -2474,9 +2578,8 @@ void PGXP_DiagLineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 		(shadow->value != value ? 3 : 0)), shadow->trace_id,
 		shadow->trace_stage, (uint8_t)source, addr, value, shadow->value, shadow);
 
-	if (word_addr >= UINT32_C(0x00200000))
+	if (!dest)
 		return;
-	dest = &lineage_mem[word_addr >> 2];
 	uint32_t expected = prior->current_value;
 
 	memset(dest, 0, sizeof(*dest));
@@ -2498,6 +2601,7 @@ void PGXP_DiagStore8(uint32_t addr, uint8_t value,
 	PGXP_diag_store8* provenance = &store8_provenance
 		[(word_addr >> 2) & (PGXP_DIAG_STORE8_SLOTS - 1)];
 	PGXP_diag_mem_writer* writer = NULL;
+	PGXP_diag_lineage* lineage = pgxp_diag_lineage_memory(word_addr);
 
 	provenance->word_addr = word_addr;
 	provenance->byte_addr = addr;
@@ -2508,6 +2612,8 @@ void PGXP_DiagStore8(uint32_t addr, uint8_t value,
 	provenance->invalid_count = invalid_count;
 	provenance->mode_frame = mode_frame;
 	provenance->valid = 1;
+	if (lineage)
+		memset(lineage, 0, sizeof(*lineage));
 	if (word_addr < UINT32_C(0x00200000))
 	{
 		writer = &mem_writers[word_addr >> 2];
@@ -2546,6 +2652,8 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 
 	{
 		uint32_t word_addr = gpu_source_word_addr(addr);
+		PGXP_diag_lineage* lineage =
+			pgxp_diag_lineage_memory(word_addr);
 		const PGXP_diag_store8* store8 = &store8_provenance
 			[(word_addr >> 2) & (PGXP_DIAG_STORE8_SLOTS - 1)];
 
@@ -2553,9 +2661,10 @@ void PGXP_DiagFIFOWrite(unsigned pos, uint32_t addr, uint32_t value,
 		memset(&provenance->lineage, 0, sizeof(provenance->lineage));
 		memset(&provenance->writer, 0, sizeof(provenance->writer));
 		if (word_addr < UINT32_C(0x00200000))
-		{
 			provenance->writer = mem_writers[word_addr >> 2];
-			provenance->lineage = lineage_mem[word_addr >> 2];
+		if (lineage)
+		{
+			provenance->lineage = *lineage;
 			if (!provenance->lineage.valid ||
 			    provenance->lineage.word_addr != word_addr ||
 			    provenance->lineage.current_value != value)
@@ -2601,6 +2710,65 @@ void PGXP_DiagCBWrite(unsigned slot, unsigned fifo_pos)
 			shadow->trace_id, shadow->trace_stage, (uint8_t)slot, fifo_pos,
 			shadow->value, shadow->value, shadow);
 	}
+}
+
+int PGXP_DiagRecoverLineageVertex(unsigned slot, uint32_t value,
+		float* x, float* y, float* z, int* valid_w)
+{
+	const PGXP_diag_gpu_provenance* provenance;
+	const PGXP_diag_lineage* lineage;
+	uint32_t word_addr;
+	int textured;
+
+	if (!pgxp_diag_j_is_isolated())
+		return 0;
+	window.lineage_sidecar_attempts++;
+	textured = (current_opcode & 0x04) != 0;
+	if (j_test_mode == PGXP_DIAG_J_TEST_ISOLATED_TEXTURED && !textured)
+	{
+		window.lineage_sidecar_reject[0]++;
+		return 0;
+	}
+	if (slot >= 16)
+	{
+		window.lineage_sidecar_reject[1]++;
+		return 0;
+	}
+	provenance = &cb_provenance[slot];
+	lineage = &provenance->lineage;
+	if (!lineage->valid)
+	{
+		window.lineage_sidecar_reject[1]++;
+		return 0;
+	}
+	word_addr = gpu_source_word_addr(provenance->addr);
+	if (lineage->word_addr != word_addr ||
+	    lineage->current_value != value || provenance->value != value)
+	{
+		window.lineage_sidecar_reject[2]++;
+		return 0;
+	}
+	if ((lineage->stage != 2 && lineage->stage != 3) ||
+	    lineage->transform_observed)
+	{
+		window.lineage_sidecar_reject[3]++;
+		return 0;
+	}
+	if (!lineage->precise_valid || !lineage->trace_id ||
+	    (lineage->precise_flags & VALID_01) != VALID_01 ||
+	    !isfinite(lineage->precise_x) || !isfinite(lineage->precise_y) ||
+	    !isfinite(lineage->precise_z))
+	{
+		window.lineage_sidecar_reject[4]++;
+		return 0;
+	}
+
+	*x = lineage->precise_x;
+	*y = lineage->precise_y;
+	*z = lineage->precise_z;
+	*valid_w = (lineage->precise_flags & VALID_2) == VALID_2;
+	window.lineage_sidecar_hits[textured ? 1 : 0]++;
+	return 1;
 }
 
 void PGXP_DiagPacket(uint8_t opcode, unsigned words, unsigned abr,
@@ -7616,6 +7784,23 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_store2,
 		(unsigned long long)window.lineage_store3,
 		(unsigned long long)window.lineage_fifo);
+	log_cb(RETRO_LOG_INFO,
+		"[pgxp_lineage_sidecar] f=%llu mode=%u shift=%llu/%llu "
+		"load=%llu identity=%llu attempts=%llu hits=untextured/textured:%llu/%llu "
+		"reject=class/provenance/value/transform/payload:%llu/%llu/%llu/%llu/%llu\n",
+		(unsigned long long)frame_number, j_test_mode,
+		(unsigned long long)window.lineage_sidecar_shift[0],
+		(unsigned long long)window.lineage_sidecar_shift[1],
+		(unsigned long long)window.lineage_sidecar_load,
+		(unsigned long long)window.lineage_sidecar_identity,
+		(unsigned long long)window.lineage_sidecar_attempts,
+		(unsigned long long)window.lineage_sidecar_hits[0],
+		(unsigned long long)window.lineage_sidecar_hits[1],
+		(unsigned long long)window.lineage_sidecar_reject[0],
+		(unsigned long long)window.lineage_sidecar_reject[1],
+		(unsigned long long)window.lineage_sidecar_reject[2],
+		(unsigned long long)window.lineage_sidecar_reject[3],
+		(unsigned long long)window.lineage_sidecar_reject[4]);
 	{
 		uint32_t state;
 		for (state = 0; state < 4; state++)

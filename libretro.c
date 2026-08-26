@@ -4831,6 +4831,10 @@ static void check_variables(bool startup)
                j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW;
             else if (strcmp(var.value, "native y keep xw") == 0)
                j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW;
+            else if (strcmp(var.value, "isolated all") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_ISOLATED_ALL;
+            else if (strcmp(var.value, "isolated textured") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_ISOLATED_TEXTURED;
          }
          PGXP_DiagJSetMode(j_test_mode);
       }

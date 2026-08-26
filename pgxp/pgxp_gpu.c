@@ -646,7 +646,12 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	int valid_xy;
 	int value_match;
 	int force_native;
+	int sidecar_valid_w = 0;
+	int sidecar_recovered;
 	unsigned native_axis_mask;
+	float sidecar_x = 0.0f;
+	float sidecar_y = 0.0f;
+	float sidecar_z = 0.0f;
 
 	/* The GP0 vertex word packs sy in the high 16 bits and sx in
 	 * the low 16 bits.  Unpack with shifts on the u32 rather than
@@ -660,8 +665,22 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	force_native = PGXP_DiagJForceNative(vert);
 	native_axis_mask = !force_native && valid_xy && value_match ?
 		PGXP_DiagJNativeAxisMask(vert) : 0;
+	sidecar_recovered = !force_native && PGXP_DiagRecoverLineageVertex(
+		offset, psxWord, &sidecar_x, &sidecar_y, &sidecar_z,
+		&sidecar_valid_w);
 
-	if (!force_native && valid_xy && value_match)
+	if (sidecar_recovered)
+	{
+		/* The exact MFC2 payload travelled beside the architectural word; it
+		 * was never installed in CPU_reg or ordinary PGXP RAM. */
+		source = PGXP_DIAG_VERTEX_CACHE;
+		pOutput->x = PGXP_ApplyVertexPosition(sidecar_x, xOffs);
+		pOutput->y = PGXP_ApplyVertexPosition(sidecar_y, yOffs);
+		pOutput->z = 0.95f;
+		pOutput->w = PGXP_NormalizeVertexW(sidecar_z);
+		pOutput->valid_w = sidecar_valid_w;
+	}
+	else if (!force_native && valid_xy && value_match)
 	{
 		source = PGXP_DIAG_VERTEX_TRACKED;
 		/* There is a value here with valid X and Y coordinates */

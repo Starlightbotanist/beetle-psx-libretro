@@ -85,10 +85,16 @@ static void gpu_deliver(const uint32_t* addrs, const uint32_t* words,
 {
    unsigned i;
    for (i = 0; i < n; i++)
+   {
+      PGXP_value* shadow = ReadMem(addrs[i]);
+      PGXP_DiagFIFOWrite(i, addrs[i], words[i], shadow);
       PGXP_WriteFIFO(ReadMem(addrs[i]), i);   /* GPU_WriteCB */
+   }
    for (i = 0; i < n; i++)
+   {
+      PGXP_DiagCBWrite(i, i);
       PGXP_WriteCB(PGXP_ReadFIFO(i), i);      /* ProcessFIFO */
-   (void)words;
+   }
 }
 
 /* ---------------------------------------------------------------------
@@ -452,6 +458,81 @@ static void test_j_native_axis_modes(void)
    PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
 }
 
+static void test_j_isolated_sidecar_transport(void)
+{
+   const float precise_x = 123.25f;
+   const float precise_y = -45.5f;
+   const uint32_t packed = 0xFFD3007Bu;
+   const uint32_t sll = packed << 5;
+   const uint32_t sra = (uint32_t)((int32_t)sll >> 5);
+   const uint32_t sll_addr = 0x1F800000u;
+   const uint32_t final_addr = 0x80106004u;
+   uint32_t instr;
+   OGLVertex output;
+   float recovered_x, recovered_y, recovered_z;
+   int recovered_w;
+
+   PGXP_SetExperimentMask((PGXP_FEATURE_ALL &
+         ~(PGXP_FEATURE_MFC2_SHIFT | PGXP_FEATURE_RECENT_RECOVERY)) |
+         PGXP_FEATURE_DIAG_SHIFT);
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_ISOLATED_TEXTURED);
+   PGXP_pushSXYZ2f(precise_x, precise_y, 32768.0f, packed);
+   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+
+   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
+   PGXP_CPU_DiagShift(instr, packed, sll, 0);
+   if ((CPU_reg[9].flags & VALID_01) == VALID_01)
+      fail("isolated SLL5 mutated CPU shadow", 1, 0);
+   PGXP_CPU_SW(INSTR_RT(9), sll, sll_addr);
+
+   memset(&CPU_reg[10], 0, sizeof(CPU_reg[10]));
+   PGXP_CPU_LW((0x23u << 26) | INSTR_RT(10), sll, sll_addr);
+   instr = INSTR_RT(10) | INSTR_RD(10) | INSTR_SA(5) | 0x03u;
+   PGXP_CPU_DiagShift(instr, sll, sra, 1);
+   if ((CPU_reg[10].flags & VALID_01) == VALID_01)
+      fail("isolated SRA5 mutated CPU shadow", 1, 0);
+   PGXP_CPU_SW(INSTR_RT(10), sra, final_addr);
+   gpu_deliver(&final_addr, &sra, 1);
+
+   PGXP_DiagPacket(0x24, 7, 0, 0, 0);
+   memset(&output, 0, sizeof(output));
+   PGXP_GetVertex(0, &sra, &output, 0, 0);
+   if (output.x != precise_x || output.y != precise_y ||
+       !output.valid_w || output.w != (1.0f / 32768.0f))
+      fail("isolated textured sidecar missed", 0, 1);
+
+   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
+   if (PGXP_DiagRecoverLineageVertex(0, sra, &recovered_x,
+       &recovered_y, &recovered_z, &recovered_w))
+      fail("textured sidecar leaked to untextured", 1, 0);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_ISOLATED_ALL);
+   if (!PGXP_DiagRecoverLineageVertex(0, sra, &recovered_x,
+       &recovered_y, &recovered_z, &recovered_w))
+      fail("isolated all direct lookup missed", 0, 1);
+   if (PGXP_DiagRecoverLineageVertex(0, sra ^ 1u, &recovered_x,
+       &recovered_y, &recovered_z, &recovered_w))
+      fail("isolated sidecar accepted wrong word", 1, 0);
+   memset(&output, 0, sizeof(output));
+   PGXP_GetVertex(0, &sra, &output, 0, 0);
+   if (output.x != precise_x || output.y != precise_y ||
+       !output.valid_w || output.w != (1.0f / 32768.0f))
+      fail("isolated all sidecar missed", 0, 1);
+
+   /* A non-lineage writer must retire the old sidecar even when it writes
+    * the same packed word; identical native SXY values are not unique keys
+    * for subpixel precision. */
+   PGXP_GTE_SWC2(INSTR_RT(14), sra, final_addr);
+   gpu_deliver(&final_addr, &sra, 1);
+   if (PGXP_DiagRecoverLineageVertex(0, sra, &recovered_x,
+       &recovered_y, &recovered_z, &recovered_w))
+      fail("isolated sidecar survived overwrite", 1, 0);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+}
+
 static void test_cpu_math_invariants(void)
 {
    uint32_t instr;
@@ -707,6 +788,9 @@ int main(void)
 
    printf("[T14] J keep-W modes replace only selected untextured axes\n");
    test_j_native_axis_modes();
+
+   printf("[T15] isolated J sidecar survives store/load/FIFO/CB exactly\n");
+   test_j_isolated_sidecar_transport();
 
    if (failures)
    {

@@ -1503,8 +1503,11 @@ void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Mem[Rs + Im] = Rt */
 	Validate(&CPU_reg[rt(instr)], rtVal);
-	PGXP_DiagLineageStore(instr, rtVal, addr);
 	WriteMem(&CPU_reg[rt(instr)], addr);
+	/* PGXP_DiagMemoryWrite invalidates any provenance previously attached
+	 * to this RAM word.  Install the exact source lineage only after the
+	 * architectural full-word write has completed. */
+	PGXP_DiagLineageStore(instr, rtVal, addr);
 }
 
 #if PGXP_DIAG

@@ -40,6 +40,8 @@ enum PGXP_diag_j_test_mode
 	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_XY_KEEP_W,
 	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW,
 	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW,
+	PGXP_DIAG_J_TEST_ISOLATED_ALL,
+	PGXP_DIAG_J_TEST_ISOLATED_TEXTURED,
 	PGXP_DIAG_J_TEST_COUNT
 };
 
@@ -364,7 +366,8 @@ int PGXP_DiagRecoverVertex(uint32_t value, const PGXP_value* stale,
 void PGXP_DiagTraceMFC2(uint32_t instr, PGXP_value* value);
 void PGXP_DiagTraceShift(uint32_t instr, uint32_t before, uint32_t after,
 		int arithmetic, unsigned reason, PGXP_value* value);
-void PGXP_DiagMFC2(uint32_t instr, uint32_t value);
+void PGXP_DiagMFC2(uint32_t instr, uint32_t value,
+		const PGXP_value* precise);
 void PGXP_DiagShift(uint32_t instr, uint32_t before, uint32_t after,
 		int arithmetic);
 int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
@@ -399,6 +402,8 @@ void PGXP_DiagJSetMode(unsigned mode);
 unsigned PGXP_DiagJGetMode(void);
 int PGXP_DiagJForceNative(const PGXP_value* value);
 unsigned PGXP_DiagJNativeAxisMask(const PGXP_value* value);
+int PGXP_DiagRecoverLineageVertex(unsigned slot, uint32_t value,
+		float* x, float* y, float* z, int* valid_w);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
 void PGXP_DiagGLRasterScale(unsigned internal_scale);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
@@ -450,7 +455,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagRecoverVertex(value, stale, slot, x, y, z) 0
 #define PGXP_DiagTraceMFC2(instr, value) ((void)0)
 #define PGXP_DiagTraceShift(instr, before, after, arithmetic, reason, value) ((void)0)
-#define PGXP_DiagMFC2(instr, value) ((void)0)
+#define PGXP_DiagMFC2(instr, value, precise) ((void)0)
 #define PGXP_DiagShift(instr, before, after, arithmetic) ((void)0)
 #define PGXP_DiagPreserveShift(instr, before, after, arithmetic) 0
 #define PGXP_DiagIdentityMove(dest, source, before, after) ((void)0)
@@ -475,6 +480,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagJGetMode() PGXP_DIAG_J_TEST_CURRENT
 #define PGXP_DiagJForceNative(value) 0
 #define PGXP_DiagJNativeAxisMask(value) 0u
+#define PGXP_DiagRecoverLineageVertex(slot, value, x, y, z, valid_w) 0
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
 #define PGXP_DiagGLRasterScale(internal_scale) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)

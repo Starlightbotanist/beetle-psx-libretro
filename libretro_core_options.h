@@ -1003,19 +1003,26 @@ struct retro_core_option_v2_definition option_defs_us[] = {
    },
    {
       BEETLE_OPT(pgxp_j_test),
-      "PGXP J Primitive Scope Test",
+      "PGXP J Isolated Transport Test",
       NULL,
-      "Focused test of Stack J's final SRA5 vertex consumption. Full-native modes safely decline J-derived position/W for selected untextured primitives. Keep-W modes replace only selected screen axes while retaining J's proven W. Textured geometry remains unchanged. Use with Stack B and Stack C disabled, and Stack J enabled. Restart content after changing it.",
+      "Focused replacement for Stack J's CPU-shadow mutation. Isolated modes carry an exact MFC2/SLL5/SRA5 proof beside native data and recover the original precise vertex only at GPU consumption. The textured mode refuses all untextured recovery. Use with Stack B and Stack C disabled, and Stack J enabled. Restart content after changing it.",
       NULL,
       "pgxp",
       {
          { "current",            "0: Current J (X/Y/W)" },
+#if 0
+         /* Completed late-consumption probes remain implemented and parsed
+          * for historical reproduction, but are hidden from the constrained
+          * RetroArch value list. */
          { "native flat",        "5: Native J Untextured Flat" },
          { "native gouraud",     "6: Native J Untextured Gouraud" },
          { "native untextured",  "7: J Textured Geometry Only" },
          { "native xy keep w",   "8: Native J Untextured X/Y; Keep W" },
          { "native x keep yw",   "9: Native J Untextured X; Keep Y/W" },
          { "native y keep xw",   "10: Native J Untextured Y; Keep X/W" },
+#endif
+         { "isolated all",       "11: Isolated Exact All" },
+         { "isolated textured",  "12: Isolated Exact Textured" },
          { NULL, NULL },
       },
       "current"
