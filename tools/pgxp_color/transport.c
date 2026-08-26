@@ -53,6 +53,7 @@ static uint32_t gte_pack(int32_t m1, int32_t m2, int32_t m3, uint8_t cd)
 #define INSTR_RT(rt)          (((uint32_t)(rt) & 0x1F) << 16)
 #define INSTR_RD(rd)          (((uint32_t)(rd) & 0x1F) << 11)
 #define INSTR_RS(rs)          (((uint32_t)(rs) & 0x1F) << 21)
+#define INSTR_OP(op)          (((uint32_t)(op) & 0x3F) << 26)
 
 /* Scratch addresses in tracked RAM. */
 #define LIST_ADDR   0x80100000u
@@ -381,6 +382,38 @@ static void test_nclip_magnitude(void)
       fail("NCLIP overflowed reversed minimum", 0, 1);
 }
 
+static void test_projection_provenance_transport(void)
+{
+   const uint32_t packed = pack_vertex(123, -45);
+   const uint32_t addr = 0x80105000u;
+   uint32_t instr;
+
+   PGXP_pushSXYZ2f(123.25f, -45.5f, 32768.f, packed);
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   if (!(CPU_reg[8].flags & VALID_PROJECTION))
+      fail("MFC2 lost projection provenance", 0, 1);
+
+   instr = INSTR_RS(8) | INSTR_RT(8) | INSTR_OP(0x0d) | 1u;
+   PGXP_CPU_ObserveInstruction(instr);
+   if (CPU_reg[8].flags & VALID_PROJECTION)
+      fail("untracked CPU write kept provenance", 1, 0);
+
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(8), packed, addr);
+   PGXP_CPU_LW(INSTR_OP(0x23) | INSTR_RT(9), packed, addr);
+   PGXP_CPU_ObserveInstruction(INSTR_OP(0x23) | INSTR_RT(9));
+   if (!(CPU_reg[9].flags & VALID_PROJECTION))
+      fail("full-word transport lost provenance", 0, 1);
+
+   PGXP_CPU_SWL(INSTR_OP(0x2a) | INSTR_RT(8), packed, addr);
+   if (ReadMem(addr)->flags & VALID_PROJECTION)
+      fail("partial store kept provenance", 1, 0);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -414,6 +447,9 @@ int main(void)
 
    printf("[T9] NCLIP native magnitude preservation\n");
    test_nclip_magnitude();
+
+   printf("[T10] projected-depth CPU transport\n");
+   test_projection_provenance_transport();
 
    if (failures)
    {

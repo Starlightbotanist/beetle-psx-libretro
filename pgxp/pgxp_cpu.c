@@ -15,6 +15,7 @@ PGXP_value CP0_reg_mem[32];
 
 PGXP_value* CPU_reg = CPU_reg_mem;
 PGXP_value* CP0_reg = CP0_reg_mem;
+static uint32_t projection_writes;
 
 /* Instruction register decoding */
 #define op(_instr)		(_instr >> 26)			/* The op part of the instruction register */
@@ -29,6 +30,78 @@ void PGXP_InitCPU()
 {
 	memset(CPU_reg_mem, 0, sizeof(CPU_reg_mem));
 	memset(CP0_reg_mem, 0, sizeof(CP0_reg_mem));
+	projection_writes = 0;
+}
+
+void PGXP_CPU_TrackProjectionWrite(unsigned dest)
+{
+	if (dest != 0 && dest < 32 &&
+	    (CPU_reg[dest].flags & VALID_PROJECTION) == VALID_PROJECTION)
+		projection_writes |= UINT32_C(1) << dest;
+}
+
+static int PGXP_CPU_WrittenRegister(uint32_t instr, unsigned* dest)
+{
+	uint32_t primary = op(instr);
+
+	if (primary == 0)
+	{
+		switch (func(instr))
+		{
+			case 0x00: case 0x02: case 0x03:
+			case 0x04: case 0x06: case 0x07:
+			case 0x09: case 0x10: case 0x12:
+			case 0x20: case 0x21: case 0x22: case 0x23:
+			case 0x24: case 0x25: case 0x26: case 0x27:
+			case 0x2a: case 0x2b:
+				*dest = rd(instr);
+				return 1;
+		}
+	}
+	else if (primary == 0x01)
+	{
+		uint32_t subop = rt(instr);
+		if (subop == 0x10 || subop == 0x11)
+		{
+			*dest = 31;
+			return 1;
+		}
+	}
+	else if (primary == 0x03)
+	{
+		*dest = 31;
+		return 1;
+	}
+	else if ((primary >= 0x08 && primary <= 0x0f) ||
+	         (primary >= 0x20 && primary <= 0x26))
+	{
+		*dest = rt(instr);
+		return 1;
+	}
+	else if (primary == 0x10 || primary == 0x12)
+	{
+		uint32_t cop_op = rs(instr);
+		if (cop_op == 0 || cop_op == 2)
+		{
+			*dest = rt(instr);
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+void PGXP_CPU_ObserveInstruction(uint32_t instr)
+{
+	unsigned dest;
+	uint32_t bit;
+
+	if (!PGXP_CPU_WrittenRegister(instr, &dest) || dest == 0)
+		return;
+	bit = UINT32_C(1) << dest;
+	if (!(projection_writes & bit))
+		CPU_reg[dest].flags &= ~VALID_PROJECTION;
+	projection_writes &= ~bit;
 }
 
 /* invalidate register (invalid 8 bit read) */
@@ -1342,6 +1415,8 @@ void PGXP_CPU_LW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Rt = Mem[Rs + Im] */
 	ValidateAndCopyMem(&CPU_reg[rt(instr)], addr, rtVal);
+	if (op(instr) == 0x23)
+		PGXP_CPU_TrackProjectionWrite(rt(instr));
 }
 
 void PGXP_CPU_LWR(uint32_t instr, uint32_t rtVal, uint32_t addr)
@@ -1389,8 +1464,13 @@ void PGXP_CPU_SWL(uint32_t instr, uint32_t rtVal, uint32_t addr)
 void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Mem[Rs + Im] = Rt */
+	PGXP_value value;
+
 	Validate(&CPU_reg[rt(instr)], rtVal);
-	WriteMem(&CPU_reg[rt(instr)], addr);
+	value = CPU_reg[rt(instr)];
+	if (op(instr) != 0x2b)
+		value.flags &= ~VALID_PROJECTION;
+	WriteMem(&value, addr);
 }
 
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)

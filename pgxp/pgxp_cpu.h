@@ -40,6 +40,8 @@ extern PGXP_value* CP0_reg;
 #define CPU_Lo CPU_reg[34]
 
 void PGXP_InitCPU();
+void PGXP_CPU_TrackProjectionWrite(unsigned dest);
+void PGXP_CPU_ObserveInstruction(uint32_t instr);
 
 // -- CPU functions
 

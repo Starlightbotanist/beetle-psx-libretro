@@ -297,6 +297,7 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 
 	if (dest)
 	{
+		dest->flags &= ~VALID_PROJECTION;
 		/* Load dest->value into a local psx_value, manipulate, store
 		 * back.  The previous code aliased dest->value (a u32) through
 		 * a psx_value pointer, which is a strict-aliasing violation
