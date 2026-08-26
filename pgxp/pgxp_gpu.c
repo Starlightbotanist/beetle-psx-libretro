@@ -638,6 +638,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	enum PGXP_diag_vertex_source source = PGXP_DIAG_VERTEX_NATIVE;
 	int valid_xy;
 	int value_match;
+	int force_native;
 
 	/* The GP0 vertex word packs sy in the high 16 bits and sx in
 	 * the low 16 bits.  Unpack with shifts on the u32 rather than
@@ -648,8 +649,9 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	int16_t psxY = (int16_t)(psxWord >> 16);
 	valid_xy = vert && ((vert->flags & VALID_01) == VALID_01);
 	value_match = vert && (vert->value == psxWord);
+	force_native = PGXP_DiagJForceNative(vert);
 
-	if (valid_xy && value_match)
+	if (!force_native && valid_xy && value_match)
 	{
 		source = PGXP_DIAG_VERTEX_TRACKED;
 		/* There is a value here with valid X and Y coordinates */
@@ -685,7 +687,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		 * return is already fully validated - current generation,
 		 * unambiguous - so there is no flag test to repeat here. */
 		PGXP_cache_entry* cache_vert;
-		if (PGXP_DiagRecoverVertex(psxWord, vert, offset, &recovered_x,
+		if (!force_native &&
+		    PGXP_DiagRecoverVertex(psxWord, vert, offset, &recovered_x,
 		    &recovered_y, &recovered_z))
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
@@ -695,7 +698,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			pOutput->w = PGXP_NormalizeVertexW(recovered_z);
 			pOutput->valid_w = 1;
 		}
-		else if ((cache_vert = PGXP_GetCachedVertex(psxX, psxY)) != NULL)
+		else if (!force_native &&
+		         (cache_vert = PGXP_GetCachedVertex(psxX, psxY)) != NULL)
 		{
 			source = PGXP_DIAG_VERTEX_CACHE;
 			/* a value is found, it is from the current session and is unambiguous (there was only one value recorded at that position) */

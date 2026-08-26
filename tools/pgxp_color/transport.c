@@ -362,6 +362,41 @@ static void test_j_projection_handoff_modes(void)
    PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
 }
 
+static void test_j_primitive_scope_modes(void)
+{
+   PGXP_value shadow = PGXP_value_zero;
+
+   PGXP_DiagTraceGTE(&shadow);
+   shadow.trace_stage = PGXP_TRACE_SRA5;
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT);
+   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
+   if (!PGXP_DiagJForceNative(&shadow))
+      fail("J flat scope missed flat polygon", 0, 1);
+   PGXP_DiagPacket(0x30, 6, 0, 0, 0);
+   if (PGXP_DiagJForceNative(&shadow))
+      fail("J flat scope rejected Gouraud", 1, 0);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD);
+   if (!PGXP_DiagJForceNative(&shadow))
+      fail("J Gouraud scope missed Gouraud", 0, 1);
+   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
+   if (PGXP_DiagJForceNative(&shadow))
+      fail("J Gouraud scope rejected flat", 1, 0);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL);
+   if (!PGXP_DiagJForceNative(&shadow))
+      fail("J textured-only missed untextured", 0, 1);
+   PGXP_DiagPacket(0x24, 7, 0, 0, 0);
+   if (PGXP_DiagJForceNative(&shadow))
+      fail("J textured-only rejected textured", 1, 0);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
+   PGXP_DiagPacket(0x20, 4, 0, 0, 0);
+   if (PGXP_DiagJForceNative(&shadow))
+      fail("current J unexpectedly rejected vertex", 1, 0);
+}
+
 static void test_cpu_math_invariants(void)
 {
    uint32_t instr;
@@ -611,6 +646,9 @@ int main(void)
 
    printf("[T12] J projection handoff modes preserve XY and gate W\n");
    test_j_projection_handoff_modes();
+
+   printf("[T13] J primitive scope modes reject only selected SRA5 vertices\n");
+   test_j_primitive_scope_modes();
 
    if (failures)
    {

@@ -34,6 +34,9 @@ enum PGXP_diag_j_test_mode
 	PGXP_DIAG_J_TEST_ALL_XY_ONLY,
 	PGXP_DIAG_J_TEST_FINAL_ONLY,
 	PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY,
+	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT,
+	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD,
+	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL,
 	PGXP_DIAG_J_TEST_COUNT
 };
 
@@ -385,6 +388,7 @@ void PGXP_DiagGLSetMode(unsigned mode);
 unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagJSetMode(unsigned mode);
 unsigned PGXP_DiagJGetMode(void);
+int PGXP_DiagJForceNative(const PGXP_value* value);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
 void PGXP_DiagGLRasterScale(unsigned internal_scale);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
@@ -459,6 +463,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
 #define PGXP_DiagJSetMode(mode) ((void)0)
 #define PGXP_DiagJGetMode() PGXP_DIAG_J_TEST_CURRENT
+#define PGXP_DiagJForceNative(value) 0
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
 #define PGXP_DiagGLRasterScale(internal_scale) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)

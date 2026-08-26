@@ -1005,7 +1005,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(pgxp_j_test),
       "PGXP J Projection Handoff Test",
       NULL,
-      "Focused test of Stack J's traced shift handoff. XY-only modes preserve precise X/Y but withhold W. Final-only modes keep X/Y dormant at the SLL5 intermediate and restore it only after the exact SRA5 inverse. Use with Stack B and Stack C disabled, and Stack J enabled. Restart content after changing it.",
+      "Focused test of Stack J's traced shift handoff. XY-only modes preserve precise X/Y but withhold W. Final-only modes keep X/Y dormant until the exact SRA5 inverse. Native-untextured modes safely decline only J-derived SRA5 precision for the selected untextured primitive class while retaining J for textured geometry. Use with Stack B and Stack C disabled, and Stack J enabled. Restart content after changing it.",
       NULL,
       "pgxp",
       {
@@ -1014,6 +1014,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "all shifts xy-only", "2: All J Shifts X/Y Only" },
          { "final only",         "3: J Final SRA5 Only" },
          { "final xy-only",      "4: Final SRA5 X/Y Only" },
+         { "native flat",        "5: Native J Untextured Flat" },
+         { "native gouraud",     "6: Native J Untextured Gouraud" },
+         { "native untextured",  "7: J Textured Geometry Only" },
          { NULL, NULL },
       },
       "current"

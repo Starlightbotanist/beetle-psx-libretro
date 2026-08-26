@@ -494,6 +494,8 @@ typedef struct
 	uint64_t lineage_w_suppressed_sra5;
 	uint64_t lineage_xy_deferred_sll5;
 	uint64_t lineage_xy_restored_sra5;
+	uint64_t lineage_native_untextured_flat;
+	uint64_t lineage_native_untextured_gouraud;
 	uint64_t lineage_shift_blocked;
 	uint64_t lineage_identity_candidates;
 	uint64_t lineage_identity_matches;
@@ -1128,6 +1130,8 @@ unsigned PGXP_DiagGLGetMode(void)
 	return gl_repair_mode;
 }
 
+static int trace_metadata_valid(const PGXP_value* value);
+
 static const char* pgxp_diag_j_mode_name(unsigned mode)
 {
 	static const char* const names[PGXP_DIAG_J_TEST_COUNT] = {
@@ -1135,7 +1139,10 @@ static const char* pgxp_diag_j_mode_name(unsigned mode)
 		"sra-xy-only",
 		"all-shifts-xy-only",
 		"final-only",
-		"final-only-xy-only"
+		"final-only-xy-only",
+		"native-untextured-flat",
+		"native-untextured-gouraud",
+		"native-untextured-all"
 	};
 	return mode < PGXP_DIAG_J_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -1156,6 +1163,48 @@ void PGXP_DiagJSetMode(unsigned mode)
 unsigned PGXP_DiagJGetMode(void)
 {
 	return j_test_mode;
+}
+
+int PGXP_DiagJForceNative(const PGXP_value* value)
+{
+	int textured;
+	int gouraud;
+	int reject = 0;
+
+	/* J's final SRA5 handoff improves Spyro's textured ground, but matched
+	 * device logs show that it increases untextured shared-edge disagreement
+	 * by an order of magnitude.  These modes safely decline only J-derived
+	 * precision at consumption time: they never substitute another vertex. */
+	if (!trace_metadata_valid(value) ||
+	    value->trace_stage != PGXP_TRACE_SRA5)
+		return 0;
+	textured = (current_opcode & 0x04) != 0;
+	gouraud = (current_opcode & 0x10) != 0;
+	if (textured)
+		return 0;
+
+	switch (j_test_mode)
+	{
+		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT:
+			reject = !gouraud;
+			break;
+		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD:
+			reject = gouraud;
+			break;
+		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL:
+			reject = 1;
+			break;
+		default:
+			break;
+	}
+	if (reject)
+	{
+		if (gouraud)
+			window.lineage_native_untextured_gouraud++;
+		else
+			window.lineage_native_untextured_flat++;
+	}
+	return reject;
 }
 
 static int trace_metadata_valid(const PGXP_value* value)
@@ -7493,7 +7542,8 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
 		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
-		"w_suppressed=%llu/%llu xy_deferred=%llu/%llu j_mode=%u "
+		"w_suppressed=%llu/%llu xy_deferred=%llu/%llu "
+		"native_untextured=%llu/%llu j_mode=%u "
 		"blocked=%llu/%llu identity=%llu/%llu/%llu drops=%llu transforms=%llu "
 		"store=%llu/%llu fifo=%llu\n",
 		(unsigned long long)frame_number,
@@ -7508,6 +7558,8 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_w_suppressed_sra5,
 		(unsigned long long)window.lineage_xy_deferred_sll5,
 		(unsigned long long)window.lineage_xy_restored_sra5,
+		(unsigned long long)window.lineage_native_untextured_flat,
+		(unsigned long long)window.lineage_native_untextured_gouraud,
 		j_test_mode,
 		(unsigned long long)window.lineage_shift_blocked,
 		(unsigned long long)window.lineage_identity_blocked,

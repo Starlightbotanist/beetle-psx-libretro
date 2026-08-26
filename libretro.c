@@ -4819,6 +4819,12 @@ static void check_variables(bool startup)
                j_test_mode = PGXP_DIAG_J_TEST_FINAL_ONLY;
             else if (strcmp(var.value, "final xy-only") == 0)
                j_test_mode = PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY;
+            else if (strcmp(var.value, "native flat") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT;
+            else if (strcmp(var.value, "native gouraud") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD;
+            else if (strcmp(var.value, "native untextured") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL;
          }
          PGXP_DiagJSetMode(j_test_mode);
       }
