@@ -78,7 +78,6 @@ extern int   psx_hdr_multipass;
  * completes. Non-zero = a 30-bit/HDR format was requested. */
 extern int   psx_color_format;
 #ifdef ANDROID
-extern char retro_save_directory[4096];
 extern char retro_base_directory[4096];
 #endif
 
@@ -15923,14 +15922,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    static bool device_pipeline_cache_build_path(char *path,
          size_t path_size, bool create_dir)
    {
-      const char *root = retro_save_directory[0] != '\0'
-         ? retro_save_directory : retro_base_directory;
+      const char *root = retro_base_directory;
       char cache_dir[PATH_MAX_LENGTH];
       size_t needed;
 
       if (!root || root[0] == '\0')
       {
-         LOGI("[Vulkan pipeline cache] persistence disabled: no writable frontend directory\n");
+         LOGI("[Vulkan pipeline cache] persistence disabled: no writable system directory\n");
          return false;
       }
 
