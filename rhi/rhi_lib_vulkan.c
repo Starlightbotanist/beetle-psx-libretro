@@ -6001,7 +6001,9 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_hd_texture_uniforms(Renderer *self,
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
+#ifdef ANDROID
    static void renderer_warm_up_primitive_pipelines(Renderer *self);
+#endif
    static void renderer_flush_blit(Renderer *self,
          const BlitInfoVec *infos,
          Program *program,
@@ -6776,6 +6778,7 @@ static void renderer_init(Renderer *self,
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
+#ifdef ANDROID
    /* Compile the common primitive variants before the first emulated frame.
     * Android drivers can spend ~160 ms in vkCreateGraphicsPipelines for each
     * one, so allowing demand creation here produces visible gameplay stalls. */
@@ -6785,6 +6788,7 @@ static void renderer_init(Renderer *self,
       memset(&clear_zero, 0, sizeof(clear_zero));
       commandbuffer_clear_image(cbh_get(&self->cmd), ih_get(&self->scaled_framebuffer), &clear_zero);
    }
+#endif
    renderer_flush(self);
    renderer_reset_scissor_queue(self);
 
@@ -9624,6 +9628,27 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    }
 }
 
+#ifdef ANDROID
+static void renderer_warm_up_textured_batch_variant(
+      BufferVertexVec *vertices,
+      PrimitiveInfoVec *scissors,
+      unsigned shift,
+      bool offset_uv)
+{
+   BufferVertex vertex;
+   PrimitiveInfo info;
+   unsigned i;
+
+   memset(&vertex, 0, sizeof(vertex));
+   vertex.z = 0.5f;
+   vertex.w = 1.0f;
+   info = primitive_info_make(PrimitiveInfoVec_size(scissors), -1,
+         hd_handle_make_none(), false, false, shift, offset_uv);
+   for (i = 0; i < 3; i++)
+      BufferVertexVec_push(vertices, &vertex);
+   PrimitiveInfoVec_push(scissors, &info);
+}
+
 static void renderer_warm_up_primitive_pipelines(Renderer *self)
 {
    static const SemiTransparentMode modes[] = {
@@ -9661,6 +9686,42 @@ static void renderer_warm_up_primitive_pipelines(Renderer *self)
          variants++;
       }
 
+      /* Opaque textured primitives do not use the serialized blend queue, so
+       * the generic semi-transparent warmup below never reaches their exact
+       * pipeline state. Texture depth selects shift 0, 1, or 2, while scaled
+       * UV offset independently selects its specialization bit. Exercise the
+       * six combinations against both compatible render passes. A feedback
+       * pass can contain ordinary opaque draws alongside the primitive that
+       * caused feedback, so both compatibility keys occur during gameplay. */
+      {
+         unsigned shift;
+         for (shift = 0; shift < 3; shift++)
+         {
+            unsigned offset_uv;
+            for (offset_uv = 0; offset_uv < 2; offset_uv++)
+            {
+               renderer_warm_up_textured_batch_variant(
+                     &self->queue.opaque_textured,
+                     &self->queue.opaque_textured_scissor,
+                     shift, offset_uv != 0);
+               variants++;
+
+               /* Textured semi-transparent primitives are first rendered by
+                * the opaque-texture program with TransMode_SemiTransOpaque,
+                * then by the ordered blend path. They necessarily make this
+                * a feedback pass. */
+               if (feedback)
+               {
+                  renderer_warm_up_textured_batch_variant(
+                        &self->queue.semi_transparent_opaque,
+                        &self->queue.semi_transparent_opaque_scissor,
+                        shift, offset_uv != 0);
+                  variants++;
+               }
+            }
+         }
+      }
+
       for (textured = 0; textured < 2; textured++)
       {
          unsigned scaled_read;
@@ -9690,6 +9751,49 @@ static void renderer_warm_up_primitive_pipelines(Renderer *self)
          }
       }
 
+      /* A feedback-compatible pass also contains unmasked textured draws.
+       * The original feedback warmup deliberately set masked=true, selecting
+       * the programmable-blend shaders for the four translucent modes. Real
+       * frames mix those with the ordinary textured shader, whose shift and
+       * UV-offset variants were consequently still first-created in gameplay
+       * (19-34 ms on Adreno 740). Warm the complete six-value specialization
+       * set here; all other observed runtime pipelines are already below one
+       * 60 Hz frame. */
+      if (feedback)
+      {
+         unsigned shift;
+         for (shift = 0; shift < 3; shift++)
+         {
+            unsigned offset_uv;
+            for (offset_uv = 0; offset_uv < 2; offset_uv++)
+            {
+               unsigned mode;
+               for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
+               {
+                  SemiTransparentState state;
+                  BufferVertex vertex;
+                  unsigned i;
+                  memset(&state, 0, sizeof(state));
+                  state.scissor_index = -1;
+                  state.semi_transparent = modes[mode];
+                  state.textured = true;
+                  state.shift = shift;
+                  state.offset_uv = offset_uv != 0;
+                  SemiTransparentStateVec_push(
+                        &self->queue.semi_transparent_state, &state);
+
+                  memset(&vertex, 0, sizeof(vertex));
+                  vertex.z = 0.5f;
+                  vertex.w = 1.0f;
+                  for (i = 0; i < 3; i++)
+                     BufferVertexVec_push(
+                           &self->queue.semi_transparent, &vertex);
+                  variants++;
+               }
+            }
+         }
+      }
+
       renderer_flush_render_pass(self, &rect);
    }
 
@@ -9709,6 +9813,7 @@ static void renderer_warm_up_primitive_pipelines(Renderer *self)
          (unsigned long long)driver_cache_bytes);
    }
 }
+#endif
 
 static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       bool scaled_read,
