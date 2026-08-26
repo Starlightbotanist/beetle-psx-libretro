@@ -5988,6 +5988,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_hd_texture_uniforms(Renderer *self,
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
+   static void renderer_warm_up_primitive_pipelines(Renderer *self);
    static void renderer_flush_blit(Renderer *self,
          const BlitInfoVec *infos,
          Program *program,
@@ -6756,6 +6757,15 @@ static void renderer_init(Renderer *self,
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
+   /* Compile the common primitive variants before the first emulated frame.
+    * Android drivers can spend ~160 ms in vkCreateGraphicsPipelines for each
+    * one, so allowing demand creation here produces visible gameplay stalls. */
+   renderer_warm_up_primitive_pipelines(self);
+   {
+      VkClearValue clear_zero;
+      memset(&clear_zero, 0, sizeof(clear_zero));
+      commandbuffer_clear_image(cbh_get(&self->cmd), ih_get(&self->scaled_framebuffer), &clear_zero);
+   }
    renderer_flush(self);
    renderer_reset_scissor_queue(self);
 
@@ -9593,6 +9603,64 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    renderer_reset_queue(self);
    }
    }
+}
+
+static void renderer_warm_up_primitive_pipelines(Renderer *self)
+{
+   static const SemiTransparentMode modes[] = {
+      SemiTransparentMode_None,
+      SemiTransparentMode_Average,
+      SemiTransparentMode_Add,
+      SemiTransparentMode_Sub,
+      SemiTransparentMode_AddQuarter
+   };
+   TTRect rect = { 0, 0, 1, 1 };
+   unsigned feedback;
+   retro_time_t start_usec = cpu_features_get_time_usec();
+   unsigned variants = 0;
+
+   /* A normal and an input-attachment-compatible render pass have distinct
+    * Vulkan compatibility keys. Exercise both, using the same queue and state
+    * setters as real draws so the resulting hashes cannot drift from runtime. */
+   for (feedback = 0; feedback < 2; feedback++)
+   {
+      unsigned textured;
+      self->render_pass_is_feedback = feedback != 0;
+      for (textured = 0; textured < 2; textured++)
+      {
+         unsigned scaled_read;
+         for (scaled_read = 0; scaled_read < 2; scaled_read++)
+         {
+            unsigned mode;
+            for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
+            {
+               SemiTransparentState state;
+               BufferVertex vertex;
+               unsigned i;
+               memset(&state, 0, sizeof(state));
+               state.scissor_index = -1;
+               state.semi_transparent = modes[mode];
+               state.textured = textured != 0;
+               state.masked = feedback != 0;
+               state.scaled_read = scaled_read != 0;
+               SemiTransparentStateVec_push(&self->queue.semi_transparent_state, &state);
+
+               memset(&vertex, 0, sizeof(vertex));
+               vertex.z = 0.5f;
+               vertex.w = 1.0f;
+               for (i = 0; i < 3; i++)
+                  BufferVertexVec_push(&self->queue.semi_transparent, &vertex);
+               variants++;
+            }
+         }
+      }
+
+      renderer_flush_render_pass(self, &rect);
+   }
+
+   LOGI("[Vulkan pipeline warmup] variants=%u elapsed_us=%lld\n",
+         variants,
+         (long long)(cpu_features_get_time_usec() - start_usec));
 }
 
 static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
