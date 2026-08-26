@@ -600,6 +600,14 @@ static inline float PGXP_WrapVertexPosition(float position)
 	return (float)wrapped + (position - (float)integer);
 }
 
+/* Projected depth is stored in 15-bit fixed-point scale.  Homogeneous
+ * division removes a common scale factor, so normalize W before handing the
+ * vertex to the host rasterizer. */
+static inline float PGXP_NormalizeVertexW(float z)
+{
+	return z * (1.0f / 32768.0f);
+}
+
 int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutput, int xOffs, int yOffs)
 {
 	PGXP_value* vert = PGXP_ReadCB(offset);          /* pointer to vertex */
@@ -618,7 +626,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		pOutput->x = PGXP_WrapVertexPosition(vert->x) + xOffs;
 		pOutput->y = PGXP_WrapVertexPosition(vert->y) + yOffs;
 		pOutput->z = 0.95f;
-		pOutput->w = vert->z;
+		pOutput->w = PGXP_NormalizeVertexW(vert->z);
 		pOutput->valid_w = 1;
 
 		if ((vert->flags & VALID_2) != VALID_2)
@@ -641,7 +649,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			pOutput->x = PGXP_WrapVertexPosition(cache_vert->x) + xOffs;
 			pOutput->y = PGXP_WrapVertexPosition(cache_vert->y) + yOffs;
 			pOutput->z = 0.95f;
-			pOutput->w = cache_vert->z;
+			pOutput->w = PGXP_NormalizeVertexW(cache_vert->z);
 			pOutput->valid_w = 0;	/* iCB: Getting the wrong w component causes too great an error when using perspective correction so disable it */
 		}
 		else

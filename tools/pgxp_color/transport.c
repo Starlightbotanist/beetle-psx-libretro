@@ -340,6 +340,8 @@ static void test_vertex_offset_ordering(void)
    PGXP_GetVertex(0, &word, &vertex, 10, -10);
    if (vertex.x != 1030.5f || vertex.y != -1030.25f)
       fail("tracked vertex offset was re-wrapped", 1, 0);
+   if (!vertex.valid_w || vertex.w != 1.f / 32768.f)
+      fail("tracked vertex W was not normalized", vertex.valid_w, 1);
 
    word = pack_vertex(1020, -1020);
    PGXP_WriteCB(&untracked, 1);
