@@ -317,6 +317,37 @@ static void test_cpu_comparison_ordering(void)
       fail("SLT did not compare equal-high low halves", 0, 1);
 }
 
+static uint32_t pack_vertex(int16_t x, int16_t y)
+{
+   return (uint32_t)(uint16_t)x | ((uint32_t)(uint16_t)y << 16);
+}
+
+static void test_vertex_offset_ordering(void)
+{
+   PGXP_value tracked = PGXP_value_zero;
+   PGXP_value untracked = PGXP_value_zero;
+   OGLVertex vertex;
+   uint32_t word;
+
+   word = pack_vertex(100, -100);
+   tracked.x = 1020.5f;
+   tracked.y = -1020.25f;
+   tracked.z = 1.f;
+   tracked.value = word;
+   tracked.flags = VALID_012;
+   PGXP_WriteCB(&tracked, 0);
+
+   PGXP_GetVertex(0, &word, &vertex, 10, -10);
+   if (vertex.x != 1030.5f || vertex.y != -1030.25f)
+      fail("tracked vertex offset was re-wrapped", 1, 0);
+
+   word = pack_vertex(1020, -1020);
+   PGXP_WriteCB(&untracked, 1);
+   PGXP_GetVertex(1, &word, &vertex, 10, -10);
+   if (vertex.x != 1030.f || vertex.y != -1030.f)
+      fail("native vertex offset was re-wrapped", 1, 0);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -344,6 +375,9 @@ int main(void)
 
    printf("[T7] CPU comparison ordering\n");
    test_cpu_comparison_ordering();
+
+   printf("[T8] vertex offset ordering\n");
+   test_vertex_offset_ordering();
 
    if (failures)
    {
