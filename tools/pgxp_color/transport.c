@@ -270,6 +270,28 @@ static void test_untracked_colour(void)
       fail("untracked colour accepted from stale shadow", 0, 0);
 }
 
+static void set_cpu_value(unsigned reg, uint32_t value)
+{
+   CPU_reg[reg] = PGXP_value_zero;
+   SetValue(&CPU_reg[reg], value);
+}
+
+static void test_cpu_result_initialization(void)
+{
+   uint32_t instr;
+
+   set_cpu_value(1, 0x12345678u);
+   set_cpu_value(2, 0x00FF0F0Fu);
+   CPU_reg[1].gFlags = 0xFFFFu;
+   CPU_reg[1].count = 0xDEADBEEFu;
+
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x24u;
+   PGXP_CPU_AND(instr, 0x00340608u, 0x12345678u, 0x00FF0F0Fu);
+
+   if (CPU_reg[3].count != 0 || CPU_reg[3].gFlags != 0)
+      fail("AND result metadata not initialized", CPU_reg[3].count, 0);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -291,6 +313,9 @@ int main(void)
 
    printf("[T5] negative control: CPU-composed colour must be refused\n");
    test_untracked_colour();
+
+   printf("[T6] CPU result initialization\n");
+   test_cpu_result_initialization();
 
    if (failures)
    {
