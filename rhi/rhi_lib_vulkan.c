@@ -116,6 +116,7 @@ extern PFN_vkCreateFramebuffer vkCreateFramebuffer;
 extern PFN_vkCreateGraphicsPipelines vkCreateGraphicsPipelines;
 extern PFN_vkCreateImage vkCreateImage;
 extern PFN_vkCreateImageView vkCreateImageView;
+extern PFN_vkCreatePipelineCache vkCreatePipelineCache;
 extern PFN_vkCreatePipelineLayout vkCreatePipelineLayout;
 extern PFN_vkCreateRenderPass vkCreateRenderPass;
 extern PFN_vkCreateSampler vkCreateSampler;
@@ -132,6 +133,7 @@ extern PFN_vkDestroyFramebuffer vkDestroyFramebuffer;
 extern PFN_vkDestroyImage vkDestroyImage;
 extern PFN_vkDestroyImageView vkDestroyImageView;
 extern PFN_vkDestroyPipeline vkDestroyPipeline;
+extern PFN_vkDestroyPipelineCache vkDestroyPipelineCache;
 extern PFN_vkDestroyPipelineLayout vkDestroyPipelineLayout;
 extern PFN_vkDestroyRenderPass vkDestroyRenderPass;
 extern PFN_vkDestroySampler vkDestroySampler;
@@ -151,6 +153,7 @@ extern PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements;
 extern PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 extern PFN_vkGetDeviceQueue vkGetDeviceQueue;
 extern PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
+extern PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
 extern PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 extern PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 extern PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -267,6 +270,7 @@ static void volkGenLoadDevice(void* context,
    vkCreateGraphicsPipelines = (PFN_vkCreateGraphicsPipelines)load(context, "vkCreateGraphicsPipelines");
    vkCreateImage = (PFN_vkCreateImage)load(context, "vkCreateImage");
    vkCreateImageView = (PFN_vkCreateImageView)load(context, "vkCreateImageView");
+   vkCreatePipelineCache = (PFN_vkCreatePipelineCache)load(context, "vkCreatePipelineCache");
    vkCreatePipelineLayout = (PFN_vkCreatePipelineLayout)load(context, "vkCreatePipelineLayout");
    vkCreateRenderPass = (PFN_vkCreateRenderPass)load(context, "vkCreateRenderPass");
    vkCreateSampler = (PFN_vkCreateSampler)load(context, "vkCreateSampler");
@@ -283,6 +287,7 @@ static void volkGenLoadDevice(void* context,
    vkDestroyImage = (PFN_vkDestroyImage)load(context, "vkDestroyImage");
    vkDestroyImageView = (PFN_vkDestroyImageView)load(context, "vkDestroyImageView");
    vkDestroyPipeline = (PFN_vkDestroyPipeline)load(context, "vkDestroyPipeline");
+   vkDestroyPipelineCache = (PFN_vkDestroyPipelineCache)load(context, "vkDestroyPipelineCache");
    vkDestroyPipelineLayout = (PFN_vkDestroyPipelineLayout)load(context, "vkDestroyPipelineLayout");
    vkDestroyRenderPass = (PFN_vkDestroyRenderPass)load(context, "vkDestroyRenderPass");
    vkDestroySampler = (PFN_vkDestroySampler)load(context, "vkDestroySampler");
@@ -296,6 +301,7 @@ static void volkGenLoadDevice(void* context,
    vkGetBufferMemoryRequirements = (PFN_vkGetBufferMemoryRequirements)load(context, "vkGetBufferMemoryRequirements");
    vkGetDeviceQueue = (PFN_vkGetDeviceQueue)load(context, "vkGetDeviceQueue");
    vkGetImageMemoryRequirements = (PFN_vkGetImageMemoryRequirements)load(context, "vkGetImageMemoryRequirements");
+   vkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)load(context, "vkGetPipelineCacheData");
    vkInvalidateMappedMemoryRanges = (PFN_vkInvalidateMappedMemoryRanges)load(context, "vkInvalidateMappedMemoryRanges");
    vkMapMemory = (PFN_vkMapMemory)load(context, "vkMapMemory");
    vkQueueSubmit = (PFN_vkQueueSubmit)load(context, "vkQueueSubmit");
@@ -365,6 +371,7 @@ PFN_vkCreateFramebuffer vkCreateFramebuffer;
 PFN_vkCreateGraphicsPipelines vkCreateGraphicsPipelines;
 PFN_vkCreateImage vkCreateImage;
 PFN_vkCreateImageView vkCreateImageView;
+PFN_vkCreatePipelineCache vkCreatePipelineCache;
 PFN_vkCreatePipelineLayout vkCreatePipelineLayout;
 PFN_vkCreateRenderPass vkCreateRenderPass;
 PFN_vkCreateSampler vkCreateSampler;
@@ -381,6 +388,7 @@ PFN_vkDestroyFramebuffer vkDestroyFramebuffer;
 PFN_vkDestroyImage vkDestroyImage;
 PFN_vkDestroyImageView vkDestroyImageView;
 PFN_vkDestroyPipeline vkDestroyPipeline;
+PFN_vkDestroyPipelineCache vkDestroyPipelineCache;
 PFN_vkDestroyPipelineLayout vkDestroyPipelineLayout;
 PFN_vkDestroyRenderPass vkDestroyRenderPass;
 PFN_vkDestroySampler vkDestroySampler;
@@ -400,6 +408,7 @@ PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements;
 PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 PFN_vkGetDeviceQueue vkGetDeviceQueue;
 PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
+PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
 PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -4690,6 +4699,9 @@ static void cbh_move(struct CommandBufferHandle *dst,
          VkQueue graphics_queue;
          VkQueue compute_queue;
          VkQueue transfer_queue;
+         /* Shared driver compiler cache. It is intentionally memory-only for
+          * this first-run checkpoint; persistence can reuse the same object. */
+         VkPipelineCache pipeline_cache;
 
          uint64_t cookie;
 
@@ -4925,6 +4937,7 @@ static void *device_map_host_buffer(Device *self, const Buffer *buffer, MemoryAc
 static void device_unmap_host_buffer(Device *self, const Buffer *buffer, MemoryAccessFlags access) { deviceallocator_unmap_memory(&self->managers.memory, buffer_get_allocation(buffer), access); }
 static ImageView *device_get_transient_attachment(Device *self, unsigned width, unsigned height, VkFormat format, unsigned index, unsigned samples, unsigned layers) { return attachment_allocator_request_attachment(&self->transient_allocator, width, height, format, index, samples, layers); }
 static VkDevice device_get_device(Device *self) { return self->device; }
+static VkPipelineCache device_get_pipeline_cache(Device *self) { return self->pipeline_cache; }
 static const VkPhysicalDeviceProperties *device_get_gpu_properties(Device *self) { return &self->gpu_props; }
 static const Sampler *device_get_stock_sampler(Device *self, StockSampler sampler) { return smh_get(&self->samplers[(unsigned)(sampler)]); }
 static const ImplementationWorkarounds *device_get_workarounds(Device *self) { return &self->workarounds; }
@@ -9680,9 +9693,21 @@ static void renderer_warm_up_primitive_pipelines(Renderer *self)
       renderer_flush_render_pass(self, &rect);
    }
 
-   LOGI("[Vulkan pipeline warmup] variants=%u elapsed_us=%lld\n",
+   {
+      size_t driver_cache_bytes = 0;
+      VkPipelineCache driver_cache = device_get_pipeline_cache(self->device);
+      VkResult cache_result = driver_cache != VK_NULL_HANDLE
+         ? vkGetPipelineCacheData(
+               device_get_device(self->device),
+               driver_cache,
+               &driver_cache_bytes, NULL)
+         : VK_ERROR_INITIALIZATION_FAILED;
+      LOGI("[Vulkan pipeline warmup] variants=%u elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
          variants,
-         (long long)(cpu_features_get_time_usec() - start_usec));
+         (long long)(cpu_features_get_time_usec() - start_usec),
+         (int)cache_result,
+         (unsigned long long)driver_cache_bytes);
+   }
 }
 
 static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
@@ -14258,7 +14283,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
 
       start_usec = cpu_features_get_time_usec();
-      res = vkCreateComputePipelines(device_get_device(self->device), VK_NULL_HANDLE, 1, &info, NULL, &compute_pipeline);
+      res = vkCreateComputePipelines(device_get_device(self->device),
+            device_get_pipeline_cache(self->device), 1, &info, NULL, &compute_pipeline);
       elapsed_usec = cpu_features_get_time_usec() - start_usec;
       LOGI("[Vulkan pipeline diagnostic] compute_pipeline cache=miss program=%016llx pipeline=%016llx result=%d elapsed_us=%lld\n",
             (unsigned long long)self->current_program->intrusive_node.key,
@@ -14440,14 +14466,24 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
 
       start_usec = cpu_features_get_time_usec();
-      res = vkCreateGraphicsPipelines(device_get_device(self->device), VK_NULL_HANDLE, 1, &pipe, NULL, &pipeline);
+      res = vkCreateGraphicsPipelines(device_get_device(self->device),
+            device_get_pipeline_cache(self->device), 1, &pipe, NULL, &pipeline);
       elapsed_usec = cpu_features_get_time_usec() - start_usec;
-      LOGI("[Vulkan pipeline diagnostic] graphics_pipeline cache=miss program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u stages=%u result=%d elapsed_us=%lld\n",
+      LOGI("[Vulkan pipeline diagnostic] graphics_pipeline cache=miss program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u stages=%u result=%d elapsed_us=%lld state=%08x:%08x:%08x:%08x spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
             (unsigned long long)self->current_program->intrusive_node.key,
             (unsigned long long)hash,
             (unsigned long long)self->compatible_render_pass->intrusive_node.key,
             self->current_subpass, num_stages, (int)res,
-            (long long)elapsed_usec);
+            (long long)elapsed_usec,
+            self->static_state.words[0], self->static_state.words[1],
+            self->static_state.words[2], self->static_state.words[3],
+            pipeline_layout_get_resource_layout(self->current_layout)->combined_spec_constant_mask &
+               self->static_state.state.spec_constant_mask,
+            self->potential_static_state.spec_constants[0], self->potential_static_state.spec_constants[1],
+            self->potential_static_state.spec_constants[2], self->potential_static_state.spec_constants[3],
+            self->potential_static_state.spec_constants[4], self->potential_static_state.spec_constants[5],
+            self->potential_static_state.spec_constants[6], self->potential_static_state.spec_constants[7],
+            self->potential_static_state.spec_constants[8], self->potential_static_state.spec_constants[9]);
       if (res != VK_SUCCESS)
          LOGE("Failed to create graphics pipeline!\n");
 
@@ -15750,6 +15786,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->graphics_queue = VK_NULL_HANDLE;
       self->compute_queue  = VK_NULL_HANDLE;
       self->transfer_queue = VK_NULL_HANDLE;
+      self->pipeline_cache = VK_NULL_HANDLE;
       self->cookie         = 0;
       self->frame_context_index         = 0;
       self->graphics_queue_family_index = 0;
@@ -15828,6 +15865,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       framebuffer_allocator_deinit(&self->framebuffer_allocator);
       attachment_allocator_deinit(&self->transient_allocator);
       program_map_deinit(&self->programs);
+      if (self->pipeline_cache != VK_NULL_HANDLE)
+      {
+         vkDestroyPipelineCache(self->device, self->pipeline_cache, NULL);
+         self->pipeline_cache = VK_NULL_HANDLE;
+      }
       shader_map_deinit(&self->shaders);
       render_pass_map_deinit(&self->render_passes);
       descriptor_set_allocator_map_deinit(&self->descriptor_set_allocators);
@@ -16079,6 +16121,24 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->instance = context_get_instance(context);
       self->gpu = context_get_gpu(context);
       self->device = context_get_device(context);
+
+      /* Even an empty cache lets related first-run pipeline variants share
+       * driver compiler work. Every create call below receives this handle. */
+      {
+         VkPipelineCacheCreateInfo cache_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
+         };
+         VkResult cache_result = vkCreatePipelineCache(
+               self->device, &cache_info, NULL, &self->pipeline_cache);
+         if (cache_result != VK_SUCCESS)
+         {
+            self->pipeline_cache = VK_NULL_HANDLE;
+            LOGE("[Vulkan pipeline cache] create failed result=%d; continuing without driver cache\n",
+                  (int)cache_result);
+         }
+         else
+            LOGI("[Vulkan pipeline cache] created in-memory driver cache\n");
+      }
 
       self->graphics_queue_family_index = context_get_graphics_queue_family(context);
       self->graphics_queue = context_get_graphics_queue(context);
