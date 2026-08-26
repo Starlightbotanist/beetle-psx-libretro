@@ -23,6 +23,20 @@ enum PGXP_diag_trace_stage
 	PGXP_TRACE_VERTEX
 };
 
+/* J-specific experiments for the traced MFC2/SLL5/SRA5 handoff.  Every
+ * mode preserves the recovered subpixel X/Y; the latter two modes withhold
+ * perspective W at selected shift stages so mixed tracked/native meshes do
+ * not alternate between real-W and W=1 projection domains. */
+enum PGXP_diag_j_test_mode
+{
+	PGXP_DIAG_J_TEST_CURRENT = 0,
+	PGXP_DIAG_J_TEST_SRA_XY_ONLY,
+	PGXP_DIAG_J_TEST_ALL_XY_ONLY,
+	PGXP_DIAG_J_TEST_FINAL_ONLY,
+	PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY,
+	PGXP_DIAG_J_TEST_COUNT
+};
+
 /* Runtime-selectable OpenGL seam experiments.  These are exposed only by
  * PGXP_DIAG builds; normal builds compile PGXP_DiagGLSetMode() away. */
 enum PGXP_diag_gl_test_mode
@@ -369,6 +383,8 @@ int PGXP_DiagGLNativePosition(unsigned index, float* x, float* y);
 unsigned PGXP_DiagGLPrimitiveFlags(unsigned index);
 void PGXP_DiagGLSetMode(unsigned mode);
 unsigned PGXP_DiagGLGetMode(void);
+void PGXP_DiagJSetMode(unsigned mode);
+unsigned PGXP_DiagJGetMode(void);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
 void PGXP_DiagGLRasterScale(unsigned internal_scale);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
@@ -441,6 +457,8 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagGLPrimitiveFlags(index) 0u
 #define PGXP_DiagGLSetMode(mode) ((void)0)
 #define PGXP_DiagGLGetMode() PGXP_DIAG_GL_TEST_OFF
+#define PGXP_DiagJSetMode(mode) ((void)0)
+#define PGXP_DiagJGetMode() PGXP_DIAG_J_TEST_CURRENT
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
 #define PGXP_DiagGLRasterScale(internal_scale) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)

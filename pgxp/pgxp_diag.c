@@ -490,6 +490,10 @@ typedef struct
 	uint64_t lineage_sra5_matches;
 	uint64_t lineage_preserve_sll5;
 	uint64_t lineage_preserve_sra5;
+	uint64_t lineage_w_suppressed_sll5;
+	uint64_t lineage_w_suppressed_sra5;
+	uint64_t lineage_xy_deferred_sll5;
+	uint64_t lineage_xy_restored_sra5;
 	uint64_t lineage_shift_blocked;
 	uint64_t lineage_identity_candidates;
 	uint64_t lineage_identity_matches;
@@ -842,6 +846,7 @@ static uint32_t gl_native_samples;
 static uint32_t gl_native_window_samples;
 static unsigned gl_repair_mode = PGXP_DIAG_GL_REPAIR_APPLY ?
 	PGXP_DIAG_GL_TEST_BROAD_REPLAY : PGXP_DIAG_GL_TEST_OFF;
+static unsigned j_test_mode = PGXP_DIAG_J_TEST_CURRENT;
 static uint64_t gl_repair_mode_mask[3];
 /* gl_repair_mode_mask records every selected runtime mode by bit index. */
 typedef char pgxp_diag_gl_mode_mask_must_fit_u192[
@@ -1121,6 +1126,36 @@ void PGXP_DiagGLSetMode(unsigned mode)
 unsigned PGXP_DiagGLGetMode(void)
 {
 	return gl_repair_mode;
+}
+
+static const char* pgxp_diag_j_mode_name(unsigned mode)
+{
+	static const char* const names[PGXP_DIAG_J_TEST_COUNT] = {
+		"current",
+		"sra-xy-only",
+		"all-shifts-xy-only",
+		"final-only",
+		"final-only-xy-only"
+	};
+	return mode < PGXP_DIAG_J_TEST_COUNT ? names[mode] : "invalid";
+}
+
+void PGXP_DiagJSetMode(unsigned mode)
+{
+	if (mode >= PGXP_DIAG_J_TEST_COUNT)
+		mode = PGXP_DIAG_J_TEST_CURRENT;
+	if (mode == j_test_mode)
+		return;
+	j_test_mode = mode;
+	if (log_cb)
+		log_cb(RETRO_LOG_INFO,
+			"[pgxp_j_test_mode] mf=%u mode=%u name=%s\n",
+			mode_frame, mode, pgxp_diag_j_mode_name(mode));
+}
+
+unsigned PGXP_DiagJGetMode(void)
+{
+	return j_test_mode;
 }
 
 static int trace_metadata_valid(const PGXP_value* value)
@@ -2014,6 +2049,9 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 {
 	uint32_t source = (instr >> 16) & 31;
 	uint32_t dest = (instr >> 11) & 31;
+	int final_only = j_test_mode == PGXP_DIAG_J_TEST_FINAL_ONLY ||
+		j_test_mode == PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY;
+	int dormant_sll5;
 	PGXP_value result;
 
 	/* This diagnostic lineage implementation is behaviorally independent
@@ -2032,7 +2070,10 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 	Validate(&CPU_reg[source], before);
 	result = CPU_reg[source];
 	PGXP_DiagShift(instr, before, after, arithmetic);
-	if ((result.flags & VALID_01) != VALID_01)
+	dormant_sll5 = final_only && arithmetic && (instr >> 6 & 31) == 5 &&
+		result.trace_id != 0 && result.trace_stage == PGXP_TRACE_SLL5 &&
+		result.trace_reserved[0] == 0 && result.trace_reserved[5] != 0;
+	if ((result.flags & VALID_01) != VALID_01 && !dormant_sll5)
 	{
 		PGXP_DiagTraceShift(instr, before, after, arithmetic, 2, &result);
 		return 0;
@@ -2076,6 +2117,38 @@ int PGXP_DiagPreserveShift(uint32_t instr, uint32_t before,
 
 	result.value = after;
 	PGXP_DiagTraceShift(instr, before, after, arithmetic, 0, &result);
+	/* In final-only modes, retain the precise payload and trace through the
+	 * SLL5 intermediate but do not expose that shifted architectural word as
+	 * a renderable precise vertex.  The exact inverse proof above restores
+	 * X/Y only after SRA5 reproduces the root MFC2 word. */
+	if (final_only)
+	{
+		if (arithmetic)
+		{
+			result.flags |= VALID_01;
+			window.lineage_xy_restored_sra5++;
+		}
+		else
+		{
+			result.flags &= ~VALID_01;
+			window.lineage_xy_deferred_sll5++;
+		}
+	}
+	/* Keep J's proven subpixel X/Y while testing whether carrying its GTE W
+	 * across the CPU packing handoff creates projection-domain seams against
+	 * neighbouring CPU-generated/native vertices.  Invalidating VALID_2 is
+	 * sufficient: the shared vertex path then uses W=1 without discarding X/Y. */
+	if (j_test_mode == PGXP_DIAG_J_TEST_ALL_XY_ONLY ||
+	    (arithmetic &&
+	     (j_test_mode == PGXP_DIAG_J_TEST_SRA_XY_ONLY ||
+	      j_test_mode == PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY)))
+	{
+		result.flags &= ~VALID_2;
+		if (arithmetic)
+			window.lineage_w_suppressed_sra5++;
+		else
+			window.lineage_w_suppressed_sll5++;
+	}
 	CPU_reg[dest] = result;
 	if (arithmetic)
 		window.lineage_preserve_sra5++;
@@ -7420,6 +7493,7 @@ void PGXP_DiagFrame(int backend)
 	log_cb(RETRO_LOG_INFO,
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
 		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
+		"w_suppressed=%llu/%llu xy_deferred=%llu/%llu j_mode=%u "
 		"blocked=%llu/%llu identity=%llu/%llu/%llu drops=%llu transforms=%llu "
 		"store=%llu/%llu fifo=%llu\n",
 		(unsigned long long)frame_number,
@@ -7430,6 +7504,11 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_sra5_candidates,
 		(unsigned long long)window.lineage_preserve_sll5,
 		(unsigned long long)window.lineage_preserve_sra5,
+		(unsigned long long)window.lineage_w_suppressed_sll5,
+		(unsigned long long)window.lineage_w_suppressed_sra5,
+		(unsigned long long)window.lineage_xy_deferred_sll5,
+		(unsigned long long)window.lineage_xy_restored_sra5,
+		j_test_mode,
 		(unsigned long long)window.lineage_shift_blocked,
 		(unsigned long long)window.lineage_identity_blocked,
 		(unsigned long long)window.lineage_identity_matches,

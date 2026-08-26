@@ -315,6 +315,53 @@ static void test_mfc2_sll5_sra5(void)
            PGXP_TRACE_SRA5);
 }
 
+static void run_j_shift_mode(unsigned mode, int expect_sll_xy,
+      int expect_sll_w, int expect_sra_w)
+{
+   const uint32_t packed = 0xFFD3007Bu;
+   const uint32_t sll = packed << 5;
+   const uint32_t sra = (uint32_t)((int32_t)sll >> 5);
+   uint32_t instr;
+
+   PGXP_DiagJSetMode(mode);
+   PGXP_pushSXYZ2f(123.25f, -45.5f, 1.f, packed);
+   PGXP_GTE_MFC2(INSTR_RT(8) | INSTR_RD(14), packed, packed);
+
+   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   memset(&CPU_reg[9], 0, sizeof(CPU_reg[9]));
+   PGXP_CPU_DiagShift(instr, packed, sll, 0);
+   if (((CPU_reg[9].flags & VALID_01) == VALID_01) != expect_sll_xy)
+      fail("J mode SLL5 XY policy mismatch", mode, expect_sll_xy);
+   if (((CPU_reg[9].flags & VALID_2) == VALID_2) != expect_sll_w)
+      fail("J mode SLL5 W policy mismatch", mode, expect_sll_w);
+
+   /* Spyro routes this intermediate through tracked memory/scratchpad.  That
+    * deliberately drops the old register-lineage proof while retaining the
+    * trace, exercising J's broadened but exact native-roundtrip path. */
+   PGXP_CPU_SW(INSTR_RT(9), sll, LIST_ADDR2);
+   memset(&CPU_reg[10], 0, sizeof(CPU_reg[10]));
+   PGXP_CPU_LW(INSTR_RT(10), sll, LIST_ADDR2);
+   instr = INSTR_RT(10) | INSTR_RD(10) | INSTR_SA(5) | 0x03u;
+   PGXP_CPU_DiagShift(instr, sll, sra, 1);
+   if ((CPU_reg[10].flags & VALID_01) != VALID_01)
+      fail("J mode lost SRA5 precise XY", mode, VALID_01);
+   if (((CPU_reg[10].flags & VALID_2) == VALID_2) != expect_sra_w)
+      fail("J mode SRA5 W policy mismatch", mode, expect_sra_w);
+}
+
+static void test_j_projection_handoff_modes(void)
+{
+   PGXP_SetExperimentMask((PGXP_FEATURE_ALL & ~PGXP_FEATURE_MFC2_SHIFT) |
+         PGXP_FEATURE_DIAG_SHIFT);
+   run_j_shift_mode(PGXP_DIAG_J_TEST_CURRENT, 1, 1, 1);
+   run_j_shift_mode(PGXP_DIAG_J_TEST_SRA_XY_ONLY, 1, 1, 0);
+   run_j_shift_mode(PGXP_DIAG_J_TEST_ALL_XY_ONLY, 1, 0, 0);
+   run_j_shift_mode(PGXP_DIAG_J_TEST_FINAL_ONLY, 0, 1, 1);
+   run_j_shift_mode(PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY, 0, 1, 0);
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
+   PGXP_SetExperimentMask(PGXP_FEATURE_ALL);
+}
+
 static void test_cpu_math_invariants(void)
 {
    uint32_t instr;
@@ -561,6 +608,9 @@ int main(void)
 
    printf("[T11] ambiguous recovery stays within native neighbourhood\n");
    test_recovery_ambiguity_spatial_gate();
+
+   printf("[T12] J projection handoff modes preserve XY and gate W\n");
+   test_j_projection_handoff_modes();
 
    if (failures)
    {

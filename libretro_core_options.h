@@ -1002,6 +1002,23 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled"
    },
    {
+      BEETLE_OPT(pgxp_j_test),
+      "PGXP J Projection Handoff Test",
+      NULL,
+      "Focused test of Stack J's traced shift handoff. XY-only modes preserve precise X/Y but withhold W. Final-only modes keep X/Y dormant at the SLL5 intermediate and restore it only after the exact SRA5 inverse. Use with Stack B and Stack C disabled, and Stack J enabled. Restart content after changing it.",
+      NULL,
+      "pgxp",
+      {
+         { "current",            "0: Current J (X/Y/W)" },
+         { "sra xy-only",        "1: J SRA5 X/Y Only" },
+         { "all shifts xy-only", "2: All J Shifts X/Y Only" },
+         { "final only",         "3: J Final SRA5 Only" },
+         { "final xy-only",      "4: Final SRA5 X/Y Only" },
+         { NULL, NULL },
+      },
+      "current"
+   },
+   {
       BEETLE_OPT(pgxp_gl_test),
       "PGXP Raster Seam Test",
       NULL,

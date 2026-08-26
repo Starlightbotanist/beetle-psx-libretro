@@ -4805,6 +4805,23 @@ static void check_variables(bool startup)
                (stack_mask & PGXP_FEATURE_DIAG_SHIFT) != 0);
          logged_stack_mask = stack_mask;
       }
+
+      {
+         unsigned j_test_mode = PGXP_DIAG_J_TEST_CURRENT;
+         var.key = BEETLE_OPT(pgxp_j_test);
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         {
+            if (strcmp(var.value, "sra xy-only") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_SRA_XY_ONLY;
+            else if (strcmp(var.value, "all shifts xy-only") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_ALL_XY_ONLY;
+            else if (strcmp(var.value, "final only") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_FINAL_ONLY;
+            else if (strcmp(var.value, "final xy-only") == 0)
+               j_test_mode = PGXP_DIAG_J_TEST_FINAL_ONLY_XY_ONLY;
+         }
+         PGXP_DiagJSetMode(j_test_mode);
+      }
    }
 
    {
