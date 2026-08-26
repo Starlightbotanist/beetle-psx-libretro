@@ -3470,6 +3470,35 @@ static _Bool pgxp_cpu_tracked(union code c)
 	}
 }
 
+/* Register writes without a PGXP arithmetic tracker still retire any
+ * provenance associated with the destination register. */
+static _Bool pgxp_cpu_observed(union code c)
+{
+	switch (c.i.op) {
+	case OP_SPECIAL:
+		return c.r.op == OP_SPECIAL_JALR;
+	case OP_REGIMM:
+		return c.r.rt == OP_REGIMM_BLTZAL ||
+		       c.r.rt == OP_REGIMM_BGEZAL;
+	case OP_JAL:
+		return true;
+	case OP_CP0:
+		return c.r.rs == OP_CP0_MFC0 || c.r.rs == OP_CP0_CFC0;
+	default:
+		return false;
+	}
+}
+
+static void rec_pgxp_cpu_observe(struct lightrec_cstate *state,
+		const struct block *block, u16 offset)
+{
+	union code c = block->opcode_list[offset].c;
+	jit_state_t *_jit = block->_jit;
+
+	jit_note(__FILE__, __LINE__);
+	call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_PGXP_CPU);
+}
+
 /* Save the operands consumed by a tracked instruction. The wrapper runs after
  * execution, when a destination may already have overwritten rs or rt. */
 static void rec_pgxp_cpu_capture(struct lightrec_cstate *state,
@@ -3569,6 +3598,8 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 		f = rec_standard[op->i.op];
 		if (state->state->ops.pgxp_cpu && pgxp_cpu_tracked(op->c))
 			rec_pgxp_cpu_capture(state, block, offset);
+		else if (state->state->ops.pgxp_cpu && pgxp_cpu_observed(op->c))
+			rec_pgxp_cpu_observe(state, block, offset);
 
 		if (!HAS_DEFAULT_ELM && unlikely(!f))
 			unknown_opcode(state, block, offset);

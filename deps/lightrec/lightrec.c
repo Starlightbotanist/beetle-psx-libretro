@@ -858,7 +858,8 @@ static void lightrec_pgxp_cpu_cb(struct lightrec_state *state, u32 arg)
 			result = imm << 16;
 			break;
 		default:
-			return;
+			result = 0;
+			break;
 		}
 	}
 

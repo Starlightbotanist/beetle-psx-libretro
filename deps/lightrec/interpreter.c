@@ -70,17 +70,38 @@ static bool pgxp_cpu_tracked(union code c)
 	}
 }
 
+static bool pgxp_cpu_observed(union code c)
+{
+	return c.i.op == OP_CP0 &&
+	       (c.r.rs == OP_CP0_MFC0 || c.r.rs == OP_CP0_CFC0);
+}
+
+static void pgxp_cpu_observe_link(struct interpreter *inter)
+{
+	struct lightrec_state *state = inter->state;
+
+	if (state->ops.pgxp_cpu)
+		(*state->ops.pgxp_cpu)(state, inter->op->c.opcode,
+				       0, 0, 0, 0, 0, 0);
+}
+
 static void pgxp_cpu_track(struct interpreter *inter)
 {
 	struct lightrec_state *state = inter->state;
 	union code c = inter->op->c;
 	u32 result;
 
-	if (!state->ops.pgxp_cpu || !pgxp_cpu_tracked(c))
+	if (!state->ops.pgxp_cpu)
 		return;
 
-	result = c.i.op == OP_SPECIAL ? state->regs.gpr[c.r.rd]
-					    : state->regs.gpr[c.i.rt];
+	if (pgxp_cpu_tracked(c))
+		result = c.i.op == OP_SPECIAL ? state->regs.gpr[c.r.rd]
+						    : state->regs.gpr[c.i.rt];
+	else if (pgxp_cpu_observed(c))
+		result = 0;
+	else
+		return;
+
 	(*state->ops.pgxp_cpu)(state, c.opcode, result,
 			       inter->pgxp_rs, inter->pgxp_rt,
 			       state->regs.gpr[REG_HI],
@@ -414,8 +435,10 @@ static u32 int_jump(struct interpreter *inter, bool link)
 	u32 old_pc = int_get_branch_pc(inter);
 	u32 pc = (old_pc & 0xf0000000) | (inter->op->j.imm << 2);
 
-	if (link)
+	if (link) {
 		state->regs.gpr[31] = old_pc + 8;
+		pgxp_cpu_observe_link(inter);
+	}
 
 	if (op_flag_no_ds(inter->op->flags))
 		return pc;
@@ -439,8 +462,10 @@ static u32 int_jumpr(struct interpreter *inter, u8 link_reg)
 	u32 old_pc = int_get_branch_pc(inter);
 	u32 next_pc = state->regs.gpr[inter->op->r.rs];
 
-	if (link_reg)
+	if (link_reg) {
 		state->regs.gpr[link_reg] = old_pc + 8;
+		pgxp_cpu_observe_link(inter);
+	}
 
 	if (op_flag_no_ds(inter->op->flags))
 		return next_pc;
@@ -523,8 +548,10 @@ static u32 int_bgez(struct interpreter *inter, bool link, bool lt, bool regimm)
 	u32 old_pc = int_get_branch_pc(inter);
 	s32 rs;
 
-	if (link)
+	if (link) {
 		inter->state->regs.gpr[31] = old_pc + 8;
+		pgxp_cpu_observe_link(inter);
+	}
 
 	rs = (s32)inter->state->regs.gpr[inter->op->i.rs];
 

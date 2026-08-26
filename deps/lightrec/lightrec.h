@@ -116,12 +116,12 @@ struct lightrec_ops {
 	void (*enable_ram)(struct lightrec_state *state, _Bool enable);
 	_Bool (*hw_direct)(u32 kaddr, _Bool is_write, u8 size);
 	void (*code_inv)(void *addr, u32 len);
-	/* When non-NULL, Lightrec calls this after each tracked CPU arithmetic
-	 * operation. rd is the post-execution result; rs and rt are the
+	/* When non-NULL, Lightrec calls this for tracked CPU arithmetic and to
+	 * notify the host of otherwise untracked register writes. For tracked
+	 * arithmetic, rd is the post-execution result; rs and rt are the
 	 * operands captured before execution; hi and lo are the current HI/LO
-	 * values. addr is reserved for memory operations, which hosts track
-	 * through PGXP-aware memory callbacks. Leaving it NULL keeps the fast
-	 * path. */
+	 * values. Memory operations use PGXP-aware memory callbacks. Leaving
+	 * this NULL keeps the fast path. */
 	void (*pgxp_cpu)(struct lightrec_state *state, u32 instr,
 			 u32 rd, u32 rs, u32 rt, u32 hi, u32 lo, u32 addr);
 };

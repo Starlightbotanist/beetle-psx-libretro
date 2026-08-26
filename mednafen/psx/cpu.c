@@ -3079,6 +3079,7 @@ static void pgxp_cop2_notify(struct lightrec_state *state, uint32_t op, uint32_t
 			case 0x04: PGXP_GTE_MTC2(op, data, data); break;
 			case 0x06: PGXP_GTE_CTC2(op, data, data); break;
 		}
+		PGXP_CPU_ObserveInstruction(op);
 	}
 }
 
@@ -3092,7 +3093,9 @@ static void pgxp_cpu_track(struct lightrec_state *state, uint32_t instr,
                            uint32_t hi, uint32_t lo, uint32_t addr)
 {
 	(void)state;
-	PGXP_CPU_Dispatch(instr, rd, rs, rt, hi, lo, addr);
+	if (PGXP_CPU_Tracks(instr))
+		PGXP_CPU_Dispatch(instr, rd, rs, rt, hi, lo, addr);
+	PGXP_CPU_ObserveInstruction(instr);
 }
 
 static bool cp2_ops[0x40] = {0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,0,
@@ -3302,6 +3305,7 @@ static uint8_t pgxp_nonhw_read_byte(struct lightrec_state *state,
 		PGXP_CPU_LB(opcode, val, mem);
 	else
 		PGXP_CPU_LBU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3316,6 +3320,7 @@ static uint8_t pgxp_hw_read_byte(struct lightrec_state *state,
 		PGXP_CPU_LB(opcode, val, mem);
 	else
 		PGXP_CPU_LBU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3350,6 +3355,7 @@ static uint16_t pgxp_nonhw_read_half(struct lightrec_state *state,
 		PGXP_CPU_LH(opcode, val, mem);
 	else
 		PGXP_CPU_LHU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3364,6 +3370,7 @@ static uint16_t pgxp_hw_read_half(struct lightrec_state *state,
 		PGXP_CPU_LH(opcode, val, mem);
 	else
 		PGXP_CPU_LHU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3412,6 +3419,7 @@ static uint32_t pgxp_nonhw_read_word(struct lightrec_state *state,
 		default:
 			break;
 	}
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3422,6 +3430,7 @@ static uint32_t pgxp_nonhw_read_word_unsigned(struct lightrec_state *state,
 	uint32_t val = LE32TOH(*(uint32_t *)host);
 
 	PGXP_CPU_LW(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3451,6 +3460,7 @@ static uint32_t pgxp_hw_read_word(struct lightrec_state *state,
 		default:
 			break;
 	}
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3493,8 +3503,10 @@ static struct lightrec_mem_map_ops hw_regs_ops = {
 static uint32_t cache_ctrl_read_word(struct lightrec_state *state,
 		uint32_t opcode, void *host, uint32_t mem)
 {
-	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+	if (PGXP_GetModes() & PGXP_MODE_MEMORY) {
 		PGXP_CPU_LW(opcode, BIU, mem);
+		PGXP_CPU_ObserveInstruction(opcode);
+	}
 
 	return BIU;
 }
