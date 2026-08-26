@@ -42,6 +42,8 @@ extern PGXP_value* CP0_reg;
 void PGXP_InitCPU();
 void PGXP_CPU_TrackProjectionWrite(unsigned dest);
 void PGXP_CPU_ObserveInstruction(uint32_t instr);
+int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
+		uint32_t after);
 
 // -- CPU functions
 

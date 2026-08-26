@@ -414,6 +414,39 @@ static void test_projection_provenance_transport(void)
       fail("partial store kept provenance", 1, 0);
 }
 
+static void test_projection_identity_moves(void)
+{
+   const uint32_t packed = pack_vertex(321, -87);
+   uint32_t instr;
+
+   PGXP_pushSXYZ2f(321.25f, -87.5f, 32768.f, packed);
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+
+   instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(9) | 0x21u;
+   PGXP_CPU_ADDU(instr, packed, packed, 0);
+   PGXP_CPU_ObserveInstruction(instr);
+   if ((CPU_reg[9].flags & (VALID_01 | VALID_PROJECTION)) !=
+       (VALID_01 | VALID_PROJECTION) ||
+       CPU_reg[9].x != 321.25f || CPU_reg[9].y != -87.5f)
+      fail("register identity lost projected value", 0, 1);
+
+   instr = INSTR_RS(9) | INSTR_RT(10) | INSTR_OP(0x0d);
+   PGXP_CPU_ORI(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   if ((CPU_reg[10].flags & VALID_PROJECTION) != VALID_PROJECTION ||
+       CPU_reg[10].x != 321.25f || CPU_reg[10].y != -87.5f)
+      fail("immediate identity lost projected value", 0, 1);
+
+   CPU_reg[10].value ^= 1u;
+   instr = INSTR_RS(10) | INSTR_RT(11) | INSTR_OP(0x0e);
+   PGXP_CPU_XORI(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   if (CPU_reg[11].flags & VALID_PROJECTION)
+      fail("identity accepted mismatched source", 1, 0);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -450,6 +483,9 @@ int main(void)
 
    printf("[T10] projected-depth CPU transport\n");
    test_projection_provenance_transport();
+
+   printf("[T11] projected-depth identity moves\n");
+   test_projection_identity_moves();
 
    if (failures)
    {
