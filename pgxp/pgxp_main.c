@@ -1,6 +1,7 @@
 #include "pgxp_main.h"
 #include "pgxp_cpu.h"
 #include "pgxp_gpu.h"
+#include "pgxp_lineage.h"
 #include "pgxp_mem.h"
 #include "pgxp_gte.h"
 
@@ -17,6 +18,7 @@ void PGXP_Init(void)
 	PGXP_InitMem();
 	PGXP_InitCPU();
 	PGXP_InitGTE();
+	PGXP_LineageReset();
 }
 
 void PGXP_Shutdown(void)
@@ -40,6 +42,9 @@ static void apply_modes(uint32_t new_modes)
 	 * disabled. Retire them rather than let a stale one match by chance. */
 	if (!old_modes && new_modes)
 		PGXP_InvalidateVertexFIFO();
+	if ((old_modes ^ new_modes) &
+	    (PGXP_MODE_MEMORY | PGXP_MODE_CPU | PGXP_MODE_GTE))
+		PGXP_LineageReset();
 }
 
 void PGXP_SetModes(uint32_t modes)

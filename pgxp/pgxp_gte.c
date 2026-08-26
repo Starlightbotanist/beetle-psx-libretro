@@ -36,6 +36,7 @@
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
 #include "pgxp_cpu.h"
+#include "pgxp_lineage.h"
 #include "pgxp_gpu.h"
 
 /* Same declaration pgxp_gpu.c uses; the frontend owns the callback. */
@@ -359,6 +360,7 @@ void PGXP_GTE_MFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
 	CPU_reg[rt(instr)] = GTE_data_reg[rd(instr)];
 	CPU_reg[rt(instr)].value = rtVal;
 	PGXP_CPU_TrackProjectionWrite(rt(instr));
+	PGXP_LineageMFC2(instr, rtVal, &CPU_reg[rt(instr)]);
 }
 
 void PGXP_GTE_MTC2(uint32_t instr, uint32_t rdVal, uint32_t rtVal)

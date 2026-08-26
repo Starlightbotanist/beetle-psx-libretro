@@ -7,7 +7,8 @@ CPPFLAGS := -DPGXP_DIAG=1 -I$(ROOT) -I$(ROOT)/pgxp -I$(ROOT)/libretro-common/inc
 # Links the real PGXP sources, so the code under test is the shipping code
 # rather than a copy of it.
 PGXP_SRC := $(ROOT)/pgxp/pgxp_gpu.c $(ROOT)/pgxp/pgxp_gte.c \
-            $(ROOT)/pgxp/pgxp_cpu.c $(ROOT)/pgxp/pgxp_mem.c \
+            $(ROOT)/pgxp/pgxp_cpu.c $(ROOT)/pgxp/pgxp_lineage.c \
+            $(ROOT)/pgxp/pgxp_mem.c \
             $(ROOT)/pgxp/pgxp_main.c $(ROOT)/pgxp/pgxp_value.c
 
 all: oracle transport range

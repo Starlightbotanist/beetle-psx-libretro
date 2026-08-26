@@ -4,6 +4,7 @@
 #include "pgxp_cpu.h"
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
+#include "pgxp_lineage.h"
 
 
 #include "limits.h"
@@ -102,6 +103,7 @@ void PGXP_CPU_ObserveInstruction(uint32_t instr)
 	if (!(projection_writes & bit))
 		CPU_reg[dest].flags &= ~VALID_PROJECTION;
 	projection_writes &= ~bit;
+	PGXP_LineageObserveRegisterWrite(dest);
 }
 
 int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
@@ -128,6 +130,7 @@ int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
 
 	if (dest == 0 || source == 0 || before != after)
 		return 0;
+	PGXP_LineageIdentityMove(dest, source, before, after);
 	Validate(&CPU_reg[source], before);
 	if ((CPU_reg[source].flags & (VALID_01 | VALID_PROJECTION)) !=
 	    (VALID_01 | VALID_PROJECTION))
@@ -912,6 +915,7 @@ void PGXP_CPU_SLL(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
+	PGXP_LineageShift(instr, rtVal, rdVal, 0);
 }
 
 void PGXP_CPU_SRL(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
@@ -1116,6 +1120,7 @@ void PGXP_CPU_SRA(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 
 	ret.value = rdVal;
 	CPU_reg[rd(instr)] = ret;
+	PGXP_LineageShift(instr, rtVal, rdVal, 1);
 }
 
 /* ============================================================
@@ -1475,6 +1480,7 @@ void PGXP_CPU_LW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Rt = Mem[Rs + Im] */
 	ValidateAndCopyMem(&CPU_reg[rt(instr)], addr, rtVal);
+	PGXP_LineageLoad(instr, addr, rtVal);
 	if (op(instr) == 0x23)
 		PGXP_CPU_TrackProjectionWrite(rt(instr));
 }
@@ -1492,6 +1498,7 @@ void PGXP_CPU_LH(uint32_t instr, uint16_t rtVal, uint32_t addr)
 	psx_value val;
 	val.sd = (int32_t)(int16_t)rtVal;
 	ValidateAndCopyMem16(&CPU_reg[rt(instr)], addr, val.d, 1);
+	PGXP_LineageLoad(instr, addr, val.d);
 }
 
 void PGXP_CPU_LHU(uint32_t instr, uint16_t rtVal, uint32_t addr)
@@ -1501,17 +1508,20 @@ void PGXP_CPU_LHU(uint32_t instr, uint16_t rtVal, uint32_t addr)
 	val.d = rtVal;
 	val.w.h = 0;
 	ValidateAndCopyMem16(&CPU_reg[rt(instr)], addr, val.d, 0);
+	PGXP_LineageLoad(instr, addr, val.d);
 }
 
 /* Load 8-bit */
 void PGXP_CPU_LB(uint32_t instr, uint8_t rtVal, uint32_t addr)
 {
 	InvalidLoad(addr, instr, 116);
+	PGXP_LineageLoad(instr, addr, (uint32_t)(int32_t)(int8_t)rtVal);
 }
 
 void PGXP_CPU_LBU(uint32_t instr, uint8_t rtVal, uint32_t addr)
 {
 	InvalidLoad(addr, instr, 116);
+	PGXP_LineageLoad(instr, addr, rtVal);
 }
 
 /* Store 32-bit word */
@@ -1531,6 +1541,13 @@ void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 	if (op(instr) != 0x2b)
 		value.flags &= ~VALID_PROJECTION;
 	WriteMem(&value, addr);
+	PGXP_LineageStore(instr, rtVal, addr);
+}
+
+void PGXP_CPU_TrackLineageShift(uint32_t instr, uint32_t before,
+		uint32_t after, int arithmetic)
+{
+	PGXP_LineageShift(instr, before, after, arithmetic);
 }
 
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)
