@@ -114,7 +114,7 @@ void PGXP_pushSXYZ2f(float _x, float _y, float _z, uint32_t _v)
 	SXY2.y		= _y;
 	SXY2.z		= (PGXP_GetModes() & PGXP_TEXTURE_CORRECTION) ? _z : 1.f;
 	SXY2.value	= _v;
-	SXY2.flags	= VALID_ALL;
+	SXY2.flags	= VALID_012 | VALID_PROJECTION;
 	SXY2.count	= uCount++;
 
 	/* cache value in GPU plugin */
@@ -228,7 +228,7 @@ void PGXP_pushRGBf(float _r, float _g, float _b, uint32_t _v)
 	GTE_data_reg[22].y      = _g;
 	GTE_data_reg[22].z      = _b;
 	GTE_data_reg[22].value  = _v;
-	GTE_data_reg[22].flags  = VALID_ALL;
+	GTE_data_reg[22].flags  = VALID_012;
 	GTE_data_reg[22].count  = uCount++;
 	GTE_data_reg[22].gFlags = 0;
 	GTE_data_reg[22].lFlags = 0;

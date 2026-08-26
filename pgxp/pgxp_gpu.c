@@ -634,6 +634,12 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 			/* This value does not have a valid W coordinate */
 			pOutput->valid_w = 0;
 		}
+		else if ((vert->flags & VALID_PROJECTION) != VALID_PROJECTION)
+		{
+			/* Keep precise X/Y, but only a projected vertex may supply the
+			 * homogeneous depth used for perspective interpolation. */
+			pOutput->valid_w = 0;
+		}
 	}
 	else
 	{

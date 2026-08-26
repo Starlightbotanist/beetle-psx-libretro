@@ -101,6 +101,8 @@ static void test_swc2_direct(void)
    float    rgb[3];
 
    packed = gte_produce(m1, m2, m3, 0x30);   /* 0x30 = shaded triangle */
+   if (GTE_data_reg[22].flags & VALID_PROJECTION)
+      fail("colour marked as projected vertex", 1, 0);
 
    /* swc2 $22, 0(rs) : Mem[addr] = GTE_D[22] */
    PGXP_GTE_SWC2(instr, packed, addr);
@@ -329,12 +331,17 @@ static void test_vertex_offset_ordering(void)
    OGLVertex vertex;
    uint32_t word;
 
+   word = pack_vertex(12, 34);
+   PGXP_pushSXYZ2f(12.f, 34.f, 2.f, word);
+   if (!(GTE_data_reg[14].flags & VALID_PROJECTION))
+      fail("projected vertex missing provenance", 0, 1);
+
    word = pack_vertex(100, -100);
    tracked.x = 1020.5f;
    tracked.y = -1020.25f;
    tracked.z = 1.f;
    tracked.value = word;
-   tracked.flags = VALID_012;
+   tracked.flags = VALID_012 | VALID_PROJECTION;
    PGXP_WriteCB(&tracked, 0);
 
    PGXP_GetVertex(0, &word, &vertex, 10, -10);
@@ -342,6 +349,14 @@ static void test_vertex_offset_ordering(void)
       fail("tracked vertex offset was re-wrapped", 1, 0);
    if (!vertex.valid_w || vertex.w != 1.f / 32768.f)
       fail("tracked vertex W was not normalized", vertex.valid_w, 1);
+
+   tracked.flags = VALID_012;
+   PGXP_WriteCB(&tracked, 0);
+   PGXP_GetVertex(0, &word, &vertex, 10, -10);
+   if (vertex.valid_w)
+      fail("unproven vertex W was accepted", 1, 0);
+   if (vertex.x != 1030.5f || vertex.y != -1030.25f)
+      fail("W rejection discarded precise XY", 1, 0);
 
    word = pack_vertex(1020, -1020);
    PGXP_WriteCB(&untracked, 1);
