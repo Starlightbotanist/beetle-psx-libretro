@@ -31,6 +31,7 @@ retro_input_state_t dbg_input_state_cb = 0;
 
 #include "pgxp/pgxp_main.h"
 #include "pgxp/pgxp_gte.h"
+#include "pgxp/pgxp_lineage.h"
 
 #include "deps/openbios/openbios.bin.h"
 
@@ -6853,10 +6854,10 @@ bool retro_serialize(void *data, size_t size)
 
 bool retro_unserialize(const void *data, size_t size)
 {
-   /* The fog sidecar ring is keyed by a push counter that restarts with the
-    * loaded state while counts inside RAM shadows survive; stale slots must
-    * not satisfy post-load lookups. */
+   /* Derived PGXP sidecars are not part of architectural state and must not
+    * survive a timeline replacement. */
    PGXP_GTE_InvalidateFogRing();
+   PGXP_LineageReset();
    StateMem st;
    bool okay;
 

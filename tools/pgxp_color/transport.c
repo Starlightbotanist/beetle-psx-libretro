@@ -483,6 +483,7 @@ static void test_exact_shift_lineage(void)
    const uint32_t restored_addr = 0x80106004u;
    PGXP_value partial = PGXP_value_zero;
    PGXP_value overwrite = PGXP_value_zero;
+   OGLVertex vertex;
    float x = 0.f;
    float y = 0.f;
    float z = 0.f;
@@ -541,6 +542,11 @@ static void test_exact_shift_lineage(void)
    if (!PGXP_LineageRecoverVertex(1, restored, &x, &y, &z, &valid_w) ||
        x != precise_x || y != precise_y || z != 32768.f || !valid_w)
       fail("restored lineage recovery missed", 0, 1);
+   memset(&vertex, 0, sizeof(vertex));
+   PGXP_GetVertex(1, &restored, &vertex, 0, 0);
+   if (vertex.x != precise_x || vertex.y != precise_y ||
+       vertex.w != 1.f || !vertex.valid_w)
+      fail("vertex lookup ignored exact lineage", 0, 1);
    if (PGXP_LineageRecoverVertex(1, restored ^ 1u,
        &x, &y, &z, &valid_w))
       fail("lineage accepted mismatched word", 1, 0);

@@ -26,6 +26,7 @@
 ***************************************************************************/
 #include "pgxp_gpu.h"
 #include "pgxp_gte.h"
+#include "pgxp_lineage.h"
 #include "pgxp_main.h"
 #include "pgxp_mem.h"
 #include "pgxp_value.h"
@@ -611,6 +612,10 @@ static inline float PGXP_NormalizeVertexW(float z)
 int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutput, int xOffs, int yOffs)
 {
 	PGXP_value* vert = PGXP_ReadCB(offset);          /* pointer to vertex */
+	float lineage_x;
+	float lineage_y;
+	float lineage_z;
+	int lineage_valid_w;
 
 	/* The GP0 vertex word packs sy in the high 16 bits and sx in
 	 * the low 16 bits.  Unpack with shifts on the u32 rather than
@@ -620,7 +625,17 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	int16_t psxX = (int16_t)(psxWord & 0xFFFF);
 	int16_t psxY = (int16_t)(psxWord >> 16);
 
-	if (vert && ((vert->flags & VALID_01) == VALID_01) && (vert->value == psxWord))
+	if (PGXP_LineageRecoverVertex(offset, psxWord, &lineage_x, &lineage_y,
+	    &lineage_z, &lineage_valid_w))
+	{
+		pOutput->x = PGXP_WrapVertexPosition(lineage_x) + xOffs;
+		pOutput->y = PGXP_WrapVertexPosition(lineage_y) + yOffs;
+		pOutput->z = 0.95f;
+		pOutput->w = PGXP_NormalizeVertexW(lineage_z);
+		pOutput->valid_w = lineage_valid_w;
+	}
+	else if (vert && ((vert->flags & VALID_01) == VALID_01) &&
+	         (vert->value == psxWord))
 	{
 		/* There is a value here with valid X and Y coordinates */
 		pOutput->x = PGXP_WrapVertexPosition(vert->x) + xOffs;
