@@ -76,6 +76,7 @@ extern int   psx_hdr_multipass;
  * (16F) scaled framebuffer, which is allocated before HDR negotiation
  * completes. Non-zero = a 30-bit/HDR format was requested. */
 extern int   psx_color_format;
+extern int   filter_mode;
 extern char retro_base_directory[4096];
 extern char retro_save_directory[4096];
 
@@ -164,7 +165,6 @@ extern PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties;
 extern PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties;
 extern PFN_vkInvalidateMappedMemoryRanges vkInvalidateMappedMemoryRanges;
 extern PFN_vkMapMemory vkMapMemory;
-extern PFN_vkMergePipelineCaches vkMergePipelineCaches;
 extern PFN_vkQueueSubmit vkQueueSubmit;
 extern PFN_vkResetCommandPool vkResetCommandPool;
 extern PFN_vkResetDescriptorPool vkResetDescriptorPool;
@@ -306,7 +306,6 @@ static void volkGenLoadDevice(void* context,
    vkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)load(context, "vkGetPipelineCacheData");
    vkInvalidateMappedMemoryRanges = (PFN_vkInvalidateMappedMemoryRanges)load(context, "vkInvalidateMappedMemoryRanges");
    vkMapMemory = (PFN_vkMapMemory)load(context, "vkMapMemory");
-   vkMergePipelineCaches = (PFN_vkMergePipelineCaches)load(context, "vkMergePipelineCaches");
    vkQueueSubmit = (PFN_vkQueueSubmit)load(context, "vkQueueSubmit");
    vkResetCommandPool = (PFN_vkResetCommandPool)load(context, "vkResetCommandPool");
    vkResetDescriptorPool = (PFN_vkResetDescriptorPool)load(context, "vkResetDescriptorPool");
@@ -421,7 +420,6 @@ PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties;
 PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties;
 PFN_vkInvalidateMappedMemoryRanges vkInvalidateMappedMemoryRanges;
 PFN_vkMapMemory vkMapMemory;
-PFN_vkMergePipelineCaches vkMergePipelineCaches;
 PFN_vkQueueSubmit vkQueueSubmit;
 PFN_vkResetCommandPool vkResetCommandPool;
 PFN_vkResetDescriptorPool vkResetDescriptorPool;
@@ -3404,6 +3402,94 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       struct vk_pipeline_map pipelines;
    };
 
+   static bool vulkan_shader_precompilation;
+   static bool vulkan_pipeline_precompiling;
+   static bool super_sampling;
+   /* Core options needed while the renderer is being constructed. Keep these
+    * declarations above renderer_init: precompilation runs before the ordinary
+    * per-frame setters copy them into Renderer. */
+   static bool scaled_uv_offset;
+   static bool adaptive_smoothing;
+   static bool mdec_yuv;
+   /* Mirrors enum dither_mode, whose defining GPU header is included after
+    * the folded renderer implementation. Zero-initialization is
+    * DITHER_NATIVE; 2 is DITHER_OFF. */
+   static int dither_mode;
+#define RHI_DITHER_OFF 2
+   static bool show_vram;
+
+   /* Deep copy of one graphics-pipeline description. During shader
+    * precompilation the normal renderer still produces each state through its
+    * real draw path, but creation is deferred into these self-contained jobs.
+    * No CommandBuffer or Program cache is accessed by worker threads; workers
+    * only call vkCreateGraphicsPipelines, and the main thread publishes the
+    * completed handles after joining them. */
+   struct VulkanGraphicsPrecompileJob
+   {
+      Program *program;
+      Hash hash;
+      VkGraphicsPipelineCreateInfo pipe;
+      VkPipelineViewportStateCreateInfo viewport;
+      VkPipelineDynamicStateCreateInfo dynamic;
+      VkDynamicState dynamic_states[2];
+      VkPipelineColorBlendStateCreateInfo blend;
+      VkPipelineColorBlendAttachmentState
+         blend_attachments[VULKAN_NUM_ATTACHMENTS];
+      VkPipelineDepthStencilStateCreateInfo depth_stencil;
+      VkPipelineVertexInputStateCreateInfo vertex_input;
+      VkVertexInputAttributeDescription
+         vertex_attributes[VULKAN_NUM_VERTEX_ATTRIBS];
+      VkVertexInputBindingDescription
+         vertex_bindings[VULKAN_NUM_VERTEX_BUFFERS];
+      VkPipelineInputAssemblyStateCreateInfo input_assembly;
+      VkPipelineMultisampleStateCreateInfo multisample;
+      VkPipelineRasterizationStateCreateInfo rasterization;
+      VkPipelineShaderStageCreateInfo stages[(unsigned)ShaderStage_Count];
+      VkSpecializationInfo specialization[(unsigned)ShaderStage_Count];
+      VkSpecializationMapEntry
+         specialization_entries[(unsigned)ShaderStage_Count]
+            [VULKAN_NUM_SPEC_CONSTANTS];
+      uint32_t specialization_data[(unsigned)ShaderStage_Count]
+         [VULKAN_NUM_SPEC_CONSTANTS];
+      VkPipeline pipeline;
+      VkResult result;
+   };
+
+   struct VulkanGraphicsPrecompileJobVec
+   {
+      struct VulkanGraphicsPrecompileJob *items;
+      unsigned count;
+      unsigned capacity;
+      bool capture_failed;
+   };
+
+   static struct VulkanGraphicsPrecompileJobVec
+      vulkan_graphics_precompile_jobs;
+
+   struct VulkanComputePrecompileJob
+   {
+      Program *program;
+      Hash hash;
+      VkComputePipelineCreateInfo pipe;
+      VkPipelineShaderStageCreateInfo stage;
+      VkSpecializationInfo specialization;
+      VkSpecializationMapEntry
+         specialization_entries[VULKAN_NUM_SPEC_CONSTANTS];
+      uint32_t specialization_data[VULKAN_NUM_SPEC_CONSTANTS];
+      VkPipeline pipeline;
+      VkResult result;
+   };
+
+   struct VulkanComputePrecompileJobVec
+   {
+      struct VulkanComputePrecompileJob *items;
+      unsigned count;
+      unsigned capacity;
+      bool capture_failed;
+   };
+
+   static struct VulkanComputePrecompileJobVec
+      vulkan_compute_precompile_jobs;
 static void program_set_shader(struct Program *self,
       ShaderStage stage,
       Shader *handle)
@@ -5943,6 +6029,108 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          BufferHandle quad;
    };
 
+   /* Beetle's Vulkan program manifest. This is deliberately derived from the
+    * Renderer program slots above, not from another emulator or from a game
+    * trace. Adding a Program pointer to Renderer makes the size assertion
+    * fail until the program is classified here; the runtime uniqueness check
+    * catches duplicated or omitted offsets. */
+#define RENDERER_PIPELINE_MANIFEST(X) \
+   X(CopyToVram, copy_to_vram, Compute) \
+   X(CopyToVramMasked, copy_to_vram_masked, Compute) \
+   X(UnscaledQuadBlitter, unscaled_quad_blitter, Quad) \
+   X(ScaledQuadBlitter, scaled_quad_blitter, Quad) \
+   X(UnscaledDitherQuadBlitter, unscaled_dither_quad_blitter, Quad) \
+   X(ScaledDitherQuadBlitter, scaled_dither_quad_blitter, Quad) \
+   X(Bpp24QuadBlitter, bpp24_quad_blitter, Quad) \
+   X(Bpp24YuvQuadBlitter, bpp24_yuv_quad_blitter, Quad) \
+   X(HdrScaledQuadBlitter, hdr_scaled_quad_blitter, Quad) \
+   X(HdrUnscaledQuadBlitter, hdr_unscaled_quad_blitter, Quad) \
+   X(HdrBpp24QuadBlitter, hdr_bpp24_quad_blitter, Quad) \
+   X(HdrBpp24YuvQuadBlitter, hdr_bpp24_yuv_quad_blitter, Quad) \
+   X(ResolveToScaled, resolve_to_scaled, Compute) \
+   X(ResolveToUnscaled, resolve_to_unscaled, Compute) \
+   X(MsaaResolveWeighted, msaa_resolve_weighted, Compute) \
+   X(MsaaResolveWeightedSdr, msaa_resolve_weighted_sdr, Compute) \
+   X(BlitVramScaled, blit_vram_scaled, Compute) \
+   X(BlitVramScaledMasked, blit_vram_scaled_masked, Compute) \
+   X(BlitVramCachedScaled, blit_vram_cached_scaled, Compute) \
+   X(BlitVramCachedScaledMasked, blit_vram_cached_scaled_masked, Compute) \
+   X(BlitVramMsaaCachedScaled, blit_vram_msaa_cached_scaled, Compute) \
+   X(BlitVramMsaaCachedScaledMasked, blit_vram_msaa_cached_scaled_masked, Compute) \
+   X(BlitVramUnscaled, blit_vram_unscaled, Compute) \
+   X(BlitVramUnscaledMasked, blit_vram_unscaled_masked, Compute) \
+   X(BlitVramCachedUnscaled, blit_vram_cached_unscaled, Compute) \
+   X(BlitVramCachedUnscaledMasked, blit_vram_cached_unscaled_masked, Compute) \
+   X(Flat, flat, Primitive) \
+   X(FlatFloor, flat_floor, Primitive) \
+   X(TexturedScaled, textured_scaled, Primitive) \
+   X(TexturedUnscaled, textured_unscaled, Primitive) \
+   X(FlatMasked, flat_masked, Primitive) \
+   X(TexturedMaskedScaled, textured_masked_scaled, Primitive) \
+   X(TexturedMaskedUnscaled, textured_masked_unscaled, Primitive) \
+   X(MipmapResolve, mipmap_resolve, Quad) \
+   X(MipmapDitherResolve, mipmap_dither_resolve, Quad) \
+   X(HdrMipmapResolve, hdr_mipmap_resolve, Quad) \
+   X(AnalogDownsample, analog_downsample, Quad) \
+   X(AnalogEncode, analog_encode, Quad) \
+   X(AnalogEncodePal, analog_encode_pal, Quad) \
+   X(AnalogComb, analog_comb, Quad) \
+   X(AnalogCombPal, analog_comb_pal, Quad) \
+   X(AnalogDemod, analog_demod, Quad) \
+   X(AnalogDemodPal, analog_demod_pal, Quad) \
+   X(AnalogRgb, analog_rgb, Quad) \
+   X(AnalogRgbPal, analog_rgb_pal, Quad) \
+   X(AnalogNotch, analog_notch, Compute) \
+   X(AnalogNotchPal, analog_notch_pal, Compute) \
+   X(AnalogResolve, analog_resolve, Quad) \
+   X(AnalogResolveHdr, analog_resolve_hdr, Quad) \
+   X(MipmapEnergyFirst, mipmap_energy_first, Quad) \
+   X(MipmapEnergy, mipmap_energy, Quad) \
+   X(MipmapEnergyBlur, mipmap_energy_blur, Quad)
+
+   enum RendererPipelineManifestRole
+   {
+      RendererPipelineManifestRole_Compute,
+      RendererPipelineManifestRole_Quad,
+      RendererPipelineManifestRole_Primitive
+   };
+
+   enum RendererPipelineManifestId
+   {
+#define RENDERER_PIPELINE_MANIFEST_ENUM(id, field, role) \
+      RendererPipelineManifestId_##id,
+      RENDERER_PIPELINE_MANIFEST(RENDERER_PIPELINE_MANIFEST_ENUM)
+#undef RENDERER_PIPELINE_MANIFEST_ENUM
+      RendererPipelineManifestId_Count
+   };
+
+   struct RendererPipelineManifestEntry
+   {
+      const char *name;
+      size_t offset;
+      enum RendererPipelineManifestRole role;
+   };
+
+   static const struct RendererPipelineManifestEntry
+      renderer_pipeline_manifest[RendererPipelineManifestId_Count] = {
+#define RENDERER_PIPELINE_MANIFEST_ENTRY(id, field, role) \
+      { #field, offsetof(Renderer, pipelines.field), \
+        RendererPipelineManifestRole_##role },
+         RENDERER_PIPELINE_MANIFEST(RENDERER_PIPELINE_MANIFEST_ENTRY)
+#undef RENDERER_PIPELINE_MANIFEST_ENTRY
+      };
+
+   RHI_STATIC_ASSERT(
+         sizeof(((Renderer *)0)->pipelines) ==
+            RendererPipelineManifestId_Count * sizeof(Program *),
+         "Renderer pipeline manifest does not cover every program slot.");
+
+   static Program *renderer_pipeline_manifest_program(Renderer *self,
+         enum RendererPipelineManifestId id)
+   {
+      return *(Program **)((char *)self + renderer_pipeline_manifest[id].offset);
+   }
+
    /* SaveState lifecycle free functions (SaveState is a plain struct). vram is
     * an OwnedU32Buf managed through *_init / *_move / deinit; tracker_state is
     * an OPAQUE heap object from rhi_tt (tts_new / tts_free), so the move is a
@@ -6011,6 +6199,17 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_hd_texture_uniforms(Renderer *self,
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
+   static void renderer_precompile_current_configuration_pipelines(
+         Renderer *self);
+   static void vulkan_precompile_jobs_begin(void);
+   static bool vulkan_precompile_jobs_finish(Device *device,
+         unsigned *job_count, unsigned *graphics_job_count,
+         unsigned *compute_job_count, unsigned *worker_count,
+         retro_time_t *compile_elapsed_usec);
+   static bool vulkan_precompile_queue_compute_pipeline(
+         struct CommandBuffer *self,
+         Hash hash,
+         const VkComputePipelineCreateInfo *pipe);
    static void renderer_flush_blit(Renderer *self,
          const BlitInfoVec *infos,
          Program *program,
@@ -6018,6 +6217,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static TTRect renderer_compute_window_rect(Renderer *self,
          const TextureWindow *window);
    static void renderer_reset_scissor_queue(Renderer *self);
+   static void device_pipeline_cache_save(Device *self);
    static void renderer_reset_queue(Renderer *self);
    static void renderer_ensure_command_buffer(Renderer *self)
    {
@@ -6785,6 +6985,22 @@ static void renderer_init(Renderer *self,
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
+   if (vulkan_shader_precompilation)
+   {
+      /* Compile the complete primitive-pipeline set before the first emulated
+       * frame. This is intentionally blocking: the Android worker only
+       * parallelises the startup work and never overlaps compilation with
+       * gameplay. Other Vulkan platforms use the same deterministic set. */
+      renderer_precompile_current_configuration_pipelines(self);
+      {
+         VkClearValue clear_zero;
+         memset(&clear_zero, 0, sizeof(clear_zero));
+         commandbuffer_clear_image(cbh_get(&self->cmd),
+               ih_get(&self->scaled_framebuffer), &clear_zero);
+      }
+   }
+   else
+      LOGI("[Vulkan shader precompilation] disabled by core option\n");
    renderer_flush(self);
    renderer_reset_scissor_queue(self);
 
@@ -9624,6 +9840,663 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    }
 }
 
+static void renderer_precompile_textured_batch_variant(
+      BufferVertexVec *vertices,
+      PrimitiveInfoVec *scissors,
+      bool filtering,
+      bool scaled_read,
+      unsigned shift,
+      bool offset_uv)
+{
+   BufferVertex vertex;
+   PrimitiveInfo info;
+   unsigned i;
+
+   memset(&vertex, 0, sizeof(vertex));
+   vertex.z = 0.5f;
+   vertex.w = 1.0f;
+   info = primitive_info_make(PrimitiveInfoVec_size(scissors), -1,
+         hd_handle_make_none(), filtering, scaled_read, shift, offset_uv);
+   for (i = 0; i < 3; i++)
+      BufferVertexVec_push(vertices, &vertex);
+   PrimitiveInfoVec_push(scissors, &info);
+}
+
+static void renderer_precompile_semi_transparent_variant(Renderer *self,
+      SemiTransparentMode mode,
+      bool textured,
+      bool masked,
+      bool filtering,
+      bool scaled_read,
+      unsigned shift,
+      bool offset_uv)
+{
+   SemiTransparentState state;
+   BufferVertex vertex;
+   unsigned i;
+
+   memset(&state, 0, sizeof(state));
+   state.scissor_index = -1;
+   state.semi_transparent = mode;
+   state.textured = textured;
+   state.masked = masked;
+   state.filtering = filtering;
+   state.scaled_read = scaled_read;
+   state.shift = shift;
+   state.offset_uv = offset_uv;
+   SemiTransparentStateVec_push(
+         &self->queue.semi_transparent_state, &state);
+
+   memset(&vertex, 0, sizeof(vertex));
+   vertex.z = 0.5f;
+   vertex.w = 1.0f;
+   for (i = 0; i < 3; i++)
+      BufferVertexVec_push(&self->queue.semi_transparent, &vertex);
+}
+
+static unsigned renderer_precompile_textured_batch_manifest(
+      Renderer *self,
+      BufferVertexVec *vertices,
+      PrimitiveInfoVec *scissors)
+{
+   unsigned variants = 0;
+   unsigned shift;
+   unsigned offset_count = self->scaled_uv_offset ? 2u : 1u;
+   unsigned offset_uv;
+
+   /* A scaled framebuffer read can only be a rendered direct-16-bit texture.
+    * Palette shifts and filtering are therefore impossible on this branch. */
+   for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+   {
+      renderer_precompile_textured_batch_variant(vertices, scissors,
+            false, true, 0, offset_uv != 0);
+      variants++;
+   }
+
+   /* Unscaled textures cover direct-16, 8-bit and 4-bit source depths. Each
+    * can use nearest sampling (including filter-exclusion cases), or the one
+    * configured primitive filter. */
+   for (shift = 0; shift < 3; shift++)
+   {
+      for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+      {
+         renderer_precompile_textured_batch_variant(vertices, scissors,
+               false, false, shift, offset_uv != 0);
+         variants++;
+         if (self->primitive_filter_mode != FilterMode_NearestNeighbor)
+         {
+            renderer_precompile_textured_batch_variant(vertices, scissors,
+                  true, false, shift, offset_uv != 0);
+            variants++;
+         }
+      }
+   }
+   return variants;
+}
+
+static unsigned renderer_precompile_semi_transparent_manifest(Renderer *self,
+      SemiTransparentMode mode,
+      bool masked)
+{
+   unsigned variants = 0;
+   unsigned shift;
+   unsigned offset_count = self->scaled_uv_offset ? 2u : 1u;
+   unsigned offset_uv;
+
+   renderer_precompile_semi_transparent_variant(self, mode,
+         false, masked, false, false, 0, false);
+   variants++;
+
+   for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+   {
+      renderer_precompile_semi_transparent_variant(self, mode,
+            true, masked, false, true, 0, offset_uv != 0);
+      variants++;
+   }
+
+   for (shift = 0; shift < 3; shift++)
+   {
+      for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+      {
+         renderer_precompile_semi_transparent_variant(self, mode,
+               true, masked, false, false, shift, offset_uv != 0);
+         variants++;
+         if (self->primitive_filter_mode != FilterMode_NearestNeighbor)
+         {
+            renderer_precompile_semi_transparent_variant(self, mode,
+                  true, masked, true, false, shift, offset_uv != 0);
+            variants++;
+         }
+      }
+   }
+   return variants;
+}
+
+static void renderer_precompile_quad_pipeline(Renderer *self,
+      Program *program,
+      VkFormat format)
+{
+   ImageCreateInfo image_info = image_create_info_render_target(1, 1, format);
+   ImageHandle image = ih_make(NULL);
+   RenderPassInfo pass;
+   CommandBuffer *cmd;
+
+   image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+   image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+   ih_move(&image, device_create_image(self->device, &image_info, NULL));
+
+   render_pass_info_defaults(&pass);
+   pass.color_attachments[0] = image_get_view(ih_get(&image));
+   pass.num_color_attachments = 1;
+   pass.clear_attachments = 1;
+   pass.store_attachments = 1;
+
+   /* Only the compatible render-pass key is part of the pipeline. Avoid
+    * recording a synthetic begin/end render pass into the live command
+    * buffer: that would keep this temporary image alive until submission. */
+   renderer_ensure_command_buffer(self);
+   cmd = cbh_get(&self->cmd);
+   VK_ASSERT(!cmd->compatible_render_pass);
+   VK_ASSERT(!cmd->actual_render_pass);
+   VK_ASSERT(!cmd->framebuffer);
+   cmd->compatible_render_pass =
+      device_request_render_pass(self->device, &pass, true);
+   cmd->current_subpass = 0;
+   commandbuffer_begin_graphics(cmd);
+   commandbuffer_set_quad_state(cmd);
+   commandbuffer_set_program(cmd, program);
+   commandbuffer_set_vertex_binding(cmd, 0,
+         bh_get(&self->quad), 0, 8, VK_VERTEX_INPUT_RATE_VERTEX);
+   commandbuffer_set_vertex_attrib(cmd, 0, 0,
+         VK_FORMAT_R32G32_SFLOAT, 0);
+   commandbuffer_set_primitive_topology(cmd,
+         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+   commandbuffer_draw(cmd, 4, 1, 0, 0);
+   cmd->compatible_render_pass = NULL;
+   commandbuffer_begin_compute(cmd);
+   ih_reset(&image);
+}
+
+static void renderer_precompile_compute_pipeline(Renderer *self,
+      Program *program,
+      unsigned filter_mode)
+{
+   CommandBuffer *cmd;
+
+   if (!program)
+      return;
+
+   renderer_ensure_command_buffer(self);
+   cmd = cbh_get(&self->cmd);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Samples,
+         self->msaa);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode,
+         filter_mode);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Scaling,
+         self->scaling);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_ResolveEotf,
+         psx_hdr_sdr_eotf);
+   commandbuffer_set_specialization_constant_mask(cmd, ~0u);
+   commandbuffer_set_program(cmd, program);
+   commandbuffer_dispatch(cmd, 1, 1, 1);
+}
+
+static bool renderer_precompile_manifest_program_is_active(Renderer *self,
+      enum RendererPipelineManifestId id)
+{
+   bool analog = psx_video_cable != RHI_CABLE_NONE;
+   bool hdr_quad = psx_hdr_active && !analog;
+   bool ssaa = super_sampling && self->scaling != 1;
+   bool adaptive = adaptive_smoothing && self->scaling != 1 && !ssaa;
+   bool dither = dither_mode != RHI_DITHER_OFF && !psx_hdr_active;
+   bool regular_scaled = !ssaa && !adaptive;
+   bool wide = self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+
+   switch (id)
+   {
+      case RendererPipelineManifestId_CopyToVram:
+      case RendererPipelineManifestId_CopyToVramMasked:
+      case RendererPipelineManifestId_ResolveToScaled:
+      case RendererPipelineManifestId_ResolveToUnscaled:
+      case RendererPipelineManifestId_BlitVramScaled:
+      case RendererPipelineManifestId_BlitVramScaledMasked:
+      case RendererPipelineManifestId_BlitVramUnscaled:
+      case RendererPipelineManifestId_BlitVramUnscaledMasked:
+      case RendererPipelineManifestId_BlitVramCachedUnscaled:
+      case RendererPipelineManifestId_BlitVramCachedUnscaledMasked:
+      case RendererPipelineManifestId_Flat:
+      case RendererPipelineManifestId_TexturedScaled:
+      case RendererPipelineManifestId_TexturedUnscaled:
+      case RendererPipelineManifestId_FlatMasked:
+      case RendererPipelineManifestId_TexturedMaskedScaled:
+      case RendererPipelineManifestId_TexturedMaskedUnscaled:
+         return true;
+
+      case RendererPipelineManifestId_BlitVramCachedScaled:
+      case RendererPipelineManifestId_BlitVramCachedScaledMasked:
+         return self->msaa == 1;
+      case RendererPipelineManifestId_BlitVramMsaaCachedScaled:
+      case RendererPipelineManifestId_BlitVramMsaaCachedScaledMasked:
+         return self->msaa > 1;
+      case RendererPipelineManifestId_MsaaResolveWeighted:
+         return self->msaa > 1 && wide;
+      case RendererPipelineManifestId_MsaaResolveWeightedSdr:
+         return self->msaa > 1 && !wide;
+
+      case RendererPipelineManifestId_FlatFloor:
+         return wide && !psx_hdr_multipass;
+
+      case RendererPipelineManifestId_ScaledQuadBlitter:
+         return (!hdr_quad && regular_scaled && !dither) ||
+            (show_vram && !psx_hdr_active);
+      case RendererPipelineManifestId_UnscaledQuadBlitter:
+         return !hdr_quad && ssaa && !dither;
+      case RendererPipelineManifestId_ScaledDitherQuadBlitter:
+         return !hdr_quad && regular_scaled && dither;
+      case RendererPipelineManifestId_UnscaledDitherQuadBlitter:
+         return !hdr_quad && ssaa && dither;
+      case RendererPipelineManifestId_Bpp24QuadBlitter:
+         return !hdr_quad && !mdec_yuv;
+      case RendererPipelineManifestId_Bpp24YuvQuadBlitter:
+         return !hdr_quad && mdec_yuv;
+      case RendererPipelineManifestId_HdrScaledQuadBlitter:
+         return hdr_quad && regular_scaled;
+      case RendererPipelineManifestId_HdrUnscaledQuadBlitter:
+         return hdr_quad && ssaa;
+      case RendererPipelineManifestId_HdrBpp24QuadBlitter:
+         return hdr_quad && !mdec_yuv;
+      case RendererPipelineManifestId_HdrBpp24YuvQuadBlitter:
+         return hdr_quad && mdec_yuv;
+      case RendererPipelineManifestId_MipmapResolve:
+         return !hdr_quad && adaptive && !dither;
+      case RendererPipelineManifestId_MipmapDitherResolve:
+         return !hdr_quad && adaptive && dither;
+      case RendererPipelineManifestId_HdrMipmapResolve:
+         return hdr_quad && adaptive;
+
+      case RendererPipelineManifestId_MipmapEnergyFirst:
+         return adaptive && trailing_zeroes(self->scaling) >= 1;
+      case RendererPipelineManifestId_MipmapEnergy:
+         return adaptive && trailing_zeroes(self->scaling) >= 2;
+      case RendererPipelineManifestId_MipmapEnergyBlur:
+         return adaptive;
+
+      case RendererPipelineManifestId_AnalogDownsample:
+         return analog && self->scaling != 1 && !ssaa;
+      case RendererPipelineManifestId_AnalogRgb:
+      case RendererPipelineManifestId_AnalogRgbPal:
+         return psx_video_cable == RHI_CABLE_RGB;
+      case RendererPipelineManifestId_AnalogEncode:
+      case RendererPipelineManifestId_AnalogEncodePal:
+      case RendererPipelineManifestId_AnalogComb:
+      case RendererPipelineManifestId_AnalogCombPal:
+      case RendererPipelineManifestId_AnalogDemod:
+      case RendererPipelineManifestId_AnalogDemodPal:
+      case RendererPipelineManifestId_AnalogNotch:
+      case RendererPipelineManifestId_AnalogNotchPal:
+         return analog && psx_video_cable != RHI_CABLE_RGB;
+      case RendererPipelineManifestId_AnalogResolve:
+         return analog && !psx_hdr_active;
+      case RendererPipelineManifestId_AnalogResolveHdr:
+         return analog && psx_hdr_active;
+
+      default:
+         return false;
+   }
+}
+
+static bool renderer_precompile_manifest_validate(Renderer *self,
+      unsigned *active_programs,
+      unsigned *missing_programs)
+{
+   bool complete = true;
+   unsigned active = 0;
+   unsigned missing = 0;
+   unsigned i;
+
+   for (i = 0; i < RendererPipelineManifestId_Count; i++)
+   {
+      Program *program;
+      bool found = false;
+      unsigned j;
+
+      for (j = i + 1; j < RendererPipelineManifestId_Count; j++)
+      {
+         if (renderer_pipeline_manifest[i].offset ==
+               renderer_pipeline_manifest[j].offset)
+         {
+            LOGE("[Vulkan shader precompilation manifest] duplicate slots program=%s other=%s\n",
+                  renderer_pipeline_manifest[i].name,
+                  renderer_pipeline_manifest[j].name);
+            complete = false;
+         }
+      }
+
+      if (!renderer_precompile_manifest_program_is_active(self,
+            (enum RendererPipelineManifestId)i))
+         continue;
+
+      active++;
+      program = renderer_pipeline_manifest_program(self,
+            (enum RendererPipelineManifestId)i);
+      if (!program)
+      {
+         LOGE("[Vulkan shader precompilation manifest] active program is unavailable program=%s role=%u\n",
+               renderer_pipeline_manifest[i].name,
+               (unsigned)renderer_pipeline_manifest[i].role);
+         missing++;
+         complete = false;
+         continue;
+      }
+
+      for (j = 0; j < vulkan_graphics_precompile_jobs.count; j++)
+         if (vulkan_graphics_precompile_jobs.items[j].program == program)
+         {
+            found = true;
+            break;
+         }
+      if (!found)
+         for (j = 0; j < vulkan_compute_precompile_jobs.count; j++)
+            if (vulkan_compute_precompile_jobs.items[j].program == program)
+            {
+               found = true;
+               break;
+            }
+
+      if (!found)
+      {
+         LOGE("[Vulkan shader precompilation manifest] no captured recipe program=%s role=%u\n",
+               renderer_pipeline_manifest[i].name,
+               (unsigned)renderer_pipeline_manifest[i].role);
+         missing++;
+         complete = false;
+      }
+   }
+
+   *active_programs = active;
+   *missing_programs = missing;
+   return complete;
+}
+
+static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self)
+{
+   bool analog = psx_video_cable != RHI_CABLE_NONE;
+   bool hdr_quad = psx_hdr_active && !analog;
+   bool ssaa = super_sampling && self->scaling != 1;
+   bool adaptive = adaptive_smoothing && self->scaling != 1 && !ssaa;
+   bool dither = dither_mode != RHI_DITHER_OFF && !psx_hdr_active;
+   VkFormat hdr_format = VK_FORMAT_UNDEFINED;
+   VkFormat scanout_format;
+   Program *program;
+
+   if (psx_hdr_active)
+      hdr_format = renderer_hdr_scanout_format(self);
+   scanout_format = analog ? VK_FORMAT_R16G16B16A16_SFLOAT
+      : hdr_quad ? hdr_format
+      : dither ? VK_FORMAT_A1R5G5B5_UNORM_PACK16
+      : VK_FORMAT_R8G8B8A8_UNORM;
+
+   if (adaptive)
+      program = hdr_quad ? self->pipelines.hdr_mipmap_resolve
+         : dither ? self->pipelines.mipmap_dither_resolve
+         : self->pipelines.mipmap_resolve;
+   else if (ssaa)
+      program = hdr_quad ? self->pipelines.hdr_unscaled_quad_blitter
+         : dither ? self->pipelines.unscaled_dither_quad_blitter
+         : self->pipelines.unscaled_quad_blitter;
+   else
+      program = hdr_quad ? self->pipelines.hdr_scaled_quad_blitter
+         : dither ? self->pipelines.scaled_dither_quad_blitter
+         : self->pipelines.scaled_quad_blitter;
+   renderer_precompile_quad_pipeline(self, program, scanout_format);
+
+   program = hdr_quad
+      ? (mdec_yuv ? self->pipelines.hdr_bpp24_yuv_quad_blitter
+                  : self->pipelines.hdr_bpp24_quad_blitter)
+      : (mdec_yuv ? self->pipelines.bpp24_yuv_quad_blitter
+                  : self->pipelines.bpp24_quad_blitter);
+   renderer_precompile_quad_pipeline(self, program,
+         analog ? VK_FORMAT_R16G16B16A16_SFLOAT
+                : hdr_quad ? hdr_format : VK_FORMAT_R8G8B8A8_UNORM);
+
+   if (show_vram && !psx_hdr_active)
+      renderer_precompile_quad_pipeline(self,
+            self->pipelines.scaled_quad_blitter,
+            VK_FORMAT_A1R5G5B5_UNORM_PACK16);
+
+   if (adaptive)
+   {
+      if (trailing_zeroes(self->scaling) >= 1)
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.mipmap_energy_first,
+               self->scaled_fb_format);
+      if (trailing_zeroes(self->scaling) >= 2)
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.mipmap_energy,
+               self->scaled_fb_format);
+      renderer_precompile_quad_pipeline(self,
+            self->pipelines.mipmap_energy_blur, VK_FORMAT_R8_UNORM);
+   }
+
+   if (analog)
+   {
+      if (self->scaling != 1 && !ssaa)
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_downsample,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+      if (psx_video_cable == RHI_CABLE_RGB)
+      {
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_rgb,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_rgb_pal,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+      }
+      else
+      {
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_encode, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_encode_pal, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_comb, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_comb_pal, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_demod,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_demod_pal,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+         renderer_precompile_compute_pipeline(self,
+               self->pipelines.analog_notch, FilterMode_NearestNeighbor);
+         renderer_precompile_compute_pipeline(self,
+               self->pipelines.analog_notch_pal,
+               FilterMode_NearestNeighbor);
+      }
+      renderer_precompile_quad_pipeline(self,
+            psx_hdr_active ? self->pipelines.analog_resolve_hdr
+                           : self->pipelines.analog_resolve,
+            psx_hdr_active ? hdr_format : VK_FORMAT_R8G8B8A8_UNORM);
+   }
+
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.resolve_to_scaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.resolve_to_unscaled, FilterMode_NearestNeighbor);
+   if (ssaa)
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.resolve_to_unscaled, 1u);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.copy_to_vram, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.copy_to_vram_masked, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_scaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_scaled_masked, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_unscaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_unscaled_masked,
+         FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_unscaled,
+         FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_unscaled_masked,
+         FilterMode_NearestNeighbor);
+
+   if (self->msaa > 1)
+   {
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_msaa_cached_scaled,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_msaa_cached_scaled_masked,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
+               ? self->pipelines.msaa_resolve_weighted
+               : self->pipelines.msaa_resolve_weighted_sdr,
+            FilterMode_NearestNeighbor);
+   }
+   else
+   {
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_cached_scaled,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_cached_scaled_masked,
+            FilterMode_NearestNeighbor);
+   }
+}
+
+static void renderer_precompile_current_configuration_pipelines(
+      Renderer *self)
+{
+   static const SemiTransparentMode modes[] = {
+      SemiTransparentMode_Average,
+      SemiTransparentMode_Add,
+      SemiTransparentMode_Sub,
+      SemiTransparentMode_AddQuarter
+   };
+   TTRect rect = { 0, 0, 1, 1 };
+   unsigned feedback;
+   retro_time_t start_usec = cpu_features_get_time_usec();
+   retro_time_t compile_elapsed_usec = 0;
+   unsigned variants = 0;
+   unsigned jobs = 0;
+   unsigned graphics_jobs = 0;
+   unsigned compute_jobs = 0;
+   unsigned workers = 0;
+   unsigned manifest_programs = 0;
+   unsigned manifest_missing = 0;
+   bool manifest_complete;
+   bool complete;
+
+   vulkan_precompile_jobs_begin();
+   vulkan_pipeline_precompiling = true;
+
+   /* These core options are parsed before renderer creation, while their
+    * normal per-frame copies happen after it. Seed the renderer now so the
+    * current-configuration manifest cannot silently assume constructor
+    * defaults. */
+   self->scaled_uv_offset = scaled_uv_offset;
+   self->primitive_filter_mode = (FilterMode)filter_mode;
+
+   /* A normal and an input-attachment-compatible render pass have distinct
+    * Vulkan compatibility keys. Ordinary opaque draws can occur in either,
+    * but masking and translucency always make the pass feedback-compatible.
+    * Generate only source-reachable combinations through the real queue and
+    * state setters so pipeline hashes cannot drift from runtime. */
+   for (feedback = 0; feedback < 2; feedback++)
+   {
+      self->render_pass_is_feedback = feedback != 0;
+      {
+         BufferVertex vertex;
+         PrimitiveInfo info;
+         unsigned i;
+         memset(&vertex, 0, sizeof(vertex));
+         vertex.z = 0.5f;
+         vertex.w = 1.0f;
+         for (i = 0; i < 3; i++)
+            BufferVertexVec_push(&self->queue.opaque, &vertex);
+         info = primitive_info_make(0, -1, hd_handle_make_none(),
+               false, false, 0, false);
+         PrimitiveInfoVec_push(&self->queue.opaque_scissor, &info);
+         variants++;
+      }
+
+      variants += renderer_precompile_textured_batch_manifest(self,
+            &self->queue.opaque_textured,
+            &self->queue.opaque_textured_scissor);
+
+      if (feedback)
+      {
+         unsigned mode;
+
+         /* The first opaque pass for a translucent textured primitive uses
+          * TransMode_SemiTransOpaque. It shares the same correlated texture
+          * axes as ordinary opaque textured draws. */
+         variants += renderer_precompile_textured_batch_manifest(self,
+               &self->queue.semi_transparent_opaque,
+               &self->queue.semi_transparent_opaque_scissor);
+
+         /* Mask-test without translucency uses fixed-function destination
+          * alpha blending, but still requires a feedback-compatible pass. */
+         variants += renderer_precompile_semi_transparent_manifest(self,
+               SemiTransparentMode_None, true);
+
+         for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
+         {
+            variants += renderer_precompile_semi_transparent_manifest(self,
+                  modes[mode], false);
+            variants += renderer_precompile_semi_transparent_manifest(self,
+                  modes[mode], true);
+         }
+      }
+
+      renderer_flush_render_pass(self, &rect);
+   }
+
+   renderer_precompile_manifest_nonprimitive_pipelines(self);
+   manifest_complete = renderer_precompile_manifest_validate(self,
+         &manifest_programs, &manifest_missing);
+
+   complete = vulkan_precompile_jobs_finish(self->device, &jobs,
+         &graphics_jobs, &compute_jobs, &workers, &compile_elapsed_usec);
+   complete = complete && manifest_complete;
+   vulkan_pipeline_precompiling = false;
+
+   /* Android may terminate the process without a clean libretro teardown.
+    * Persist a successfully completed precompile immediately so that the
+    * expensive driver work survives even in that case. */
+   if (complete)
+      device_pipeline_cache_save(self->device);
+
+   {
+      size_t driver_cache_bytes = 0;
+      VkPipelineCache driver_cache = device_get_pipeline_cache(self->device);
+      VkResult cache_result = driver_cache != VK_NULL_HANDLE
+         ? vkGetPipelineCacheData(
+               device_get_device(self->device),
+               driver_cache,
+               &driver_cache_bytes, NULL)
+         : VK_ERROR_INITIALIZATION_FAILED;
+      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
+         variants, jobs, graphics_jobs, compute_jobs,
+         manifest_programs, manifest_missing, workers,
+         complete ? 1u : 0u,
+         (long long)compile_elapsed_usec,
+         (long long)(cpu_features_get_time_usec() - start_usec),
+         (int)cache_result,
+         (unsigned long long)driver_cache_bytes);
+   }
+}
+
 static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       bool scaled_read,
       bool textured)
@@ -9717,9 +10590,12 @@ static void renderer_dispatch(Renderer *self,
 
    renderer_hd_texture_uniforms(self, hd_texture);
    commandbuffer_set_scissor(cbh_get(&self->cmd), scissor < 0 ? &self->queue.default_scissor : Rect2DVec_at(&self->queue.scissors, scissor));
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift, shift);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV, (int)offset_uv);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
+         textured && filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
+         textured ? shift : 0);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
+         textured && offset_uv ? 1 : 0);
    renderer_dispatch_set_scaled_read_texture(self, scaled_read, textured);
    memcpy(vert, BufferVertexVec_data((struct BufferVertexVec *)vertices) + 3 * (*PrimitiveInfoVec_front(scissors)).triangle_index, 3 * sizeof(BufferVertex));
    vert += 3;
@@ -9745,7 +10621,8 @@ static void renderer_dispatch(Renderer *self,
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).filtering != filtering) {
             filtering = (*PrimitiveInfoVec_at(scissors, i)).filtering;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
+                  textured && filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).scaled_read != scaled_read) {
             scaled_read = (*PrimitiveInfoVec_at(scissors, i)).scaled_read;
@@ -9753,11 +10630,13 @@ static void renderer_dispatch(Renderer *self,
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).shift != shift) {
             shift = (*PrimitiveInfoVec_at(scissors, i)).shift;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift, shift);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
+                  textured ? shift : 0);
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).offset_uv != offset_uv) {
             offset_uv = (*PrimitiveInfoVec_at(scissors, i)).offset_uv;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV, (int)offset_uv);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
+                  textured && offset_uv ? 1 : 0);
          }
       }
       memcpy(vert, BufferVertexVec_data((struct BufferVertexVec *)vertices) + 3 * (*PrimitiveInfoVec_at(scissors, i)).triangle_index, 3 * sizeof(BufferVertex));
@@ -10524,10 +11403,17 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    renderer_hd_texture_uniforms(self, state->hd_texture_index);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, state->filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
+         state->textured && state->filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift, state->shift);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV, (int)state->offset_uv);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
+         state->textured ? state->shift : 0);
+   /* The flat vertex variant retains the shared OFFSET_UV specialization
+    * declaration even though its TEXTURED block is compiled out. Do not let
+    * the preceding textured primitive split otherwise-identical flat
+    * pipelines on a value which cannot affect their output. */
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
+         state->textured && state->offset_uv ? 1 : 0);
    /* Off the 16F target the UNORM write clamps anyway, so hot would only
     * split pipelines for an identical result; force it off there. This is
     * also what makes primitive.frag's hot path SDR-safe by construction. */
@@ -14202,6 +15088,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
       }
 
+      if (vulkan_pipeline_precompiling)
+      {
+         vulkan_precompile_queue_compute_pipeline(self, hash, &info);
+         return VK_NULL_HANDLE;
+      }
 
       res = vkCreateComputePipelines(device_get_device(self->device),
             device_get_pipeline_cache(self->device), 1, &info, NULL,
@@ -14211,6 +15102,574 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       return program_add_pipeline(self->current_program, hash, compute_pipeline);
       }
+   }
+
+   static void vulkan_precompile_job_fix_pointers(
+         struct VulkanGraphicsPrecompileJob *job)
+   {
+      unsigned i;
+
+      job->pipe.pViewportState = &job->viewport;
+      job->pipe.pDynamicState = &job->dynamic;
+      job->pipe.pColorBlendState = &job->blend;
+      job->pipe.pDepthStencilState = &job->depth_stencil;
+      job->pipe.pVertexInputState = &job->vertex_input;
+      job->pipe.pInputAssemblyState = &job->input_assembly;
+      job->pipe.pMultisampleState = &job->multisample;
+      job->pipe.pRasterizationState = &job->rasterization;
+      job->pipe.pStages = job->stages;
+      job->dynamic.pDynamicStates = job->dynamic_states;
+      job->blend.pAttachments = job->blend_attachments;
+      job->vertex_input.pVertexAttributeDescriptions =
+         job->vertex_attributes;
+      job->vertex_input.pVertexBindingDescriptions = job->vertex_bindings;
+
+      for (i = 0; i < job->pipe.stageCount; i++)
+      {
+         if (job->specialization[i].mapEntryCount)
+         {
+            job->specialization[i].pMapEntries =
+               job->specialization_entries[i];
+            job->specialization[i].pData = job->specialization_data[i];
+            job->stages[i].pSpecializationInfo = &job->specialization[i];
+         }
+         else
+            job->stages[i].pSpecializationInfo = NULL;
+      }
+   }
+
+   static bool vulkan_precompile_queue_graphics_pipeline(
+         struct CommandBuffer *self,
+         Hash hash,
+         const VkGraphicsPipelineCreateInfo *pipe)
+   {
+      struct VulkanGraphicsPrecompileJobVec *jobs =
+         &vulkan_graphics_precompile_jobs;
+      struct VulkanGraphicsPrecompileJob *job;
+      unsigned i;
+
+      for (i = 0; i < jobs->count; i++)
+      {
+         if (jobs->items[i].program == self->current_program &&
+             jobs->items[i].hash == hash)
+            return true;
+      }
+
+      if (jobs->count == jobs->capacity)
+      {
+         unsigned new_capacity = jobs->capacity ? jobs->capacity * 2u : 64u;
+         struct VulkanGraphicsPrecompileJob *new_items =
+            (struct VulkanGraphicsPrecompileJob *)realloc(jobs->items,
+               (size_t)new_capacity * sizeof(*new_items));
+         if (!new_items)
+         {
+            if (!jobs->capture_failed)
+               LOGE("[Vulkan shader precompilation] could not allocate pipeline job storage\n");
+            jobs->capture_failed = true;
+            return false;
+         }
+         jobs->items = new_items;
+         jobs->capacity = new_capacity;
+      }
+
+      if (!pipe->pViewportState || !pipe->pDynamicState ||
+          !pipe->pColorBlendState || !pipe->pDepthStencilState ||
+          !pipe->pVertexInputState || !pipe->pInputAssemblyState ||
+          !pipe->pMultisampleState || !pipe->pRasterizationState ||
+          !pipe->pStages ||
+          pipe->pNext || pipe->pTessellationState ||
+          pipe->pViewportState->pNext ||
+          pipe->pViewportState->pViewports ||
+          pipe->pViewportState->pScissors ||
+          pipe->pDynamicState->pNext ||
+          pipe->pColorBlendState->pNext ||
+          pipe->pDepthStencilState->pNext ||
+          pipe->pVertexInputState->pNext ||
+          pipe->pInputAssemblyState->pNext ||
+          pipe->pMultisampleState->pNext ||
+          pipe->pMultisampleState->pSampleMask ||
+          pipe->pRasterizationState->pNext ||
+          pipe->stageCount > (unsigned)ShaderStage_Count ||
+          pipe->pDynamicState->dynamicStateCount > 2u ||
+          (pipe->pDynamicState->dynamicStateCount &&
+             !pipe->pDynamicState->pDynamicStates) ||
+          pipe->pColorBlendState->attachmentCount > VULKAN_NUM_ATTACHMENTS ||
+          (pipe->pColorBlendState->attachmentCount &&
+             !pipe->pColorBlendState->pAttachments) ||
+          pipe->pVertexInputState->vertexAttributeDescriptionCount >
+             VULKAN_NUM_VERTEX_ATTRIBS ||
+          (pipe->pVertexInputState->vertexAttributeDescriptionCount &&
+             !pipe->pVertexInputState->pVertexAttributeDescriptions) ||
+          pipe->pVertexInputState->vertexBindingDescriptionCount >
+             VULKAN_NUM_VERTEX_BUFFERS ||
+          (pipe->pVertexInputState->vertexBindingDescriptionCount &&
+             !pipe->pVertexInputState->pVertexBindingDescriptions))
+      {
+         LOGE("[Vulkan shader precompilation] unsupported pipeline description; precompilation is incomplete\n");
+         jobs->capture_failed = true;
+         return false;
+      }
+
+      job = &jobs->items[jobs->count++];
+      memset(job, 0, sizeof(*job));
+      job->program = self->current_program;
+      job->hash = hash;
+      job->pipe = *pipe;
+      job->viewport = *pipe->pViewportState;
+      job->dynamic = *pipe->pDynamicState;
+      if (job->dynamic.dynamicStateCount)
+         memcpy(job->dynamic_states, job->dynamic.pDynamicStates,
+               job->dynamic.dynamicStateCount * sizeof(job->dynamic_states[0]));
+      job->blend = *pipe->pColorBlendState;
+      if (job->blend.attachmentCount)
+         memcpy(job->blend_attachments, job->blend.pAttachments,
+               job->blend.attachmentCount * sizeof(job->blend_attachments[0]));
+      job->depth_stencil = *pipe->pDepthStencilState;
+      job->vertex_input = *pipe->pVertexInputState;
+      if (job->vertex_input.vertexAttributeDescriptionCount)
+         memcpy(job->vertex_attributes,
+               job->vertex_input.pVertexAttributeDescriptions,
+               job->vertex_input.vertexAttributeDescriptionCount *
+                  sizeof(job->vertex_attributes[0]));
+      if (job->vertex_input.vertexBindingDescriptionCount)
+         memcpy(job->vertex_bindings,
+               job->vertex_input.pVertexBindingDescriptions,
+               job->vertex_input.vertexBindingDescriptionCount *
+                  sizeof(job->vertex_bindings[0]));
+      job->input_assembly = *pipe->pInputAssemblyState;
+      job->multisample = *pipe->pMultisampleState;
+      job->rasterization = *pipe->pRasterizationState;
+      memcpy(job->stages, pipe->pStages,
+            pipe->stageCount * sizeof(job->stages[0]));
+
+      for (i = 0; i < pipe->stageCount; i++)
+      {
+         const VkSpecializationInfo *source =
+            pipe->pStages[i].pSpecializationInfo;
+         if (pipe->pStages[i].pNext || !pipe->pStages[i].pName)
+         {
+            LOGE("[Vulkan shader precompilation] unsupported shader stage description; precompilation is incomplete\n");
+            jobs->capture_failed = true;
+            jobs->count--;
+            return false;
+         }
+         if (!source)
+            continue;
+         if (source->mapEntryCount > VULKAN_NUM_SPEC_CONSTANTS ||
+             source->dataSize > sizeof(job->specialization_data[i]) ||
+             (source->mapEntryCount && !source->pMapEntries) ||
+             (source->dataSize && !source->pData))
+         {
+            LOGE("[Vulkan shader precompilation] unsupported specialization data; precompilation is incomplete\n");
+            jobs->capture_failed = true;
+            jobs->count--;
+            return false;
+         }
+         job->specialization[i] = *source;
+         if (source->mapEntryCount)
+            memcpy(job->specialization_entries[i], source->pMapEntries,
+                  source->mapEntryCount *
+                     sizeof(job->specialization_entries[i][0]));
+         if (source->dataSize)
+            memcpy(job->specialization_data[i], source->pData,
+                  source->dataSize);
+      }
+
+      job->pipeline = VK_NULL_HANDLE;
+      job->result = VK_NOT_READY;
+      return true;
+   }
+
+   static void vulkan_precompile_compute_job_fix_pointers(
+         struct VulkanComputePrecompileJob *job)
+   {
+      if (job->specialization.mapEntryCount)
+      {
+         job->specialization.pMapEntries = job->specialization_entries;
+         job->specialization.pData = job->specialization_data;
+         job->stage.pSpecializationInfo = &job->specialization;
+      }
+      else
+         job->stage.pSpecializationInfo = NULL;
+      job->pipe.stage = job->stage;
+   }
+
+   static bool vulkan_precompile_queue_compute_pipeline(
+         struct CommandBuffer *self,
+         Hash hash,
+         const VkComputePipelineCreateInfo *pipe)
+   {
+      struct VulkanComputePrecompileJobVec *jobs =
+         &vulkan_compute_precompile_jobs;
+      struct VulkanComputePrecompileJob *job;
+      const VkSpecializationInfo *source = pipe->stage.pSpecializationInfo;
+      unsigned i;
+
+      for (i = 0; i < jobs->count; i++)
+      {
+         if (jobs->items[i].program == self->current_program &&
+             jobs->items[i].hash == hash)
+            return true;
+      }
+
+      if (jobs->count == jobs->capacity)
+      {
+         unsigned new_capacity = jobs->capacity ? jobs->capacity * 2u : 16u;
+         struct VulkanComputePrecompileJob *new_items =
+            (struct VulkanComputePrecompileJob *)realloc(jobs->items,
+               (size_t)new_capacity * sizeof(*new_items));
+         if (!new_items)
+         {
+            if (!jobs->capture_failed)
+               LOGE("[Vulkan shader precompilation] could not allocate compute pipeline job storage\n");
+            jobs->capture_failed = true;
+            return false;
+         }
+         jobs->items = new_items;
+         jobs->capacity = new_capacity;
+      }
+
+      if (pipe->pNext || pipe->stage.pNext || !pipe->stage.pName ||
+          (source &&
+             (source->mapEntryCount > VULKAN_NUM_SPEC_CONSTANTS ||
+              source->dataSize > sizeof(job->specialization_data) ||
+              (source->mapEntryCount && !source->pMapEntries) ||
+              (source->dataSize && !source->pData))))
+      {
+         LOGE("[Vulkan shader precompilation] unsupported compute pipeline description; precompilation is incomplete\n");
+         jobs->capture_failed = true;
+         return false;
+      }
+
+      job = &jobs->items[jobs->count++];
+      memset(job, 0, sizeof(*job));
+      job->program = self->current_program;
+      job->hash = hash;
+      job->pipe = *pipe;
+      job->stage = pipe->stage;
+      if (source)
+      {
+         job->specialization = *source;
+         if (source->mapEntryCount)
+            memcpy(job->specialization_entries, source->pMapEntries,
+                  source->mapEntryCount *
+                     sizeof(job->specialization_entries[0]));
+         if (source->dataSize)
+            memcpy(job->specialization_data, source->pData,
+                  source->dataSize);
+      }
+
+      job->pipeline = VK_NULL_HANDLE;
+      job->result = VK_NOT_READY;
+      return true;
+   }
+
+   struct VulkanPrecompileWorker
+   {
+      Device *device;
+      VkPipelineCache pipeline_cache;
+      struct VulkanPrecompileQueue *queue;
+   };
+
+   struct VulkanPrecompileQueue
+   {
+      slock_t *lock;
+      unsigned next_job;
+      unsigned graphics_jobs;
+      unsigned total_jobs;
+   };
+
+   static void vulkan_precompile_worker(void *userdata)
+   {
+      struct VulkanPrecompileWorker *worker =
+         (struct VulkanPrecompileWorker *)userdata;
+      struct VulkanPrecompileQueue *queue = worker->queue;
+
+      for (;;)
+      {
+         unsigned i;
+
+         if (queue->lock)
+            slock_lock(queue->lock);
+         i = queue->next_job++;
+         if (queue->lock)
+            slock_unlock(queue->lock);
+         if (i >= queue->total_jobs)
+            break;
+
+         if (i < queue->graphics_jobs)
+         {
+            struct VulkanGraphicsPrecompileJob *job =
+               &vulkan_graphics_precompile_jobs.items[i];
+            job->result = vkCreateGraphicsPipelines(
+                  device_get_device(worker->device),
+                  worker->pipeline_cache,
+                  1, &job->pipe, NULL, &job->pipeline);
+         }
+         else
+         {
+            struct VulkanComputePrecompileJob *job =
+               &vulkan_compute_precompile_jobs.items[
+                  i - queue->graphics_jobs];
+            job->result = vkCreateComputePipelines(
+                  device_get_device(worker->device),
+                  worker->pipeline_cache,
+                  1, &job->pipe, NULL, &job->pipeline);
+         }
+      }
+   }
+
+   static void vulkan_precompile_jobs_begin(void)
+   {
+      free(vulkan_graphics_precompile_jobs.items);
+      memset(&vulkan_graphics_precompile_jobs, 0,
+            sizeof(vulkan_graphics_precompile_jobs));
+      free(vulkan_compute_precompile_jobs.items);
+      memset(&vulkan_compute_precompile_jobs, 0,
+            sizeof(vulkan_compute_precompile_jobs));
+   }
+
+   static bool vulkan_precompile_jobs_finish(Device *device,
+         unsigned *job_count, unsigned *graphics_job_count,
+         unsigned *compute_job_count, unsigned *worker_count,
+         retro_time_t *compile_elapsed_usec)
+   {
+      struct VulkanGraphicsPrecompileJobVec *jobs =
+         &vulkan_graphics_precompile_jobs;
+      struct VulkanComputePrecompileJobVec *compute_jobs =
+         &vulkan_compute_precompile_jobs;
+      enum { VulkanPrecompileMaxWorkers = 4 };
+      struct VulkanPrecompileWorker worker[VulkanPrecompileMaxWorkers];
+      struct VulkanPrecompileQueue queue;
+      sthread_t *threads[VulkanPrecompileMaxWorkers - 1];
+      VkPipelineCache private_cache[VulkanPrecompileMaxWorkers];
+      void *initial_cache_data = NULL;
+      size_t initial_cache_size = 0;
+      retro_time_t start_usec;
+      bool complete;
+      unsigned workers = 1;
+      unsigned private_cache_count = 0;
+      unsigned total_count;
+      unsigned i;
+
+      memset(worker, 0, sizeof(worker));
+      memset(&queue, 0, sizeof(queue));
+      memset(threads, 0, sizeof(threads));
+      memset(private_cache, 0, sizeof(private_cache));
+
+      total_count = jobs->count + compute_jobs->count;
+      *job_count = total_count;
+      *graphics_job_count = jobs->count;
+      *compute_job_count = compute_jobs->count;
+      *worker_count = 0;
+      *compile_elapsed_usec = 0;
+      complete = total_count != 0 && !jobs->capture_failed &&
+         !compute_jobs->capture_failed;
+
+      for (i = 0; i < jobs->count; i++)
+         vulkan_precompile_job_fix_pointers(&jobs->items[i]);
+      for (i = 0; i < compute_jobs->count; i++)
+         vulkan_precompile_compute_job_fix_pointers(
+               &compute_jobs->items[i]);
+
+      start_usec = cpu_features_get_time_usec();
+#if defined(ANDROID)
+      if (total_count > 1)
+      {
+         unsigned desired_workers = cpu_features_get_core_amount();
+         VkPipelineCache device_cache = device_get_pipeline_cache(device);
+         VkResult cache_result = vkGetPipelineCacheData(
+               device_get_device(device), device_cache,
+               &initial_cache_size, NULL);
+         VkPipelineCacheCreateInfo cache_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
+         };
+
+         if (desired_workers > VulkanPrecompileMaxWorkers)
+            desired_workers = VulkanPrecompileMaxWorkers;
+         if (desired_workers > total_count)
+            desired_workers = total_count;
+
+         if (cache_result == VK_SUCCESS && initial_cache_size)
+         {
+            initial_cache_data = malloc(initial_cache_size);
+            if (initial_cache_data)
+               cache_result = vkGetPipelineCacheData(
+                     device_get_device(device), device_cache,
+                     &initial_cache_size, initial_cache_data);
+            else
+               cache_result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         }
+
+         if (cache_result == VK_SUCCESS)
+         {
+            unsigned cache_index;
+            cache_info.initialDataSize = initial_cache_size;
+            cache_info.pInitialData = initial_cache_data;
+            for (cache_index = 0;
+                 cache_index < desired_workers;
+                 cache_index++)
+            {
+               cache_result = vkCreatePipelineCache(
+                     device_get_device(device), &cache_info, NULL,
+                     &private_cache[cache_index]);
+               if (cache_result != VK_SUCCESS)
+                  break;
+               private_cache_count++;
+            }
+         }
+
+         if (private_cache_count >= 2)
+         {
+            queue.lock = slock_new();
+            if (queue.lock)
+            {
+               unsigned worker_index;
+               queue.graphics_jobs = jobs->count;
+               queue.total_jobs = total_count;
+               for (worker_index = 1;
+                    worker_index < private_cache_count;
+                    worker_index++)
+               {
+                  worker[worker_index].device = device;
+                  worker[worker_index].pipeline_cache =
+                     private_cache[worker_index];
+                  worker[worker_index].queue = &queue;
+                  threads[worker_index - 1] = sthread_create(
+                        vulkan_precompile_worker,
+                        &worker[worker_index]);
+                  if (!threads[worker_index - 1])
+                     break;
+                  workers++;
+               }
+            }
+         }
+
+         if (workers == 1)
+         {
+            unsigned cache_index;
+            LOGI("[Vulkan shader precompilation] private worker pool unavailable; using one worker\n");
+            if (queue.lock)
+            {
+               slock_free(queue.lock);
+               queue.lock = NULL;
+            }
+            for (cache_index = 0;
+                 cache_index < private_cache_count;
+                 cache_index++)
+            {
+               if (private_cache[cache_index] != VK_NULL_HANDLE)
+               {
+                  vkDestroyPipelineCache(device_get_device(device),
+                        private_cache[cache_index], NULL);
+                  private_cache[cache_index] = VK_NULL_HANDLE;
+               }
+            }
+            private_cache_count = 0;
+         }
+      }
+#endif
+      if (!queue.total_jobs)
+      {
+         queue.graphics_jobs = jobs->count;
+         queue.total_jobs = total_count;
+      }
+      worker[0].device = device;
+      worker[0].pipeline_cache = workers > 1
+         ? private_cache[0] : device_get_pipeline_cache(device);
+      worker[0].queue = &queue;
+      vulkan_precompile_worker(&worker[0]);
+      for (i = 1; i < workers; i++)
+         sthread_join(threads[i - 1]);
+
+#if defined(ANDROID)
+      if (workers > 1)
+      {
+         VkResult merge_result = vkMergePipelineCaches(
+               device_get_device(device), device_get_pipeline_cache(device),
+               workers, private_cache);
+         unsigned cache_index;
+         if (merge_result != VK_SUCCESS)
+         {
+            LOGE("[Vulkan shader precompilation] worker cache merge failed result=%d\n",
+                  (int)merge_result);
+            complete = false;
+         }
+         for (cache_index = 0;
+              cache_index < private_cache_count;
+              cache_index++)
+            if (private_cache[cache_index] != VK_NULL_HANDLE)
+               vkDestroyPipelineCache(device_get_device(device),
+                     private_cache[cache_index], NULL);
+      }
+#endif
+      if (queue.lock)
+         slock_free(queue.lock);
+      free(initial_cache_data);
+      *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
+      *worker_count = total_count ? workers : 0;
+
+      for (i = 0; i < jobs->count; i++)
+      {
+         struct VulkanGraphicsPrecompileJob *job = &jobs->items[i];
+         IntrusivePODWrapperPipeline *entry;
+         if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
+         {
+            LOGE("[Vulkan shader precompilation] graphics pipeline creation failed result=%d\n",
+                  (int)job->result);
+            if (job->pipeline != VK_NULL_HANDLE)
+               vkDestroyPipeline(device_get_device(device), job->pipeline,
+                     NULL);
+            complete = false;
+            continue;
+         }
+
+         entry = program_find_pipeline(job->program, job->hash);
+         if (entry == NULL)
+         {
+            program_add_pipeline(job->program, job->hash, job->pipeline);
+            entry = program_find_pipeline(job->program, job->hash);
+         }
+         else
+            vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
+
+         if (entry == NULL)
+            complete = false;
+      }
+
+      for (i = 0; i < compute_jobs->count; i++)
+      {
+         struct VulkanComputePrecompileJob *job = &compute_jobs->items[i];
+         IntrusivePODWrapperPipeline *entry;
+         if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
+         {
+            LOGE("[Vulkan shader precompilation] compute pipeline creation failed result=%d\n",
+                  (int)job->result);
+            if (job->pipeline != VK_NULL_HANDLE)
+               vkDestroyPipeline(device_get_device(device), job->pipeline,
+                     NULL);
+            complete = false;
+            continue;
+         }
+
+         entry = program_find_pipeline(job->program, job->hash);
+         if (entry == NULL)
+         {
+            program_add_pipeline(job->program, job->hash, job->pipeline);
+            entry = program_find_pipeline(job->program, job->hash);
+         }
+         else
+            vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
+
+         if (entry == NULL)
+            complete = false;
+      }
+
+      free(jobs->items);
+      memset(jobs, 0, sizeof(*jobs));
+      free(compute_jobs->items);
+      memset(compute_jobs, 0, sizeof(*compute_jobs));
+      return complete;
    }
 
    static VkPipeline commandbuffer_build_graphics_pipeline(struct CommandBuffer *self,
@@ -14379,6 +15838,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       pipe.pStages = stages;
       pipe.stageCount = num_stages;
 
+      if (vulkan_pipeline_precompiling)
+      {
+         vulkan_precompile_queue_graphics_pipeline(self, hash, &pipe);
+         return VK_NULL_HANDLE;
+      }
 
       res = vkCreateGraphicsPipelines(device_get_device(self->device),
             device_get_pipeline_cache(self->device), 1, &pipe, NULL, &pipeline);
@@ -15090,6 +16554,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(!self->is_compute);
+      if (vulkan_pipeline_precompiling)
+      {
+         /* Synthetic precompile draws only need to produce the exact runtime
+          * pipeline description. Queue that description without binding a
+          * not-yet-created handle or recording a throwaway draw. */
+         commandbuffer_flush_graphics_pipeline(self);
+         return;
+      }
       commandbuffer_flush_render_state(self);
       vkCmdDraw(self->cmd, vertex_count, instance_count, first_vertex, first_instance);
    }
@@ -15101,6 +16573,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(self->is_compute);
+      if (vulkan_pipeline_precompiling)
+      {
+         /* As with synthetic draws, capture the exact runtime pipeline but do
+          * not bind descriptors or record a dispatch into the live buffer. */
+         commandbuffer_flush_compute_pipeline(self);
+         return;
+      }
       commandbuffer_flush_compute_state(self);
       vkCmdDispatch(self->cmd, groups_x, groups_y, groups_z);
    }
@@ -18862,13 +20341,9 @@ static ScanoutHandleVec scanout_handles;
 static SaveState save_state;
 static bool inside_frame;
 static bool has_software_fb;
-static bool scaled_uv_offset;
 static int filter_exclude_sprites;
 static int filter_exclude_2d_polygons;
-static bool adaptive_smoothing;
-static bool super_sampling;
 static unsigned msaa = 1;
-static bool mdec_yuv;
 /*
  * Queue for rhi_vulkan_* operations that arrive between the libretro
  * frontend's RETRO_ENVIRONMENT_SET_HW_RENDER acceptance and the
@@ -18881,7 +20356,6 @@ static bool mdec_yuv;
  * rhi/rhi_defer.h for which ops are deferred and which are dropped.
  */
 static rhi_defer_queue_t defer = { NULL, 0, 0 };
-static enum dither_mode dither_mode = DITHER_NATIVE;
 static bool dump_textures = false;
 static bool replace_textures = false;
 static bool track_textures = false;
@@ -18916,7 +20390,6 @@ static int last_scanline_pal;
 static bool frame_duping_enabled = false;
 static uint32_t prev_frame_width = 320;
 static uint32_t prev_frame_height = 240;
-static bool show_vram = false;
 
 static retro_video_refresh_t video_refresh_cb;
 
@@ -19334,6 +20807,11 @@ void rhi_vulkan_refresh_variables(void)
       else
          mdec_yuv = false;
    }
+
+   var.key = BEETLE_OPT(vulkan_shader_precompilation);
+   vulkan_shader_precompilation = false;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      vulkan_shader_precompilation = !strcmp(var.value, "enabled");
 
    var.key = BEETLE_OPT(dither_mode);
    dither_mode = DITHER_NATIVE;
