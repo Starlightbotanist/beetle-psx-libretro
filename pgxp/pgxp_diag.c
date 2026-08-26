@@ -496,6 +496,9 @@ typedef struct
 	uint64_t lineage_xy_restored_sra5;
 	uint64_t lineage_native_untextured_flat;
 	uint64_t lineage_native_untextured_gouraud;
+	uint64_t lineage_native_axis_x;
+	uint64_t lineage_native_axis_y;
+	uint64_t lineage_native_axis_w_retained;
 	uint64_t lineage_shift_blocked;
 	uint64_t lineage_identity_candidates;
 	uint64_t lineage_identity_matches;
@@ -1142,7 +1145,10 @@ static const char* pgxp_diag_j_mode_name(unsigned mode)
 		"final-only-xy-only",
 		"native-untextured-flat",
 		"native-untextured-gouraud",
-		"native-untextured-all"
+		"native-untextured-all",
+		"native-untextured-xy-keep-w",
+		"native-untextured-x-keep-yw",
+		"native-untextured-y-keep-xw"
 	};
 	return mode < PGXP_DIAG_J_TEST_COUNT ? names[mode] : "invalid";
 }
@@ -1205,6 +1211,42 @@ int PGXP_DiagJForceNative(const PGXP_value* value)
 			window.lineage_native_untextured_flat++;
 	}
 	return reject;
+}
+
+unsigned PGXP_DiagJNativeAxisMask(const PGXP_value* value)
+{
+	unsigned mask = 0;
+
+	/* Retain J's proven W and replace only selected screen components with
+	 * the architectural packed coordinate.  This separates mode 7's loss of
+	 * W from its X/Y fallback and tests whether both axes are needed for the
+	 * mixed precise/native sky mesh.  Textured geometry is never touched. */
+	if (!trace_metadata_valid(value) ||
+	    value->trace_stage != PGXP_TRACE_SRA5 ||
+	    (current_opcode & 0x04) != 0)
+		return 0;
+
+	switch (j_test_mode)
+	{
+		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_XY_KEEP_W:
+			mask = PGXP_DIAG_J_NATIVE_X | PGXP_DIAG_J_NATIVE_Y;
+			break;
+		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW:
+			mask = PGXP_DIAG_J_NATIVE_X;
+			break;
+		case PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW:
+			mask = PGXP_DIAG_J_NATIVE_Y;
+			break;
+		default:
+			break;
+	}
+	if (mask & PGXP_DIAG_J_NATIVE_X)
+		window.lineage_native_axis_x++;
+	if (mask & PGXP_DIAG_J_NATIVE_Y)
+		window.lineage_native_axis_y++;
+	if (mask)
+		window.lineage_native_axis_w_retained++;
+	return mask;
 }
 
 static int trace_metadata_valid(const PGXP_value* value)
@@ -7543,7 +7585,7 @@ void PGXP_DiagFrame(int backend)
 		"[pgxp_lineage_summary] f=%llu mfc2=%llu "
 		"sll5=%llu/%llu sra5=%llu/%llu preserve=%llu/%llu "
 		"w_suppressed=%llu/%llu xy_deferred=%llu/%llu "
-		"native_untextured=%llu/%llu j_mode=%u "
+		"native_untextured=%llu/%llu native_axis=%llu/%llu/%llu j_mode=%u "
 		"blocked=%llu/%llu identity=%llu/%llu/%llu drops=%llu transforms=%llu "
 		"store=%llu/%llu fifo=%llu\n",
 		(unsigned long long)frame_number,
@@ -7560,6 +7602,9 @@ void PGXP_DiagFrame(int backend)
 		(unsigned long long)window.lineage_xy_restored_sra5,
 		(unsigned long long)window.lineage_native_untextured_flat,
 		(unsigned long long)window.lineage_native_untextured_gouraud,
+		(unsigned long long)window.lineage_native_axis_x,
+		(unsigned long long)window.lineage_native_axis_y,
+		(unsigned long long)window.lineage_native_axis_w_retained,
 		j_test_mode,
 		(unsigned long long)window.lineage_shift_blocked,
 		(unsigned long long)window.lineage_identity_blocked,

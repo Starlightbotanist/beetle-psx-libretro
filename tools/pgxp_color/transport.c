@@ -397,6 +397,61 @@ static void test_j_primitive_scope_modes(void)
       fail("current J unexpectedly rejected vertex", 1, 0);
 }
 
+static void test_j_native_axis_modes(void)
+{
+   const uint32_t packed = 0xFFD3007Bu;
+   PGXP_value shadow = PGXP_value_zero;
+   OGLVertex output;
+   unsigned mask;
+
+   shadow.x = 123.25f;
+   shadow.y = -45.5f;
+   shadow.z = 32768.0f;
+   shadow.value = packed;
+   shadow.flags = VALID_012;
+   PGXP_DiagTraceGTE(&shadow);
+   shadow.trace_stage = PGXP_TRACE_SRA5;
+   PGXP_WriteCB(&shadow, 0);
+   PGXP_DiagPacket(0x30, 6, 0, 0, 0);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_XY_KEEP_W);
+   mask = PGXP_DiagJNativeAxisMask(&shadow);
+   if (mask != (PGXP_DIAG_J_NATIVE_X | PGXP_DIAG_J_NATIVE_Y))
+      fail("J native XY mask", mask, 3);
+   PGXP_GetVertex(0, &packed, &output, 0, 0);
+   if (output.x != 123.0f || output.y != -45.0f ||
+       !output.valid_w || output.w != 1.0f)
+      fail("J native XY did not retain W", 0, 1);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW);
+   mask = PGXP_DiagJNativeAxisMask(&shadow);
+   if (mask != PGXP_DIAG_J_NATIVE_X)
+      fail("J native X mask", mask, PGXP_DIAG_J_NATIVE_X);
+   PGXP_GetVertex(0, &packed, &output, 0, 0);
+   if (output.x != 123.0f || output.y != -45.5f ||
+       !output.valid_w || output.w != 1.0f)
+      fail("J native X damaged Y/W", 0, 1);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW);
+   mask = PGXP_DiagJNativeAxisMask(&shadow);
+   if (mask != PGXP_DIAG_J_NATIVE_Y)
+      fail("J native Y mask", mask, PGXP_DIAG_J_NATIVE_Y);
+   PGXP_GetVertex(0, &packed, &output, 0, 0);
+   if (output.x != 123.25f || output.y != -45.0f ||
+       !output.valid_w || output.w != 1.0f)
+      fail("J native Y damaged X/W", 0, 1);
+
+   PGXP_DiagPacket(0x34, 9, 0, 0, 0);
+   if (PGXP_DiagJNativeAxisMask(&shadow))
+      fail("J axis mode rejected textured vertex", 1, 0);
+   PGXP_GetVertex(0, &packed, &output, 0, 0);
+   if (output.x != 123.25f || output.y != -45.5f ||
+       !output.valid_w || output.w != 1.0f)
+      fail("J axis mode changed textured vertex", 0, 1);
+
+   PGXP_DiagJSetMode(PGXP_DIAG_J_TEST_CURRENT);
+}
+
 static void test_cpu_math_invariants(void)
 {
    uint32_t instr;
@@ -649,6 +704,9 @@ int main(void)
 
    printf("[T13] J primitive scope modes reject only selected SRA5 vertices\n");
    test_j_primitive_scope_modes();
+
+   printf("[T14] J keep-W modes replace only selected untextured axes\n");
+   test_j_native_axis_modes();
 
    if (failures)
    {

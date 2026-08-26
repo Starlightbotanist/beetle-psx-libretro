@@ -620,6 +620,13 @@ static inline float PGXP_ApplyVertexPosition(float position, int offset)
 	return PGXP_LegacyVertexPosition(position, offset);
 }
 
+static inline float PGXP_ApplyNativeVertexPosition(int16_t position, int offset)
+{
+	if (PGXP_FeatureEnabled(PGXP_FEATURE_COORD_WRAP))
+		return (float)(position + offset);
+	return PGXP_LegacyVertexPosition((float)position, offset);
+}
+
 /* PGXP stores projected Z in 15-bit fixed-point scale.  Clip-space W is
  * homogeneous, so this common scale cancels after perspective division, but
  * retaining the raw value sends coordinates in the tens of thousands to the
@@ -639,6 +646,7 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	int valid_xy;
 	int value_match;
 	int force_native;
+	unsigned native_axis_mask;
 
 	/* The GP0 vertex word packs sy in the high 16 bits and sx in
 	 * the low 16 bits.  Unpack with shifts on the u32 rather than
@@ -650,6 +658,8 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	valid_xy = vert && ((vert->flags & VALID_01) == VALID_01);
 	value_match = vert && (vert->value == psxWord);
 	force_native = PGXP_DiagJForceNative(vert);
+	native_axis_mask = !force_native && valid_xy && value_match ?
+		PGXP_DiagJNativeAxisMask(vert) : 0;
 
 	if (!force_native && valid_xy && value_match)
 	{
@@ -713,18 +723,21 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		{
 			/* Native packed coordinates are already signed values; the
 			 * drawing offset is applied afterward and is not re-wrapped. */
-			if (PGXP_FeatureEnabled(PGXP_FEATURE_COORD_WRAP))
-			{
-				pOutput->x = (float)(psxX + xOffs);
-				pOutput->y = (float)(psxY + yOffs);
-			}
-			else
-			{
-				pOutput->x = PGXP_LegacyVertexPosition((float)psxX, xOffs);
-				pOutput->y = PGXP_LegacyVertexPosition((float)psxY, yOffs);
-			}
+			pOutput->x = PGXP_ApplyNativeVertexPosition(psxX, xOffs);
+			pOutput->y = PGXP_ApplyNativeVertexPosition(psxY, yOffs);
 			pOutput->valid_w = 0;
 		}
+	}
+	if (native_axis_mask)
+	{
+		if (native_axis_mask & PGXP_DIAG_J_NATIVE_X)
+			pOutput->x = PGXP_ApplyNativeVertexPosition(psxX, xOffs);
+		if (native_axis_mask & PGXP_DIAG_J_NATIVE_Y)
+			pOutput->y = PGXP_ApplyNativeVertexPosition(psxY, yOffs);
+		/* At least one coordinate is now architectural even though the
+		 * transform-proven W remains valid.  Report the hybrid terminal
+		 * conservatively as native in the provenance diagnostics. */
+		source = PGXP_DIAG_VERTEX_NATIVE;
 	}
 
 	PGXP_DiagVertex(source, offset, psxWord, vert, pOutput->x, pOutput->y,

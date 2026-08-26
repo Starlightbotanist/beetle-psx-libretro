@@ -23,10 +23,10 @@ enum PGXP_diag_trace_stage
 	PGXP_TRACE_VERTEX
 };
 
-/* J-specific experiments for the traced MFC2/SLL5/SRA5 handoff.  Every
- * mode preserves the recovered subpixel X/Y; the latter two modes withhold
- * perspective W at selected shift stages so mixed tracked/native meshes do
- * not alternate between real-W and W=1 projection domains. */
+/* J-specific experiments for the traced MFC2/SLL5/SRA5 handoff.  Early
+ * modes isolate shift-stage X/Y/W behavior; later modes selectively decline
+ * J-derived coordinates when untextured primitives consume the final SRA5
+ * shadow, without changing textured geometry. */
 enum PGXP_diag_j_test_mode
 {
 	PGXP_DIAG_J_TEST_CURRENT = 0,
@@ -37,7 +37,16 @@ enum PGXP_diag_j_test_mode
 	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_FLAT,
 	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_GOURAUD,
 	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_ALL,
+	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_XY_KEEP_W,
+	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_X_KEEP_YW,
+	PGXP_DIAG_J_TEST_NATIVE_UNTEXTURED_Y_KEEP_XW,
 	PGXP_DIAG_J_TEST_COUNT
+};
+
+enum PGXP_diag_j_native_axis
+{
+	PGXP_DIAG_J_NATIVE_X = 1u << 0,
+	PGXP_DIAG_J_NATIVE_Y = 1u << 1
 };
 
 /* Runtime-selectable OpenGL seam experiments.  These are exposed only by
@@ -389,6 +398,7 @@ unsigned PGXP_DiagGLGetMode(void);
 void PGXP_DiagJSetMode(unsigned mode);
 unsigned PGXP_DiagJGetMode(void);
 int PGXP_DiagJForceNative(const PGXP_value* value);
+unsigned PGXP_DiagJNativeAxisMask(const PGXP_value* value);
 void PGXP_DiagGLRasterCaps(unsigned subpixel_bits);
 void PGXP_DiagGLRasterScale(unsigned internal_scale);
 void PGXP_DiagGPUPrimitive(const PGXP_diag_primitive_vertex vertices[3],
@@ -464,6 +474,7 @@ void PGXP_DiagNCLIPValidity(unsigned invalid_mask, unsigned mismatch_mask,
 #define PGXP_DiagJSetMode(mode) ((void)0)
 #define PGXP_DiagJGetMode() PGXP_DIAG_J_TEST_CURRENT
 #define PGXP_DiagJForceNative(value) 0
+#define PGXP_DiagJNativeAxisMask(value) 0u
 #define PGXP_DiagGLRasterCaps(subpixel_bits) ((void)0)
 #define PGXP_DiagGLRasterScale(internal_scale) ((void)0)
 #define PGXP_DiagGPUPrimitive(vertices, quad_part, invalid_w, upscale_shift) ((void)0)
