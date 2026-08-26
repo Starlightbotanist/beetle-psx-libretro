@@ -357,6 +357,22 @@ static void test_projection_provenance(void)
       fail("W rejection discarded precise XY", 1, 0);
 }
 
+static void test_nclip_magnitude(void)
+{
+   if (PGXP_NCLIP_preserve_magnitude(1234, -77) != -1234)
+      fail("NCLIP positive orientation replacement", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(-4321, 88) != 4321)
+      fail("NCLIP negative orientation replacement", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(1234, 77) != 1234)
+      fail("NCLIP changed matching magnitude", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(1234, 0) != 1234)
+      fail("NCLIP replaced native result with zero", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(0, -88) != -1)
+      fail("NCLIP lost orientation at native zero", 0, 1);
+   if (PGXP_NCLIP_preserve_magnitude(INT32_MIN, 1) != INT32_MAX)
+      fail("NCLIP overflowed reversed minimum", 0, 1);
+}
+
 static void test_projection_provenance_transport(void)
 {
    const uint32_t packed = pack_vertex(123, -45);
@@ -419,8 +435,12 @@ int main(void)
    printf("[T8] projection provenance\n");
    test_projection_provenance();
 
-   printf("[T9] projected-depth CPU transport\n");
+   printf("[T9] NCLIP native magnitude preservation\n");
+   test_nclip_magnitude();
+
+   printf("[T10] projected-depth CPU transport\n");
    test_projection_provenance_transport();
+
    if (failures)
    {
       printf("\nfailures=%d\nFAIL\n", failures);

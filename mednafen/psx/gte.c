@@ -1922,7 +1922,9 @@ static int32_t NCLIP(uint32_t instr)
       memcpy(&v1, &XY_FIFO(1), sizeof(v1));
       memcpy(&v2, &XY_FIFO(2), sizeof(v2));
       if (PGXP_NCLIP_valid(v0, v1, v2)) {
-         sum = PGXP_NCLIP();
+         int32_t native_sum = sum;
+         int32_t precise_sum = (int32_t)PGXP_NCLIP();
+         sum = PGXP_NCLIP_preserve_magnitude(native_sum, precise_sum);
          used_pgxp = true;
       }
    }

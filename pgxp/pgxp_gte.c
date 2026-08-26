@@ -273,6 +273,28 @@ double PGXP_NCLIP()
 	return nclip;
 }
 
+int32_t PGXP_NCLIP_preserve_magnitude(int32_t native_value,
+		int32_t precise_value)
+{
+	uint32_t magnitude;
+
+	/* NCLIP controls orientation, but MAC0 remains visible to the emulated
+	 * CPU.  Keep the native area magnitude and use the precise result only
+	 * when it provides a non-zero orientation. */
+	if (precise_value == 0)
+		return native_value;
+	if (native_value == 0)
+		return precise_value < 0 ? -1 : 1;
+	if ((native_value < 0) == (precise_value < 0))
+		return native_value;
+	if (native_value == INT32_MIN)
+		return precise_value < 0 ? INT32_MIN : INT32_MAX;
+
+	magnitude = native_value < 0 ? (uint32_t)-native_value :
+		(uint32_t)native_value;
+	return precise_value < 0 ? -(int32_t)magnitude : (int32_t)magnitude;
+}
+
 static void PGXP_MTC2_int(PGXP_value value, uint32_t reg)
 {
 	switch(reg)
