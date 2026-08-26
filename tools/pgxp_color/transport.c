@@ -447,6 +447,28 @@ static void test_projection_identity_moves(void)
       fail("identity accepted mismatched source", 1, 0);
 }
 
+static void test_projection_write_observer(void)
+{
+   CPU_reg[31] = CPU_reg[9];
+   PGXP_CPU_ObserveInstruction(INSTR_OP(0x01) | INSTR_RT(0x00));
+   if (!(CPU_reg[31].flags & VALID_PROJECTION))
+      fail("non-linking branch cleared link register", 0, 1);
+
+   PGXP_CPU_ObserveInstruction(INSTR_OP(0x01) | INSTR_RT(0x11));
+   if (CPU_reg[31].flags & VALID_PROJECTION)
+      fail("linking branch kept stale projection", 1, 0);
+
+   CPU_reg[31] = CPU_reg[9];
+   PGXP_CPU_ObserveInstruction(INSTR_OP(0x03));
+   if (CPU_reg[31].flags & VALID_PROJECTION)
+      fail("jump link kept stale projection", 1, 0);
+
+   CPU_reg[12] = CPU_reg[9];
+   PGXP_CPU_ObserveInstruction(INSTR_RS(8) | INSTR_RD(12) | 0x09u);
+   if (CPU_reg[12].flags & VALID_PROJECTION)
+      fail("register jump link kept stale projection", 1, 0);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -486,6 +508,9 @@ int main(void)
 
    printf("[T11] projected-depth identity moves\n");
    test_projection_identity_moves();
+
+   printf("[T12] projected-depth write observation\n");
+   test_projection_write_observer();
 
    if (failures)
    {
