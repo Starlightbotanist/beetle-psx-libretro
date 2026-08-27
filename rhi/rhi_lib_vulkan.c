@@ -77,9 +77,7 @@ extern int   psx_hdr_multipass;
  * (16F) scaled framebuffer, which is allocated before HDR negotiation
  * completes. Non-zero = a 30-bit/HDR format was requested. */
 extern int   psx_color_format;
-#ifdef ANDROID
 extern char retro_base_directory[4096];
-#endif
 
 /* VOLK_GENERATE_PROTOTYPES_H */
 #if defined(VK_VERSION_1_0)
@@ -455,10 +453,8 @@ PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR;
 
 #include <rthreads/rthreads.h>
 #include <streams/file_stream.h>
-#ifdef ANDROID
 #include <encodings/crc32.h>
 #include <file/file_path.h>
-#endif
 
 /* C89-compatible compile-time assertion. C89 has no static_assert /
  * _Static_assert; emit a typedef whose array size is negative when the
@@ -4706,8 +4702,8 @@ static void cbh_move(struct CommandBufferHandle *dst,
          VkQueue graphics_queue;
          VkQueue compute_queue;
          VkQueue transfer_queue;
-         /* Shared driver compiler cache. Android seeds it from validated
-          * persistent data and writes the expanded cache on clean shutdown. */
+         /* Shared driver compiler cache, seeded from validated persistent
+          * data and written back on clean shutdown on every platform. */
          VkPipelineCache pipeline_cache;
 
          uint64_t cookie;
@@ -6009,7 +6005,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
 #ifdef ANDROID
-   static void renderer_warm_up_primitive_pipelines(Renderer *self);
+   static void renderer_precompile_primitive_shaders(Renderer *self);
 #endif
    static void renderer_flush_blit(Renderer *self,
          const BlitInfoVec *infos,
@@ -6786,10 +6782,11 @@ static void renderer_init(Renderer *self,
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
 #ifdef ANDROID
-   /* Compile the common primitive variants before the first emulated frame.
+   /* Precompile common primitive shader variants before the first emulated
+    * frame. Keep this synchronous so compilation cannot interrupt gameplay.
     * Android drivers can spend ~160 ms in vkCreateGraphicsPipelines for each
     * one, so allowing demand creation here produces visible gameplay stalls. */
-   renderer_warm_up_primitive_pipelines(self);
+   renderer_precompile_primitive_shaders(self);
    {
       VkClearValue clear_zero;
       memset(&clear_zero, 0, sizeof(clear_zero));
@@ -9636,9 +9633,10 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 }
 
 #ifdef ANDROID
-static void renderer_warm_up_textured_batch_variant(
+static void renderer_precompile_textured_batch_variant(
       BufferVertexVec *vertices,
       PrimitiveInfoVec *scissors,
+      bool scaled_read,
       unsigned shift,
       bool offset_uv)
 {
@@ -9650,13 +9648,13 @@ static void renderer_warm_up_textured_batch_variant(
    vertex.z = 0.5f;
    vertex.w = 1.0f;
    info = primitive_info_make(PrimitiveInfoVec_size(scissors), -1,
-         hd_handle_make_none(), false, false, shift, offset_uv);
+         hd_handle_make_none(), false, scaled_read, shift, offset_uv);
    for (i = 0; i < 3; i++)
       BufferVertexVec_push(vertices, &vertex);
    PrimitiveInfoVec_push(scissors, &info);
 }
 
-static void renderer_warm_up_primitive_pipelines(Renderer *self)
+static void renderer_precompile_primitive_shaders(Renderer *self)
 {
    static const SemiTransparentMode modes[] = {
       SemiTransparentMode_None,
@@ -9694,36 +9692,41 @@ static void renderer_warm_up_primitive_pipelines(Renderer *self)
       }
 
       /* Opaque textured primitives do not use the serialized blend queue, so
-       * the generic semi-transparent warmup below never reaches their exact
-       * pipeline state. Texture depth selects shift 0, 1, or 2, while scaled
-       * UV offset independently selects its specialization bit. Exercise the
-       * six combinations against both compatible render passes. A feedback
-       * pass can contain ordinary opaque draws alongside the primitive that
-       * caused feedback, so both compatibility keys occur during gameplay. */
+       * the generic semi-transparent precompilation below never reaches their
+       * exact pipeline state. Scaled framebuffer reads select a distinct
+       * shader program; texture depth selects shift 0, 1, or 2; and scaled UV
+       * offset independently selects its specialization bit. Exercise all 12
+       * combinations against both compatible render passes. A feedback pass
+       * can contain ordinary opaque draws alongside the primitive that caused
+       * feedback, so both compatibility keys occur during gameplay. */
       {
-         unsigned shift;
-         for (shift = 0; shift < 3; shift++)
+         unsigned scaled_read;
+         for (scaled_read = 0; scaled_read < 2; scaled_read++)
          {
-            unsigned offset_uv;
-            for (offset_uv = 0; offset_uv < 2; offset_uv++)
+            unsigned shift;
+            for (shift = 0; shift < 3; shift++)
             {
-               renderer_warm_up_textured_batch_variant(
-                     &self->queue.opaque_textured,
-                     &self->queue.opaque_textured_scissor,
-                     shift, offset_uv != 0);
-               variants++;
-
-               /* Textured semi-transparent primitives are first rendered by
-                * the opaque-texture program with TransMode_SemiTransOpaque,
-                * then by the ordered blend path. They necessarily make this
-                * a feedback pass. */
-               if (feedback)
+               unsigned offset_uv;
+               for (offset_uv = 0; offset_uv < 2; offset_uv++)
                {
-                  renderer_warm_up_textured_batch_variant(
-                        &self->queue.semi_transparent_opaque,
-                        &self->queue.semi_transparent_opaque_scissor,
-                        shift, offset_uv != 0);
+                  renderer_precompile_textured_batch_variant(
+                        &self->queue.opaque_textured,
+                        &self->queue.opaque_textured_scissor,
+                        scaled_read != 0, shift, offset_uv != 0);
                   variants++;
+
+                  /* Textured semi-transparent primitives are first rendered
+                   * by the opaque-texture program with
+                   * TransMode_SemiTransOpaque, then by the ordered blend path.
+                   * They necessarily make this a feedback pass. */
+                  if (feedback)
+                  {
+                     renderer_precompile_textured_batch_variant(
+                           &self->queue.semi_transparent_opaque,
+                           &self->queue.semi_transparent_opaque_scissor,
+                           scaled_read != 0, shift, offset_uv != 0);
+                     variants++;
+                  }
                }
             }
          }
@@ -9759,43 +9762,49 @@ static void renderer_warm_up_primitive_pipelines(Renderer *self)
       }
 
       /* A feedback-compatible pass also contains unmasked textured draws.
-       * The original feedback warmup deliberately set masked=true, selecting
-       * the programmable-blend shaders for the four translucent modes. Real
-       * frames mix those with the ordinary textured shader, whose shift and
-       * UV-offset variants were consequently still first-created in gameplay
-       * (19-34 ms on Adreno 740). Warm the complete six-value specialization
-       * set here; all other observed runtime pipelines are already below one
-       * 60 Hz frame. */
+       * The original feedback precompilation deliberately set masked=true,
+       * selecting the programmable-blend shaders for the four translucent
+       * modes. Real frames mix those with the ordinary textured shaders,
+       * whose scaled-read, shift, and UV-offset variants were consequently
+       * still first-created in gameplay (19-34 ms on Adreno 740). Precompile
+       * the complete 12-value shader/specialization set here; all other
+       * observed runtime pipelines are already below one 60 Hz frame. */
       if (feedback)
       {
-         unsigned shift;
-         for (shift = 0; shift < 3; shift++)
+         unsigned scaled_read;
+         for (scaled_read = 0; scaled_read < 2; scaled_read++)
          {
-            unsigned offset_uv;
-            for (offset_uv = 0; offset_uv < 2; offset_uv++)
+            unsigned shift;
+            for (shift = 0; shift < 3; shift++)
             {
-               unsigned mode;
-               for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
+               unsigned offset_uv;
+               for (offset_uv = 0; offset_uv < 2; offset_uv++)
                {
-                  SemiTransparentState state;
-                  BufferVertex vertex;
-                  unsigned i;
-                  memset(&state, 0, sizeof(state));
-                  state.scissor_index = -1;
-                  state.semi_transparent = modes[mode];
-                  state.textured = true;
-                  state.shift = shift;
-                  state.offset_uv = offset_uv != 0;
-                  SemiTransparentStateVec_push(
-                        &self->queue.semi_transparent_state, &state);
+                  unsigned mode;
+                  for (mode = 0;
+                       mode < sizeof(modes) / sizeof(modes[0]); mode++)
+                  {
+                     SemiTransparentState state;
+                     BufferVertex vertex;
+                     unsigned i;
+                     memset(&state, 0, sizeof(state));
+                     state.scissor_index = -1;
+                     state.semi_transparent = modes[mode];
+                     state.textured = true;
+                     state.scaled_read = scaled_read != 0;
+                     state.shift = shift;
+                     state.offset_uv = offset_uv != 0;
+                     SemiTransparentStateVec_push(
+                           &self->queue.semi_transparent_state, &state);
 
-                  memset(&vertex, 0, sizeof(vertex));
-                  vertex.z = 0.5f;
-                  vertex.w = 1.0f;
-                  for (i = 0; i < 3; i++)
-                     BufferVertexVec_push(
-                           &self->queue.semi_transparent, &vertex);
-                  variants++;
+                     memset(&vertex, 0, sizeof(vertex));
+                     vertex.z = 0.5f;
+                     vertex.w = 1.0f;
+                     for (i = 0; i < 3; i++)
+                        BufferVertexVec_push(
+                              &self->queue.semi_transparent, &vertex);
+                     variants++;
+                  }
                }
             }
          }
@@ -9813,7 +9822,7 @@ static void renderer_warm_up_primitive_pipelines(Renderer *self)
                driver_cache,
                &driver_cache_bytes, NULL)
          : VK_ERROR_INITIALIZATION_FAILED;
-      LOGI("[Vulkan pipeline warmup] variants=%u elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
+      LOGI("[Vulkan shader precompilation] variants=%u elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
          variants,
          (long long)(cpu_features_get_time_usec() - start_usec),
          (int)cache_result,
@@ -15884,7 +15893,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return self->per_frame.items[self->frame_context_index];
    }
 
-#ifdef ANDROID
 #define VULKAN_PIPELINE_CACHE_DIR_NAME "Beetle PSX HW"
 #define VULKAN_PIPELINE_CACHE_FILE_NAME "vulkan_pipeline_cache_v1.bin"
 #define VULKAN_PIPELINE_CACHE_FILE_MAGIC "BPSXVKC1"
@@ -16149,16 +16157,22 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
       free(file_data);
 
+      /* POSIX rename replaces atomically. The Windows C runtime does not
+       * replace an existing destination, so fall back to removing the old,
+       * non-critical cache and retrying the same-directory rename. */
       if (filestream_rename(temp_path, path) != 0)
       {
-         LOGE("[Vulkan pipeline cache] atomic replace failed: %s\n", path);
-         filestream_delete(temp_path);
-         return;
+         if (!filestream_exists(path) || filestream_delete(path) != 0 ||
+             filestream_rename(temp_path, path) != 0)
+         {
+            LOGE("[Vulkan pipeline cache] replace failed: %s\n", path);
+            filestream_delete(temp_path);
+            return;
+         }
       }
       LOGI("[Vulkan pipeline cache] saved bytes=%llu path=%s\n",
             (unsigned long long)actual_size, path);
    }
-#endif
 
    static void device_init(Device *self)
    {
@@ -16232,9 +16246,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    static void device_deinit(Device *self)
    {
       device_wait_idle_nolock(self);
-#ifdef ANDROID
       device_pipeline_cache_save(self);
-#endif
 
       framebuffer_allocator_clear(&self->framebuffer_allocator);
       attachment_allocator_clear(&self->transient_allocator);
@@ -16515,24 +16527,21 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->mem_props = *context_get_mem_props(context);
       self->gpu_props = *context_get_gpu_props(context);
 
-      /* Every pipeline create receives one shared driver cache. Android seeds
-       * it from validated persistent data; a bad driver blob is never fatal,
-       * since creation is retried with an empty cache. */
+      /* Every pipeline create receives one shared driver cache. Seed it from
+       * validated persistent data on every platform; a bad driver blob is
+       * never fatal, since creation is retried with an empty cache. */
       {
          VkPipelineCacheCreateInfo cache_info = {
             VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
          };
          VkResult cache_result;
-#ifdef ANDROID
          size_t initial_data_size;
          void *initial_data = device_pipeline_cache_load(self,
                &initial_data_size);
          cache_info.initialDataSize = initial_data_size;
          cache_info.pInitialData = initial_data;
-#endif
          cache_result = vkCreatePipelineCache(
                self->device, &cache_info, NULL, &self->pipeline_cache);
-#ifdef ANDROID
          if (cache_result != VK_SUCCESS && initial_data)
          {
             LOGE("[Vulkan pipeline cache] driver rejected persistent data result=%d; retrying empty\n",
@@ -16544,7 +16553,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   self->device, &cache_info, NULL, &self->pipeline_cache);
          }
          free(initial_data);
-#endif
          if (cache_result != VK_SUCCESS)
          {
             self->pipeline_cache = VK_NULL_HANDLE;
@@ -16553,12 +16561,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
          else
          {
-#ifdef ANDROID
             LOGI("[Vulkan pipeline cache] created driver cache initial_bytes=%llu\n",
                   (unsigned long long)initial_data_size);
-#else
-            LOGI("[Vulkan pipeline cache] created in-memory driver cache\n");
-#endif
          }
       }
 
