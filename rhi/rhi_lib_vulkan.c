@@ -6004,7 +6004,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_hd_texture_uniforms(Renderer *self,
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
-#if defined(ANDROID) || (defined(IOS) && !defined(TVOS))
+#if defined(ANDROID) || defined(IOS)
    static void renderer_precompile_primitive_shaders(Renderer *self);
 #endif
    static void renderer_flush_blit(Renderer *self,
@@ -6781,7 +6781,7 @@ static void renderer_init(Renderer *self,
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
-#if defined(ANDROID) || (defined(IOS) && !defined(TVOS))
+#if defined(ANDROID) || defined(IOS)
    /* Precompile common primitive shader variants on mobile Vulkan backends
     * before the first emulated frame. Keep this synchronous so compilation
     * cannot interrupt gameplay. Some Android drivers can spend ~160 ms in
@@ -9633,7 +9633,7 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    }
 }
 
-#if defined(ANDROID) || (defined(IOS) && !defined(TVOS))
+#if defined(ANDROID) || defined(IOS)
 static void renderer_precompile_textured_batch_variant(
       BufferVertexVec *vertices,
       PrimitiveInfoVec *scissors,
