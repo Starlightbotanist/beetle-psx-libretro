@@ -3418,6 +3418,62 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
    };
 
    static struct VulkanPipelineDiagnosticState vulkan_pipeline_diagnostic;
+   static bool vulkan_shader_precompilation;
+
+   /* Deep copy of one graphics-pipeline description. During shader
+    * precompilation the normal renderer still produces each state through its
+    * real draw path, but creation is deferred into these self-contained jobs.
+    * No CommandBuffer or Program cache is accessed by worker threads; workers
+    * only call vkCreateGraphicsPipelines, and the main thread publishes the
+    * completed handles after joining them. */
+   struct VulkanGraphicsPrecompileJob
+   {
+      Program *program;
+      Hash hash;
+      VkGraphicsPipelineCreateInfo pipe;
+      VkPipelineViewportStateCreateInfo viewport;
+      VkPipelineDynamicStateCreateInfo dynamic;
+      VkDynamicState dynamic_states[2];
+      VkPipelineColorBlendStateCreateInfo blend;
+      VkPipelineColorBlendAttachmentState
+         blend_attachments[VULKAN_NUM_ATTACHMENTS];
+      VkPipelineDepthStencilStateCreateInfo depth_stencil;
+      VkPipelineVertexInputStateCreateInfo vertex_input;
+      VkVertexInputAttributeDescription
+         vertex_attributes[VULKAN_NUM_VERTEX_ATTRIBS];
+      VkVertexInputBindingDescription
+         vertex_bindings[VULKAN_NUM_VERTEX_BUFFERS];
+      VkPipelineInputAssemblyStateCreateInfo input_assembly;
+      VkPipelineMultisampleStateCreateInfo multisample;
+      VkPipelineRasterizationStateCreateInfo rasterization;
+      VkPipelineShaderStageCreateInfo stages[(unsigned)ShaderStage_Count];
+      VkSpecializationInfo specialization[(unsigned)ShaderStage_Count];
+      VkSpecializationMapEntry
+         specialization_entries[(unsigned)ShaderStage_Count]
+            [VULKAN_NUM_SPEC_CONSTANTS];
+      uint32_t specialization_data[(unsigned)ShaderStage_Count]
+         [VULKAN_NUM_SPEC_CONSTANTS];
+      VkPipeline pipeline;
+      VkResult result;
+      retro_time_t elapsed_usec;
+      Hash program_key;
+      Hash render_pass_key;
+      unsigned subpass;
+      uint32_t state_words[4];
+      uint32_t spec_mask;
+      uint32_t spec_constants[VULKAN_NUM_SPEC_CONSTANTS];
+   };
+
+   struct VulkanGraphicsPrecompileJobVec
+   {
+      struct VulkanGraphicsPrecompileJob *items;
+      unsigned count;
+      unsigned capacity;
+      bool capture_failed;
+   };
+
+   static struct VulkanGraphicsPrecompileJobVec
+      vulkan_graphics_precompile_jobs;
 
    static void vulkan_pipeline_diagnostic_reset(unsigned scaling,
          unsigned msaa)
@@ -6056,9 +6112,11 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_hd_texture_uniforms(Renderer *self,
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
-#if defined(ANDROID) || defined(IOS)
    static void renderer_precompile_primitive_shaders(Renderer *self);
-#endif
+   static void vulkan_precompile_jobs_begin(void);
+   static bool vulkan_precompile_jobs_finish(Device *device,
+         unsigned *job_count, unsigned *worker_count,
+         retro_time_t *compile_elapsed_usec);
    static void renderer_flush_blit(Renderer *self,
          const BlitInfoVec *infos,
          Program *program,
@@ -6066,6 +6124,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static TTRect renderer_compute_window_rect(Renderer *self,
          const TextureWindow *window);
    static void renderer_reset_scissor_queue(Renderer *self);
+   static void device_pipeline_cache_save(Device *self);
    static void renderer_reset_queue(Renderer *self);
    static void renderer_ensure_command_buffer(Renderer *self)
    {
@@ -6835,19 +6894,22 @@ static void renderer_init(Renderer *self,
 
    vulkan_pipeline_diagnostic_reset(self->scaling, self->msaa);
 
-#if defined(ANDROID) || defined(IOS)
-   /* Precompile common primitive shader variants on mobile Vulkan backends
-    * before the first emulated frame. Keep this synchronous so compilation
-    * cannot interrupt gameplay. Some Android drivers can spend ~160 ms in
-    * vkCreateGraphicsPipelines; MoltenVK likewise translates SPIR-V and creates
-    * Metal pipeline state, so demand creation can produce visible stalls. */
-   renderer_precompile_primitive_shaders(self);
+   if (vulkan_shader_precompilation)
    {
-      VkClearValue clear_zero;
-      memset(&clear_zero, 0, sizeof(clear_zero));
-      commandbuffer_clear_image(cbh_get(&self->cmd), ih_get(&self->scaled_framebuffer), &clear_zero);
+      /* Compile the complete primitive-pipeline set before the first emulated
+       * frame. This is intentionally blocking: the Android worker only
+       * parallelises the startup work and never overlaps compilation with
+       * gameplay. Other Vulkan platforms use the same deterministic set. */
+      renderer_precompile_primitive_shaders(self);
+      {
+         VkClearValue clear_zero;
+         memset(&clear_zero, 0, sizeof(clear_zero));
+         commandbuffer_clear_image(cbh_get(&self->cmd),
+               ih_get(&self->scaled_framebuffer), &clear_zero);
+      }
    }
-#endif
+   else
+      LOGI("[Vulkan shader precompilation] disabled by core option\n");
    renderer_flush(self);
    renderer_reset_scissor_queue(self);
 
@@ -9687,7 +9749,6 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    }
 }
 
-#if defined(ANDROID) || defined(IOS)
 static void renderer_precompile_textured_batch_variant(
       BufferVertexVec *vertices,
       PrimitiveInfoVec *scissors,
@@ -9721,8 +9782,13 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
    TTRect rect = { 0, 0, 1, 1 };
    unsigned feedback;
    retro_time_t start_usec = cpu_features_get_time_usec();
+   retro_time_t compile_elapsed_usec = 0;
    unsigned variants = 0;
+   unsigned jobs = 0;
+   unsigned workers = 0;
+   bool complete;
 
+   vulkan_precompile_jobs_begin();
    vulkan_pipeline_diagnostic.precompiling = true;
 
    /* A normal and an input-attachment-compatible render pass have distinct
@@ -9870,7 +9936,15 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
       renderer_flush_render_pass(self, &rect);
    }
 
+   complete = vulkan_precompile_jobs_finish(self->device, &jobs, &workers,
+         &compile_elapsed_usec);
    vulkan_pipeline_diagnostic.precompiling = false;
+
+   /* Android may terminate the process without a clean libretro teardown.
+    * Persist a successfully completed precompile immediately so that the
+    * expensive driver work survives even in that case. */
+   if (complete)
+      device_pipeline_cache_save(self->device);
 
    {
       size_t driver_cache_bytes = 0;
@@ -9881,14 +9955,14 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
                driver_cache,
                &driver_cache_bytes, NULL)
          : VK_ERROR_INITIALIZATION_FAILED;
-      LOGI("[Vulkan shader precompilation] variants=%u elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
-         variants,
+      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
+         variants, jobs, workers, complete ? 1u : 0u,
+         (long long)compile_elapsed_usec,
          (long long)(cpu_features_get_time_usec() - start_usec),
          (int)cache_result,
          (unsigned long long)driver_cache_bytes);
    }
 }
-#endif
 
 static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       bool scaled_read,
@@ -14477,6 +14551,321 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
+   static void vulkan_precompile_job_fix_pointers(
+         struct VulkanGraphicsPrecompileJob *job)
+   {
+      unsigned i;
+
+      job->pipe.pViewportState = &job->viewport;
+      job->pipe.pDynamicState = &job->dynamic;
+      job->pipe.pColorBlendState = &job->blend;
+      job->pipe.pDepthStencilState = &job->depth_stencil;
+      job->pipe.pVertexInputState = &job->vertex_input;
+      job->pipe.pInputAssemblyState = &job->input_assembly;
+      job->pipe.pMultisampleState = &job->multisample;
+      job->pipe.pRasterizationState = &job->rasterization;
+      job->pipe.pStages = job->stages;
+      job->dynamic.pDynamicStates = job->dynamic_states;
+      job->blend.pAttachments = job->blend_attachments;
+      job->vertex_input.pVertexAttributeDescriptions =
+         job->vertex_attributes;
+      job->vertex_input.pVertexBindingDescriptions = job->vertex_bindings;
+
+      for (i = 0; i < job->pipe.stageCount; i++)
+      {
+         if (job->specialization[i].mapEntryCount)
+         {
+            job->specialization[i].pMapEntries =
+               job->specialization_entries[i];
+            job->specialization[i].pData = job->specialization_data[i];
+            job->stages[i].pSpecializationInfo = &job->specialization[i];
+         }
+         else
+            job->stages[i].pSpecializationInfo = NULL;
+      }
+   }
+
+   static bool vulkan_precompile_queue_graphics_pipeline(
+         struct CommandBuffer *self,
+         Hash hash,
+         const VkGraphicsPipelineCreateInfo *pipe)
+   {
+      struct VulkanGraphicsPrecompileJobVec *jobs =
+         &vulkan_graphics_precompile_jobs;
+      struct VulkanGraphicsPrecompileJob *job;
+      unsigned i;
+
+      for (i = 0; i < jobs->count; i++)
+      {
+         if (jobs->items[i].program == self->current_program &&
+             jobs->items[i].hash == hash)
+            return true;
+      }
+
+      if (jobs->count == jobs->capacity)
+      {
+         unsigned new_capacity = jobs->capacity ? jobs->capacity * 2u : 64u;
+         struct VulkanGraphicsPrecompileJob *new_items =
+            (struct VulkanGraphicsPrecompileJob *)realloc(jobs->items,
+               (size_t)new_capacity * sizeof(*new_items));
+         if (!new_items)
+         {
+            if (!jobs->capture_failed)
+               LOGE("[Vulkan shader precompilation] could not allocate pipeline job storage\n");
+            jobs->capture_failed = true;
+            return false;
+         }
+         jobs->items = new_items;
+         jobs->capacity = new_capacity;
+      }
+
+      if (!pipe->pViewportState || !pipe->pDynamicState ||
+          !pipe->pColorBlendState || !pipe->pDepthStencilState ||
+          !pipe->pVertexInputState || !pipe->pInputAssemblyState ||
+          !pipe->pMultisampleState || !pipe->pRasterizationState ||
+          !pipe->pStages ||
+          pipe->pNext || pipe->pTessellationState ||
+          pipe->pViewportState->pNext ||
+          pipe->pViewportState->pViewports ||
+          pipe->pViewportState->pScissors ||
+          pipe->pDynamicState->pNext ||
+          pipe->pColorBlendState->pNext ||
+          pipe->pDepthStencilState->pNext ||
+          pipe->pVertexInputState->pNext ||
+          pipe->pInputAssemblyState->pNext ||
+          pipe->pMultisampleState->pNext ||
+          pipe->pMultisampleState->pSampleMask ||
+          pipe->pRasterizationState->pNext ||
+          pipe->stageCount > (unsigned)ShaderStage_Count ||
+          pipe->pDynamicState->dynamicStateCount > 2u ||
+          (pipe->pDynamicState->dynamicStateCount &&
+             !pipe->pDynamicState->pDynamicStates) ||
+          pipe->pColorBlendState->attachmentCount > VULKAN_NUM_ATTACHMENTS ||
+          (pipe->pColorBlendState->attachmentCount &&
+             !pipe->pColorBlendState->pAttachments) ||
+          pipe->pVertexInputState->vertexAttributeDescriptionCount >
+             VULKAN_NUM_VERTEX_ATTRIBS ||
+          (pipe->pVertexInputState->vertexAttributeDescriptionCount &&
+             !pipe->pVertexInputState->pVertexAttributeDescriptions) ||
+          pipe->pVertexInputState->vertexBindingDescriptionCount >
+             VULKAN_NUM_VERTEX_BUFFERS ||
+          (pipe->pVertexInputState->vertexBindingDescriptionCount &&
+             !pipe->pVertexInputState->pVertexBindingDescriptions))
+      {
+         LOGE("[Vulkan shader precompilation] unsupported pipeline description; precompilation is incomplete\n");
+         jobs->capture_failed = true;
+         return false;
+      }
+
+      job = &jobs->items[jobs->count++];
+      memset(job, 0, sizeof(*job));
+      job->program = self->current_program;
+      job->hash = hash;
+      job->pipe = *pipe;
+      job->viewport = *pipe->pViewportState;
+      job->dynamic = *pipe->pDynamicState;
+      if (job->dynamic.dynamicStateCount)
+         memcpy(job->dynamic_states, job->dynamic.pDynamicStates,
+               job->dynamic.dynamicStateCount * sizeof(job->dynamic_states[0]));
+      job->blend = *pipe->pColorBlendState;
+      if (job->blend.attachmentCount)
+         memcpy(job->blend_attachments, job->blend.pAttachments,
+               job->blend.attachmentCount * sizeof(job->blend_attachments[0]));
+      job->depth_stencil = *pipe->pDepthStencilState;
+      job->vertex_input = *pipe->pVertexInputState;
+      if (job->vertex_input.vertexAttributeDescriptionCount)
+         memcpy(job->vertex_attributes,
+               job->vertex_input.pVertexAttributeDescriptions,
+               job->vertex_input.vertexAttributeDescriptionCount *
+                  sizeof(job->vertex_attributes[0]));
+      if (job->vertex_input.vertexBindingDescriptionCount)
+         memcpy(job->vertex_bindings,
+               job->vertex_input.pVertexBindingDescriptions,
+               job->vertex_input.vertexBindingDescriptionCount *
+                  sizeof(job->vertex_bindings[0]));
+      job->input_assembly = *pipe->pInputAssemblyState;
+      job->multisample = *pipe->pMultisampleState;
+      job->rasterization = *pipe->pRasterizationState;
+      memcpy(job->stages, pipe->pStages,
+            pipe->stageCount * sizeof(job->stages[0]));
+
+      for (i = 0; i < pipe->stageCount; i++)
+      {
+         const VkSpecializationInfo *source =
+            pipe->pStages[i].pSpecializationInfo;
+         if (pipe->pStages[i].pNext || !pipe->pStages[i].pName)
+         {
+            LOGE("[Vulkan shader precompilation] unsupported shader stage description; precompilation is incomplete\n");
+            jobs->capture_failed = true;
+            jobs->count--;
+            return false;
+         }
+         if (!source)
+            continue;
+         if (source->mapEntryCount > VULKAN_NUM_SPEC_CONSTANTS ||
+             source->dataSize > sizeof(job->specialization_data[i]) ||
+             (source->mapEntryCount && !source->pMapEntries) ||
+             (source->dataSize && !source->pData))
+         {
+            LOGE("[Vulkan shader precompilation] unsupported specialization data; precompilation is incomplete\n");
+            jobs->capture_failed = true;
+            jobs->count--;
+            return false;
+         }
+         job->specialization[i] = *source;
+         if (source->mapEntryCount)
+            memcpy(job->specialization_entries[i], source->pMapEntries,
+                  source->mapEntryCount *
+                     sizeof(job->specialization_entries[i][0]));
+         if (source->dataSize)
+            memcpy(job->specialization_data[i], source->pData,
+                  source->dataSize);
+      }
+
+      job->pipeline = VK_NULL_HANDLE;
+      job->result = VK_NOT_READY;
+      job->program_key = self->current_program->intrusive_node.key;
+      job->render_pass_key = self->compatible_render_pass->intrusive_node.key;
+      job->subpass = self->current_subpass;
+      memcpy(job->state_words, self->static_state.words,
+            sizeof(job->state_words));
+      job->spec_mask =
+         pipeline_layout_get_resource_layout(self->current_layout)->
+            combined_spec_constant_mask &
+         self->static_state.state.spec_constant_mask;
+      memcpy(job->spec_constants,
+            self->potential_static_state.spec_constants,
+            sizeof(job->spec_constants));
+      return true;
+   }
+
+   struct VulkanPrecompileWorker
+   {
+      Device *device;
+      unsigned first;
+      unsigned stride;
+   };
+
+   static void vulkan_precompile_worker(void *userdata)
+   {
+      struct VulkanPrecompileWorker *worker =
+         (struct VulkanPrecompileWorker *)userdata;
+      unsigned i;
+
+      for (i = worker->first;
+           i < vulkan_graphics_precompile_jobs.count;
+           i += worker->stride)
+      {
+         struct VulkanGraphicsPrecompileJob *job =
+            &vulkan_graphics_precompile_jobs.items[i];
+         retro_time_t start_usec = cpu_features_get_time_usec();
+         job->result = vkCreateGraphicsPipelines(
+               device_get_device(worker->device),
+               device_get_pipeline_cache(worker->device),
+               1, &job->pipe, NULL, &job->pipeline);
+         job->elapsed_usec = cpu_features_get_time_usec() - start_usec;
+      }
+   }
+
+   static void vulkan_precompile_jobs_begin(void)
+   {
+      free(vulkan_graphics_precompile_jobs.items);
+      memset(&vulkan_graphics_precompile_jobs, 0,
+            sizeof(vulkan_graphics_precompile_jobs));
+   }
+
+   static bool vulkan_precompile_jobs_finish(Device *device,
+         unsigned *job_count, unsigned *worker_count,
+         retro_time_t *compile_elapsed_usec)
+   {
+      struct VulkanGraphicsPrecompileJobVec *jobs =
+         &vulkan_graphics_precompile_jobs;
+      struct VulkanPrecompileWorker worker[2];
+      sthread_t *thread = NULL;
+      retro_time_t start_usec;
+      bool complete;
+      unsigned workers = 1;
+      unsigned i;
+
+      *job_count = jobs->count;
+      *worker_count = 0;
+      *compile_elapsed_usec = 0;
+      complete = jobs->count != 0 && !jobs->capture_failed;
+
+      for (i = 0; i < jobs->count; i++)
+         vulkan_precompile_job_fix_pointers(&jobs->items[i]);
+
+      start_usec = cpu_features_get_time_usec();
+#if defined(ANDROID)
+      if (jobs->count > 1)
+      {
+         worker[1].device = device;
+         worker[1].first = 1;
+         worker[1].stride = 2;
+         thread = sthread_create(vulkan_precompile_worker, &worker[1]);
+         if (thread)
+            workers = 2;
+      }
+#endif
+      worker[0].device = device;
+      worker[0].first = 0;
+      worker[0].stride = workers;
+      vulkan_precompile_worker(&worker[0]);
+      if (thread)
+         sthread_join(thread);
+      *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
+      *worker_count = jobs->count ? workers : 0;
+
+      for (i = 0; i < jobs->count; i++)
+      {
+         struct VulkanGraphicsPrecompileJob *job = &jobs->items[i];
+         IntrusivePODWrapperPipeline *entry;
+         LOGI("[Vulkan pipeline diagnostic] graphics_pipeline cache=miss program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u stages=%u result=%d elapsed_us=%lld state=%08x:%08x:%08x:%08x spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+               (unsigned long long)job->program_key,
+               (unsigned long long)job->hash,
+               (unsigned long long)job->render_pass_key,
+               job->subpass, job->pipe.stageCount, (int)job->result,
+               (long long)job->elapsed_usec,
+               job->state_words[0], job->state_words[1],
+               job->state_words[2], job->state_words[3],
+               job->spec_mask,
+               job->spec_constants[0], job->spec_constants[1],
+               job->spec_constants[2], job->spec_constants[3],
+               job->spec_constants[4], job->spec_constants[5],
+               job->spec_constants[6], job->spec_constants[7],
+               job->spec_constants[8], job->spec_constants[9]);
+
+         if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
+         {
+            LOGE("[Vulkan shader precompilation] graphics pipeline creation failed result=%d\n",
+                  (int)job->result);
+            if (job->pipeline != VK_NULL_HANDLE)
+               vkDestroyPipeline(device_get_device(device), job->pipeline,
+                     NULL);
+            complete = false;
+            continue;
+         }
+
+         entry = program_find_pipeline(job->program, job->hash);
+         if (entry == NULL)
+         {
+            program_add_pipeline(job->program, job->hash, job->pipeline);
+            entry = program_find_pipeline(job->program, job->hash);
+         }
+         else
+            vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
+
+         if (entry != NULL)
+            entry->diagnostic_precompiled = true;
+         else
+            complete = false;
+      }
+
+      free(jobs->items);
+      memset(jobs, 0, sizeof(*jobs));
+      return complete;
+   }
+
    static VkPipeline commandbuffer_build_graphics_pipeline(struct CommandBuffer *self,
          Hash hash)
    {
@@ -14645,6 +15034,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       pipe.pStages = stages;
       pipe.stageCount = num_stages;
 
+      if (vulkan_pipeline_diagnostic.precompiling)
+      {
+         vulkan_precompile_queue_graphics_pipeline(self, hash, &pipe);
+         return VK_NULL_HANDLE;
+      }
 
       start_usec = cpu_features_get_time_usec();
       res = vkCreateGraphicsPipelines(device_get_device(self->device),
@@ -15504,6 +15898,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(!self->is_compute);
+      if (vulkan_pipeline_diagnostic.precompiling)
+      {
+         /* Synthetic precompile draws only need to produce the exact runtime
+          * pipeline description. Queue that description without binding a
+          * not-yet-created handle or recording a throwaway draw. */
+         commandbuffer_flush_graphics_pipeline(self);
+         return;
+      }
       commandbuffer_flush_render_state(self);
       vkCmdDraw(self->cmd, vertex_count, instance_count, first_vertex, first_instance);
    }
@@ -20047,6 +20449,11 @@ void rhi_vulkan_refresh_variables(void)
       else
          mdec_yuv = false;
    }
+
+   var.key = BEETLE_OPT(vulkan_shader_precompilation);
+   vulkan_shader_precompilation = false;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      vulkan_shader_precompilation = !strcmp(var.value, "enabled");
 
    var.key = BEETLE_OPT(dither_mode);
    dither_mode = DITHER_NATIVE;

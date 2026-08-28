@@ -326,6 +326,22 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "hardware"
    },
+#if defined(HAVE_VULKAN)
+   {
+      BEETLE_OPT(vulkan_shader_precompilation),
+      "Vulkan Shader Precompilation",
+      NULL,
+      "Precompile the complete set of commonly used Vulkan graphics pipelines before gameplay begins. This prevents first-use shader compilation stalls at the cost of a longer initial startup. The persistent driver cache makes later starts substantially faster. Restart required.",
+      NULL,
+      "video",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled"
+   },
+#endif
    {
       BEETLE_OPT(renderer_software_fb),
       "Software Framebuffer",
