@@ -964,6 +964,8 @@ static void object_pool_raw_deinit(struct ObjectPoolRaw *p)
    {
       struct IntrusiveHashMapNode node; /* must stay first (offset 0) */
       VkPipeline value;
+      bool diagnostic_precompiled;
+      bool diagnostic_first_gameplay_use_logged;
    };
 
    struct IntrusivePODWrapperPtr
@@ -1325,6 +1327,8 @@ static IntrusivePODWrapperPipeline *vk_pipeline_map_emplace_yield(
          return NULL;
       t = (IntrusivePODWrapperPipeline *)slot;
       t->value = value;
+      t->diagnostic_precompiled = false;
+      t->diagnostic_first_gameplay_use_logged = false;
       return vk_pipeline_map_insert_yield(m, hash, t);
    }
 
@@ -3400,6 +3404,54 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       PipelineLayout *layout;
       struct vk_pipeline_map pipelines;
    };
+
+   struct VulkanPipelineDiagnosticState
+   {
+      bool precompiling;
+      bool gameplay_active;
+      uint64_t renderer_generation;
+      uint64_t gameplay_frame;
+      uint64_t first_use_order;
+      retro_time_t gameplay_start_usec;
+      unsigned scaling;
+      unsigned msaa;
+   };
+
+   static struct VulkanPipelineDiagnosticState vulkan_pipeline_diagnostic;
+
+   static void vulkan_pipeline_diagnostic_reset(unsigned scaling,
+         unsigned msaa)
+   {
+      vulkan_pipeline_diagnostic.precompiling = false;
+      vulkan_pipeline_diagnostic.gameplay_active = false;
+      vulkan_pipeline_diagnostic.renderer_generation++;
+      vulkan_pipeline_diagnostic.gameplay_frame = 0;
+      vulkan_pipeline_diagnostic.first_use_order = 0;
+      vulkan_pipeline_diagnostic.gameplay_start_usec = 0;
+      vulkan_pipeline_diagnostic.scaling = scaling;
+      vulkan_pipeline_diagnostic.msaa = msaa;
+      LOGI("[Vulkan pipeline first use] generation=%llu renderer_ready scaling=%u msaa=%u\n",
+            (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
+            scaling, msaa);
+   }
+
+   static void vulkan_pipeline_diagnostic_begin_frame(void)
+   {
+      if (!vulkan_pipeline_diagnostic.gameplay_active)
+      {
+         vulkan_pipeline_diagnostic.gameplay_active = true;
+         vulkan_pipeline_diagnostic.gameplay_frame = 0;
+         vulkan_pipeline_diagnostic.first_use_order = 0;
+         vulkan_pipeline_diagnostic.gameplay_start_usec =
+            cpu_features_get_time_usec();
+         LOGI("[Vulkan pipeline first use] generation=%llu gameplay_start scaling=%u msaa=%u\n",
+               (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
+               vulkan_pipeline_diagnostic.scaling,
+               vulkan_pipeline_diagnostic.msaa);
+      }
+      else
+         vulkan_pipeline_diagnostic.gameplay_frame++;
+   }
 
 static void program_set_shader(struct Program *self,
       ShaderStage stage,
@@ -6781,6 +6833,8 @@ static void renderer_init(Renderer *self,
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
+   vulkan_pipeline_diagnostic_reset(self->scaling, self->msaa);
+
 #if defined(ANDROID) || defined(IOS)
    /* Precompile common primitive shader variants on mobile Vulkan backends
     * before the first emulated frame. Keep this synchronous so compilation
@@ -9669,6 +9723,8 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
    retro_time_t start_usec = cpu_features_get_time_usec();
    unsigned variants = 0;
 
+   vulkan_pipeline_diagnostic.precompiling = true;
+
    /* A normal and an input-attachment-compatible render pass have distinct
     * Vulkan compatibility keys. Exercise both, using the same queue and state
     * setters as real draws so the resulting hashes cannot drift from runtime. */
@@ -9813,6 +9869,8 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
 
       renderer_flush_render_pass(self, &rect);
    }
+
+   vulkan_pipeline_diagnostic.precompiling = false;
 
    {
       size_t driver_cache_bytes = 0;
@@ -12652,10 +12710,11 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
       device_bake_program(device, self);
    }
 
-   static VkPipeline program_get_pipeline(const struct Program *self, Hash hash)
+   static IntrusivePODWrapperPipeline *program_find_pipeline(
+         struct Program *self,
+         Hash hash)
    {
-      IntrusivePODWrapperPipeline *ret = vk_pipeline_map_find((struct vk_pipeline_map *)&self->pipelines, hash);
-      return ret ? ret->value : VK_NULL_HANDLE;
+      return vk_pipeline_map_find(&self->pipelines, hash);
    }
 
    static VkPipeline program_add_pipeline(struct Program *self,
@@ -14624,8 +14683,109 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
+   static uint32_t commandbuffer_get_pipeline_spec_mask(
+         const struct CommandBuffer *self)
+   {
+      const CombinedResourceLayout *layout =
+         pipeline_layout_get_resource_layout(self->current_layout);
+      return layout->combined_spec_constant_mask &
+         self->static_state.state.spec_constant_mask;
+   }
+
+   static void commandbuffer_log_compute_pipeline_first_use(
+         struct CommandBuffer *self,
+         Hash hash,
+         IntrusivePODWrapperPipeline *entry,
+         bool created_at_first_use)
+   {
+      retro_time_t now_usec;
+      uint32_t spec_mask;
+
+      if (!vulkan_pipeline_diagnostic.gameplay_active ||
+            entry == NULL ||
+            entry->diagnostic_first_gameplay_use_logged)
+         return;
+
+      entry->diagnostic_first_gameplay_use_logged = true;
+      now_usec = cpu_features_get_time_usec();
+      spec_mask = commandbuffer_get_pipeline_spec_mask(self);
+      vulkan_pipeline_diagnostic.first_use_order++;
+      LOGI("[Vulkan pipeline first use] type=compute generation=%llu order=%llu frame=%llu gameplay_elapsed_us=%lld scaling=%u msaa=%u precompiled=%u created_at_first_use=%u program=%016llx pipeline=%016llx spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+            (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
+            (unsigned long long)vulkan_pipeline_diagnostic.first_use_order,
+            (unsigned long long)vulkan_pipeline_diagnostic.gameplay_frame,
+            (long long)(now_usec -
+               vulkan_pipeline_diagnostic.gameplay_start_usec),
+            vulkan_pipeline_diagnostic.scaling,
+            vulkan_pipeline_diagnostic.msaa,
+            entry->diagnostic_precompiled ? 1u : 0u,
+            created_at_first_use ? 1u : 0u,
+            (unsigned long long)self->current_program->intrusive_node.key,
+            (unsigned long long)hash,
+            spec_mask,
+            self->potential_static_state.spec_constants[0],
+            self->potential_static_state.spec_constants[1],
+            self->potential_static_state.spec_constants[2],
+            self->potential_static_state.spec_constants[3],
+            self->potential_static_state.spec_constants[4],
+            self->potential_static_state.spec_constants[5],
+            self->potential_static_state.spec_constants[6],
+            self->potential_static_state.spec_constants[7],
+            self->potential_static_state.spec_constants[8],
+            self->potential_static_state.spec_constants[9]);
+   }
+
+   static void commandbuffer_log_graphics_pipeline_first_use(
+         struct CommandBuffer *self,
+         Hash hash,
+         IntrusivePODWrapperPipeline *entry,
+         bool created_at_first_use)
+   {
+      retro_time_t now_usec;
+      uint32_t spec_mask;
+
+      if (!vulkan_pipeline_diagnostic.gameplay_active ||
+            entry == NULL ||
+            entry->diagnostic_first_gameplay_use_logged)
+         return;
+
+      entry->diagnostic_first_gameplay_use_logged = true;
+      now_usec = cpu_features_get_time_usec();
+      spec_mask = commandbuffer_get_pipeline_spec_mask(self);
+      vulkan_pipeline_diagnostic.first_use_order++;
+      LOGI("[Vulkan pipeline first use] type=graphics generation=%llu order=%llu frame=%llu gameplay_elapsed_us=%lld scaling=%u msaa=%u precompiled=%u created_at_first_use=%u program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u state=%08x:%08x:%08x:%08x spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+            (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
+            (unsigned long long)vulkan_pipeline_diagnostic.first_use_order,
+            (unsigned long long)vulkan_pipeline_diagnostic.gameplay_frame,
+            (long long)(now_usec -
+               vulkan_pipeline_diagnostic.gameplay_start_usec),
+            vulkan_pipeline_diagnostic.scaling,
+            vulkan_pipeline_diagnostic.msaa,
+            entry->diagnostic_precompiled ? 1u : 0u,
+            created_at_first_use ? 1u : 0u,
+            (unsigned long long)self->current_program->intrusive_node.key,
+            (unsigned long long)hash,
+            (unsigned long long)self->compatible_render_pass->intrusive_node.key,
+            self->current_subpass,
+            self->static_state.words[0], self->static_state.words[1],
+            self->static_state.words[2], self->static_state.words[3],
+            spec_mask,
+            self->potential_static_state.spec_constants[0],
+            self->potential_static_state.spec_constants[1],
+            self->potential_static_state.spec_constants[2],
+            self->potential_static_state.spec_constants[3],
+            self->potential_static_state.spec_constants[4],
+            self->potential_static_state.spec_constants[5],
+            self->potential_static_state.spec_constants[6],
+            self->potential_static_state.spec_constants[7],
+            self->potential_static_state.spec_constants[8],
+            self->potential_static_state.spec_constants[9]);
+   }
+
    static void commandbuffer_flush_compute_pipeline(struct CommandBuffer *self)
    {
+      IntrusivePODWrapperPipeline *entry;
+      bool created_at_first_use = false;
       Hash hash;
       Hasher h; hasher_init(&h);
       hasher_u64(&h, self->current_program->intrusive_node.key);
@@ -14642,14 +14802,30 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
 
       hash = hasher_get(&h);
-      self->current_pipeline = program_get_pipeline(self->current_program, hash);
-      if (self->current_pipeline == VK_NULL_HANDLE)
+      entry = program_find_pipeline(self->current_program, hash);
+      if (entry != NULL)
+         self->current_pipeline = entry->value;
+      else
+      {
          self->current_pipeline = commandbuffer_build_compute_pipeline(self, hash);
+         entry = program_find_pipeline(self->current_program, hash);
+         created_at_first_use =
+            vulkan_pipeline_diagnostic.gameplay_active &&
+            !vulkan_pipeline_diagnostic.precompiling;
+      }
+
+      if (vulkan_pipeline_diagnostic.precompiling && entry != NULL)
+         entry->diagnostic_precompiled = true;
+      else
+         commandbuffer_log_compute_pipeline_first_use(self, hash, entry,
+               created_at_first_use);
       }
    }
 
    static void commandbuffer_flush_graphics_pipeline(struct CommandBuffer *self)
    {
+      IntrusivePODWrapperPipeline *entry;
+      bool created_at_first_use = false;
       uint32_t combined_spec_constant;
       Hash hash;
       Hasher h; hasher_init(&h);
@@ -14699,9 +14875,23 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
 
       hash = hasher_get(&h);
-      self->current_pipeline = program_get_pipeline(self->current_program, hash);
-      if (self->current_pipeline == VK_NULL_HANDLE)
+      entry = program_find_pipeline(self->current_program, hash);
+      if (entry != NULL)
+         self->current_pipeline = entry->value;
+      else
+      {
          self->current_pipeline = commandbuffer_build_graphics_pipeline(self, hash);
+         entry = program_find_pipeline(self->current_program, hash);
+         created_at_first_use =
+            vulkan_pipeline_diagnostic.gameplay_active &&
+            !vulkan_pipeline_diagnostic.precompiling;
+      }
+
+      if (vulkan_pipeline_diagnostic.precompiling && entry != NULL)
+         entry->diagnostic_precompiled = true;
+      else
+         commandbuffer_log_graphics_pipeline_first_use(self, hash, entry,
+               created_at_first_use);
       }
    }
 
@@ -20166,6 +20356,8 @@ void rhi_vulkan_prepare_frame(void)
     * don't dereference it. */
    if (renderer == NULL)
       return;
+
+   vulkan_pipeline_diagnostic_begin_frame();
 
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
