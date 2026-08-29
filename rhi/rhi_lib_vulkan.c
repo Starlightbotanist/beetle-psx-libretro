@@ -11,6 +11,7 @@
 
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
 #include "rhi_defer.h"
+#include "rhi_line.h"
 #include "tt_trace.h"
 #include <retro_inline.h>
 #include <math.h>
@@ -9191,110 +9192,16 @@ static BufferVertexVec * renderer_select_pipeline(Renderer *self, unsigned prims
    }
 }
 
-static void renderer_build_line_quad(Renderer *self,
-      Vertex *output,
+static void renderer_build_line_quad(Vertex *output,
       const Vertex *input){
-   const float dx = input[1].x - input[0].x;
-   const float dy = input[1].y - input[0].y;
-   if (dx == 0.0f && dy == 0.0f)
-   {
-      uint32_t c;
-      /* Degenerate, render a point. */
-      output[0].x = input[0].x;
-      output[0].y = input[0].y;
-      output[1].x = input[0].x + 1.0f;
-      output[1].y = input[0].y;
-      output[2].x = input[1].x;
-      output[2].y = input[1].y + 1.0f;
-      output[3].x = input[1].x + 1.0f;
-      output[3].y = input[1].y + 1.0f;
+   rhi_line_quad_vertex quad[4];
 
-      c = input[0].color;
-      { int k; for (k = 0; k < 4; k++) {
-         output[k].w     = 1.0f;
-         output[k].color = c;
-         output[k].cf[0] = input[0].cf[0];
-         output[k].cf[1] = input[0].cf[1];
-         output[k].cf[2] = input[0].cf[2];
-         output[k].fog[0] = input[0].fog[0];
-         output[k].fog[1] = input[0].fog[1];
-         output[k].fog[2] = input[0].fog[2];
-         output[k].fog[3] = input[0].fog[3];
-      } }
-      return;
-   }
-
-   { const float abs_dx = fabsf(dx);
-   const float abs_dy = fabsf(dy);
-   float fill_dx, fill_dy;
-   float dxdk, dydk;
-
-   float pad_x0 = 0.0f;
-   float pad_x1 = 0.0f;
-   float pad_y0 = 0.0f;
-   float pad_y1 = 0.0f;
-
-   /* Check for vertical or horizontal major lines. When expanding to a rect, do
-    * so in the appropriate direction. FIXME: This scheme seems to kinda work,
-    * but it seems very hard to find a method that looks perfect on every game.
-    * Vagrant Story speech bubbles are a very good test case here! */
-   if (abs_dx > abs_dy)
-   {
-      fill_dx = 0.0f;
-      fill_dy = 1.0f;
-      dxdk = 1.0f;
-      dydk = dy / abs_dx;
-
-      if (dx > 0.0f)
-      {
-         /* Right */
-         pad_x1 = 1.0f;
-         pad_y1 = dydk;
-      }
-      else
-      {
-         /* Left */
-         pad_x0 = 1.0f;
-         pad_y0 = -dydk;
-      }
-   }
-   else
-   {
-      fill_dx = 1.0f;
-      fill_dy = 0.0f;
-      dydk = 1.0f;
-      dxdk = dx / abs_dy;
-
-      if (dy > 0.0f)
-      {
-         /* Down */
-         pad_y1 = 1.0f;
-         pad_x1 = dxdk;
-      }
-      else
-      {
-         /* Up */
-         pad_y0 = 1.0f;
-         pad_x0 = -dxdk;
-      }
-   }
-
-   { const float x0 = input[0].x + pad_x0;
-   const float y0 = input[0].y + pad_y0;
-   const float x1 = input[1].x + pad_x1;
-   const float y1 = input[1].y + pad_y1;
-
-   output[0].x = x0;
-   output[0].y = y0;
-   output[1].x = x0 + fill_dx;
-   output[1].y = y0 + fill_dy;
-   output[2].x = x1;
-   output[2].y = y1;
-   output[3].x = x1 + fill_dx;
-   output[3].y = y1 + fill_dy;
-
+   rhi_build_line_quad(quad, input[0].x, input[0].y,
+         input[1].x, input[1].y);
    { int k; for (k = 0; k < 4; k++) {
-      const Vertex *src = (k < 2) ? &input[0] : &input[1];
+      const Vertex *src = &input[quad[k].source];
+      output[k].x     = quad[k].x;
+      output[k].y     = quad[k].y;
       output[k].w     = 1.0f;
       output[k].color = src->color;
       output[k].cf[0] = src->cf[0];
@@ -9305,17 +9212,15 @@ static void renderer_build_line_quad(Renderer *self,
       output[k].fog[2] = src->fog[2];
       output[k].fog[3] = src->fog[3];
    } }
-   }
-   }
 }
 
 static void renderer_draw_line(Renderer *self, const Vertex *vertices)
 {
    /* We can move this to GPU, but means more draw calls and more pipeline
     * swapping. This should be plenty fast for the quite small amount of lines
-    * games render. */
+   * games render. */
    Vertex vert[4];
-   renderer_build_line_quad(self, vert, vertices);
+   renderer_build_line_quad(vert, vertices);
    renderer_draw_quad(self, vert);
 }
 

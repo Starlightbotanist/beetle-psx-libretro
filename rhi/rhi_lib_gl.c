@@ -14,10 +14,12 @@
 
 #include "mednafen/mednafen.h"
 #include "mednafen/psx/gpu.h"
+#include "pgxp/pgxp_main.h"
 #include "libretro.h"
 #include "libretro_options.h"
 
 #include "rhi_intf.h" /* enums */
+#include "rhi_line.h"
 #include "rhi_tt.h"  /* shared HD texture replacement/tracking engine */
 #include "rhi_defer.h"
 #include "tt_trace.h"
@@ -6840,6 +6842,26 @@ void rhi_gl_push_quad(
    }
 }
 
+/* Vulkan expands each native-width line into a quad before rasterization.
+ * Use the same geometry while PGXP is active so both hardware backends apply
+ * the same endpoint and diagonal coverage rules. */
+static void gl_build_line_quad(gl_command_vertex output[4],
+      const gl_command_vertex input[2])
+{
+   rhi_line_quad_vertex quad[4];
+   unsigned i;
+
+   rhi_build_line_quad(quad,
+         input[0].position[0], input[0].position[1],
+         input[1].position[0], input[1].position[1]);
+   for (i = 0; i < 4; i++)
+   {
+      output[i] = input[quad[i].source];
+      output[i].position[0] = quad[i].x;
+      output[i].position[1] = quad[i].y;
+   }
+}
+
 void rhi_gl_push_line(
       int16_t p0x, int16_t p0y,
       int16_t p1x, int16_t p1y,
@@ -6919,9 +6941,28 @@ void rhi_gl_push_line(
          }
       };
 
-      gl_vram_sync_primitive(renderer, v, 2);
-      push_primitive(renderer, v, 2,
-            GL_LINES, semi_transparency_mode, mask_test, set_mask);
+      if (PGXP_enabled())
+      {
+         gl_command_vertex quad[4];
+         gl_command_vertex triangles[6];
+
+         gl_build_line_quad(quad, v);
+         gl_vram_sync_primitive(renderer, quad, 4);
+         triangles[0] = quad[0];
+         triangles[1] = quad[1];
+         triangles[2] = quad[2];
+         triangles[3] = quad[3];
+         triangles[4] = quad[2];
+         triangles[5] = quad[1];
+         push_primitive(renderer, triangles, 6,
+               GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask);
+      }
+      else
+      {
+         gl_vram_sync_primitive(renderer, v, 2);
+         push_primitive(renderer, v, 2,
+               GL_LINES, semi_transparency_mode, mask_test, set_mask);
+      }
    }
 }
 
