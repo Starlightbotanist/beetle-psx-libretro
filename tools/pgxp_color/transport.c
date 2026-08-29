@@ -270,6 +270,53 @@ static void test_untracked_colour(void)
       fail("untracked colour accepted from stale shadow", 0, 0);
 }
 
+static void set_cpu_value(unsigned reg, uint32_t value)
+{
+   CPU_reg[reg] = PGXP_value_zero;
+   SetValue(&CPU_reg[reg], value);
+}
+
+static void test_cpu_result_initialization(void)
+{
+   uint32_t instr;
+
+   set_cpu_value(1, 0x12345678u);
+   set_cpu_value(2, 0x00FF0F0Fu);
+   CPU_reg[1].gFlags = 0xFFFFu;
+   CPU_reg[1].count = 0xDEADBEEFu;
+
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x24u;
+   PGXP_CPU_AND(instr, 0x00340608u, 0x12345678u, 0x00FF0F0Fu);
+
+   if (CPU_reg[3].count != 0 || CPU_reg[3].gFlags != 0)
+      fail("AND result metadata not initialized", CPU_reg[3].count, 0);
+}
+
+static void test_cpu_comparison_ordering(void)
+{
+   uint32_t instr;
+
+   set_cpu_value(1, 0x00010000u);
+   set_cpu_value(2, 0x0000FFFFu);
+
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Au;
+   PGXP_CPU_SLT(instr, 0, 0x00010000u, 0x0000FFFFu);
+   if (CPU_reg[3].x != 0.f)
+      fail("SLT used low half with unequal high halves", 1, 0);
+
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Bu;
+   PGXP_CPU_SLTU(instr, 0, 0x00010000u, 0x0000FFFFu);
+   if (CPU_reg[3].x != 0.f)
+      fail("SLTU used low half with unequal high halves", 1, 0);
+
+   set_cpu_value(1, 0x00000001u);
+   set_cpu_value(2, 0x00000002u);
+   instr = INSTR_RS(1) | INSTR_RT(2) | INSTR_RD(3) | 0x2Au;
+   PGXP_CPU_SLT(instr, 1, 0x00000001u, 0x00000002u);
+   if (CPU_reg[3].x != 1.f)
+      fail("SLT did not compare equal-high low halves", 0, 1);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -291,6 +338,12 @@ int main(void)
 
    printf("[T5] negative control: CPU-composed colour must be refused\n");
    test_untracked_colour();
+
+   printf("[T6] CPU result initialization\n");
+   test_cpu_result_initialization();
+
+   printf("[T7] CPU comparison ordering\n");
+   test_cpu_comparison_ordering();
 
    if (failures)
    {
