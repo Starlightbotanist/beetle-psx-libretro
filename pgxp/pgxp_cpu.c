@@ -106,6 +106,14 @@ void PGXP_CPU_ObserveInstruction(uint32_t instr)
 	PGXP_LineageObserveRegisterWrite(dest);
 }
 
+static void PGXP_CPU_CopyIdentityResult(unsigned dest, unsigned source,
+		uint32_t after)
+{
+	CPU_reg[dest] = CPU_reg[source];
+	CPU_reg[dest].value = after;
+	PGXP_CPU_TrackProjectionWrite(dest);
+}
+
 int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
 		uint32_t after)
 {
@@ -136,9 +144,7 @@ int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
 	    (VALID_01 | VALID_PROJECTION))
 		return 0;
 
-	CPU_reg[dest] = CPU_reg[source];
-	CPU_reg[dest].value = after;
-	PGXP_CPU_TrackProjectionWrite(dest);
+	PGXP_CPU_CopyIdentityResult(dest, source, after);
 	return 1;
 }
 
@@ -440,6 +446,12 @@ void PGXP_CPU_ADD(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 
 	Validate(&CPU_reg[rs(instr)], rsVal);
 	Validate(&CPU_reg[rt(instr)], rtVal);
+	if (rtVal == 0)
+	{
+		PGXP_LineageIdentityMove(rd(instr), rs(instr), rsVal, rdVal);
+		PGXP_CPU_CopyIdentityResult(rd(instr), rs(instr), rdVal);
+		return;
+	}
 
 	/* iCB: Only require one valid input */
 	if (((CPU_reg[rt(instr)].flags & VALID_01) != VALID_01) != ((CPU_reg[rs(instr)].flags & VALID_01) != VALID_01))

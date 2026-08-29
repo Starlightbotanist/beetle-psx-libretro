@@ -322,6 +322,41 @@ static void test_cpu_comparison_ordering(void)
       fail("SLT did not compare equal-high low halves", 0, 1);
 }
 
+static void test_native_zero_add_identity(void)
+{
+   const uint32_t add_instr = INSTR_RS(4) | INSTR_RT(3) |
+      INSTR_RD(5) | 0x21u;
+   const uint32_t sub_instr = INSTR_RS(4) | INSTR_RT(3) |
+      INSTR_RD(5) | 0x23u;
+
+   set_cpu_value(4, 0x00000001u);
+   set_cpu_value(3, 0x00000000u);
+   CPU_reg[4].x = 1.25f;
+   CPU_reg[3].x = 0.5f;
+   PGXP_CPU_ADDU(add_instr, 0x00000001u, 0x00000001u,
+      0x00000000u);
+   if (CPU_reg[5].x != 1.25f)
+      fail("right-zero ADD lost identity", 0, 1);
+
+   set_cpu_value(4, 0x00000000u);
+   set_cpu_value(3, 0x00000001u);
+   CPU_reg[4].x = 0.5f;
+   CPU_reg[3].x = 1.25f;
+   PGXP_CPU_ADDU(add_instr, 0x00000001u, 0x00000000u,
+      0x00000001u);
+   if (CPU_reg[5].x != 1.75f)
+      fail("left-zero ADD changed behavior", 0, 1);
+
+   set_cpu_value(4, 0x00000001u);
+   set_cpu_value(3, 0x00000000u);
+   CPU_reg[4].x = 1.25f;
+   CPU_reg[3].x = 0.5f;
+   PGXP_CPU_SUBU(sub_instr, 0x00000001u, 0x00000001u,
+      0x00000000u);
+   if (CPU_reg[5].x != 0.75f)
+      fail("right-zero SUB changed behavior", 0, 1);
+}
+
 static uint32_t pack_vertex(int16_t x, int16_t y)
 {
    return (uint32_t)(uint16_t)x | ((uint32_t)(uint16_t)y << 16);
@@ -424,6 +459,16 @@ static void test_projection_identity_moves(void)
        (VALID_01 | VALID_PROJECTION) ||
        CPU_reg[9].x != 321.25f || CPU_reg[9].y != -87.5f)
       fail("register identity lost projected value", 0, 1);
+
+   set_cpu_value(12, 0);
+   CPU_reg[12].x = 0.5f;
+   instr = INSTR_RS(8) | INSTR_RT(12) | INSTR_RD(13) | 0x21u;
+   PGXP_CPU_ADDU(instr, packed, packed, 0);
+   PGXP_CPU_ObserveInstruction(instr);
+   if ((CPU_reg[13].flags & (VALID_01 | VALID_PROJECTION)) !=
+       (VALID_01 | VALID_PROJECTION) ||
+       CPU_reg[13].x != 321.25f || CPU_reg[13].y != -87.5f)
+      fail("native-zero identity lost projection", 0, 1);
 
    instr = INSTR_RS(9) | INSTR_RT(10) | INSTR_OP(0x0d);
    PGXP_CPU_ORI(instr, packed, packed);
@@ -611,25 +656,28 @@ int main(void)
    printf("[T7] CPU comparison ordering\n");
    test_cpu_comparison_ordering();
 
-   printf("[T8] projection provenance\n");
+   printf("[T8] native-zero ADD identity\n");
+   test_native_zero_add_identity();
+
+   printf("[T9] projection provenance\n");
    test_projection_provenance();
 
-   printf("[T9] NCLIP native magnitude preservation\n");
+   printf("[T10] NCLIP native magnitude preservation\n");
    test_nclip_magnitude();
 
-   printf("[T10] projected-depth CPU transport\n");
+   printf("[T11] projected-depth CPU transport\n");
    test_projection_provenance_transport();
 
-   printf("[T11] projected-depth identity moves\n");
+   printf("[T12] projected-depth identity moves\n");
    test_projection_identity_moves();
 
-   printf("[T12] memory-mode CPU dispatch\n");
+   printf("[T13] memory-mode CPU dispatch\n");
    test_memory_mode_dispatch();
 
-   printf("[T13] projected-depth write observation\n");
+   printf("[T14] projected-depth write observation\n");
    test_projection_write_observer();
 
-   printf("[T14] exact projected-coordinate shift lineage\n");
+   printf("[T15] exact projected-coordinate shift lineage\n");
    test_exact_shift_lineage();
 
    if (failures)
