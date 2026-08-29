@@ -778,6 +778,11 @@ static void test_lineage_memory_addressing(void)
    PGXP_LineageMemoryWriteRange(0x9F800021u, 2);
    if (recover_shifted_lineage(0x1F800020u, shifted))
       fail("scratchpad alias kept lineage", 1, 0);
+
+   store_shifted_lineage(0x1F800020u, packed, shifted);
+   PGXP_LineageScratchWrite(0x21u, 2);
+   if (recover_shifted_lineage(0xBF800020u, shifted))
+      fail("scratchpad helper kept lineage", 1, 0);
 }
 
 static void test_subword_store_lineage_invalidation(void)

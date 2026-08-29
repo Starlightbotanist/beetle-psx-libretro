@@ -1027,25 +1027,25 @@ uint32_t ScratchRAM_ReadU32(uint32_t address) { return MASMEM_ReadU32(ScratchRAM
 void ScratchRAM_WriteU8(uint32_t address, uint8_t value)
 {
    MASMEM_WriteU8(ScratchRAM, address, value);
-   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 1);
+   PGXP_LineageScratchWrite(address, 1);
 }
 
 void ScratchRAM_WriteU16(uint32_t address, uint16_t value)
 {
    MASMEM_WriteU16(ScratchRAM, address, value);
-   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 2);
+   PGXP_LineageScratchWrite(address, 2);
 }
 
 void ScratchRAM_WriteU24(uint32_t address, uint32_t value)
 {
    MASMEM_WriteU24(ScratchRAM, address, value);
-   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 3);
+   PGXP_LineageScratchWrite(address, 3);
 }
 
 void ScratchRAM_WriteU32(uint32_t address, uint32_t value)
 {
    MASMEM_WriteU32(ScratchRAM, address, value);
-   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 4);
+   PGXP_LineageScratchWrite(address, 4);
 }
 uint8_t *ScratchRAM_data8(void) { return ScratchRAM->data8; }
 uint8_t *MainRAM_data8   (void) { return MainRAM->data8;    }

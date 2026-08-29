@@ -657,8 +657,7 @@ static INLINE void WriteMemory_u8(int32_t *timestamp, uint32_t address, uint32_t
    if ((BIU & 0x081) == 0x080)
    {
       MASMEM_WriteU8(ScratchRAM, address & 0x3FF, value);
-      PGXP_LineageMemoryWriteRange(
-         0x1F800000 | (address & 0x3FF), 1);
+      PGXP_LineageScratchWrite(address, 1);
    }
 }
 
@@ -682,8 +681,7 @@ static INLINE void WriteMemory_u16(int32_t *timestamp, uint32_t address, uint32_
    if ((BIU & 0x081) == 0x080)
    {
       MASMEM_WriteU16(ScratchRAM, address & 0x3FF, value);
-      PGXP_LineageMemoryWriteRange(
-         0x1F800000 | (address & 0x3FF), 2);
+      PGXP_LineageScratchWrite(address, 2);
    }
 }
 
@@ -717,8 +715,7 @@ static INLINE void WriteMemory_u32(int32_t *timestamp, uint32_t address, uint32_
          MASMEM_WriteU24(ScratchRAM, address & 0x3FF, value);
       else
          MASMEM_WriteU32(ScratchRAM, address & 0x3FF, value);
-      PGXP_LineageMemoryWriteRange(
-         0x1F800000 | (address & 0x3FF), DS24 ? 3 : 4);
+      PGXP_LineageScratchWrite(address, DS24 ? 3 : 4);
    }
 }
 
@@ -953,6 +950,9 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
    #define DO_LDS() { s_cpu.GPR_full[LDWhich] = LDValue; ReadAbsorb[LDWhich] = LDAbsorb; ReadFudge = LDWhich; ReadAbsorbWhich |= LDWhich & 0x1F; LDWhich = 0x22; }
    #define BEGIN_OPF(name) { op_##name:
+   /* Both supported PGXP modes include memory tracking.  The CPU flag
+    * selects full arithmetic tracking inside Memory + CPU; it is not an
+    * independent mode.  Both modes share this register-write finalizer. */
    #define PGXP_OBSERVE_CPU() do { \
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY) \
 	 PGXP_CPU_ObserveInstruction(instr); \
@@ -3096,7 +3096,7 @@ static void pgxp_cpu_track(struct lightrec_state *state, uint32_t instr,
 	uint32_t modes = PGXP_GetModes();
 
 	(void)state;
-	if ((modes & PGXP_MODE_CPU) && PGXP_CPU_Tracks(instr))
+	if (modes & PGXP_MODE_CPU)
 		PGXP_CPU_Dispatch(instr, rd, rs, rt, hi, lo, addr);
 	else if (modes & PGXP_MODE_MEMORY)
 		PGXP_CPU_MemoryDispatch(instr, rd, rs, rt);
@@ -3168,6 +3168,57 @@ static void reset_target_cycle_count(struct lightrec_state *state, int32_t times
 {
 	if (timestamp >= next_event_ts)
 		lightrec_set_exit_flags(state, LIGHTREC_EXIT_CHECK_INTERRUPT);
+}
+
+/* The mapped and hardware-backed Lightrec paths differ only in how the
+ * native memory access is performed. Keep PGXP transfer classification here
+ * so both paths update the same shadow state for every opcode. */
+static void pgxp_track_read_byte(uint32_t opcode, uint8_t val, uint32_t mem)
+{
+	if ((opcode >> 26) == OP_LB)
+		PGXP_CPU_LB(opcode, val, mem);
+	else
+		PGXP_CPU_LBU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
+}
+
+static void pgxp_track_read_half(uint32_t opcode, uint16_t val, uint32_t mem)
+{
+	if ((opcode >> 26) == OP_LH)
+		PGXP_CPU_LH(opcode, val, mem);
+	else
+		PGXP_CPU_LHU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
+}
+
+static bool pgxp_track_read_word(uint32_t opcode, uint32_t val, uint32_t mem)
+{
+	switch (opcode >> 26)
+	{
+		case OP_LW:
+			PGXP_CPU_LW(opcode, val, mem);
+			return true;
+		case OP_LWC2:
+			PGXP_GTE_LWC2(opcode, val, mem);
+			return true;
+		default:
+			return false;
+	}
+}
+
+static void pgxp_track_write_word(uint32_t opcode, uint32_t val, uint32_t mem)
+{
+	switch (opcode >> 26)
+	{
+		case OP_SW:
+			PGXP_CPU_SW(opcode, val, mem);
+			break;
+		case OP_SWC2:
+			PGXP_GTE_SWC2(opcode, val, mem);
+			break;
+		default:
+			break;
+	}
 }
 
 static void hw_write_byte(struct lightrec_state *state,
@@ -3251,17 +3302,7 @@ static void pgxp_nonhw_write_word(struct lightrec_state *state,
 		uint32_t opcode, void *host, uint32_t mem, uint32_t val)
 {
 	*(uint32_t *)host = HTOLE32(val);
-
-	switch (opcode >> 26){
-		case 0x2B:
-			PGXP_CPU_SW(opcode, val, mem);
-			break;
-		case 0x3A:
-			PGXP_GTE_SWC2(opcode, val, mem);
-			break;
-		default:
-			break;
-	}
+	pgxp_track_write_word(opcode, val, mem);
 
 	if (!psx_dynarec_invalidate || lightrec_store_hits_code(state, mem))
 		lightrec_invalidate(state, mem, 4);
@@ -3289,17 +3330,7 @@ static void pgxp_hw_write_word(struct lightrec_state *state,
 	int32_t timestamp = lightrec_current_cycle_count(state);
 
 	PSX_MemWrite32(timestamp, mem, val);
-
-	switch (opcode >> 26){
-		case OP_SW:
-			PGXP_CPU_SW(opcode, val, mem);
-			break;
-		case OP_SWC2:
-			PGXP_GTE_SWC2(opcode, val, mem);
-			break;
-		default:
-			break;
-	}
+	pgxp_track_write_word(opcode, val, mem);
 
 	reset_target_cycle_count(state, timestamp);
 }
@@ -3324,11 +3355,7 @@ static uint8_t pgxp_nonhw_read_byte(struct lightrec_state *state,
 {
 	uint8_t val = *(uint8_t *)host;
 
-	if((opcode >> 26) == OP_LB)
-		PGXP_CPU_LB(opcode, val, mem);
-	else
-		PGXP_CPU_LBU(opcode, val, mem);
-	PGXP_CPU_ObserveInstruction(opcode);
+	pgxp_track_read_byte(opcode, val, mem);
 
 	return val;
 }
@@ -3339,11 +3366,7 @@ static uint8_t pgxp_hw_read_byte(struct lightrec_state *state,
 	int32_t timestamp = lightrec_current_cycle_count(state);
 	uint8_t val       = PSX_MemRead8(&timestamp, mem);
 
-	if((opcode >> 26) == OP_LB)
-		PGXP_CPU_LB(opcode, val, mem);
-	else
-		PGXP_CPU_LBU(opcode, val, mem);
-	PGXP_CPU_ObserveInstruction(opcode);
+	pgxp_track_read_byte(opcode, val, mem);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3374,11 +3397,7 @@ static uint16_t pgxp_nonhw_read_half(struct lightrec_state *state,
 {
 	uint16_t val = LE16TOH(*(uint16_t *)host);
 
-	if((opcode >> 26) == OP_LH)
-		PGXP_CPU_LH(opcode, val, mem);
-	else
-		PGXP_CPU_LHU(opcode, val, mem);
-	PGXP_CPU_ObserveInstruction(opcode);
+	pgxp_track_read_half(opcode, val, mem);
 
 	return val;
 }
@@ -3389,11 +3408,7 @@ static uint16_t pgxp_hw_read_half(struct lightrec_state *state,
 	int32_t timestamp = lightrec_current_cycle_count(state);
 	uint16_t val      = PSX_MemRead16(&timestamp, mem);
 
-	if((opcode >> 26) == OP_LH)
-		PGXP_CPU_LH(opcode, val, mem);
-	else
-		PGXP_CPU_LHU(opcode, val, mem);
-	PGXP_CPU_ObserveInstruction(opcode);
+	pgxp_track_read_half(opcode, val, mem);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3424,16 +3439,7 @@ static uint32_t pgxp_nonhw_read_word(struct lightrec_state *state,
 {
 	uint32_t val = LE32TOH(*(uint32_t *)host);
 
-	switch (opcode >> 26){
-		case OP_LW:
-			PGXP_CPU_LW(opcode, val, mem);
-			break;
-		case OP_LWC2:
-			PGXP_GTE_LWC2(opcode, val, mem);
-			break;
-		default:
-			break;
-	}
+	pgxp_track_read_word(opcode, val, mem);
 	if ((opcode >> 26) != OP_LWL && (opcode >> 26) != OP_LWR)
 		PGXP_CPU_ObserveInstruction(opcode);
 
@@ -3457,17 +3463,7 @@ static uint32_t pgxp_hw_read_word(struct lightrec_state *state,
 	int32_t timestamp = lightrec_current_cycle_count(state);
 	uint32_t val      = PSX_MemRead32(&timestamp, mem);
 
-	switch (opcode >> 26)
-	{
-		case OP_LW:
-			PGXP_CPU_LW(opcode, val, mem);
-			break;
-		case OP_LWC2:
-			PGXP_GTE_LWC2(opcode, val, mem);
-			break;
-		default:
-			break;
-	}
+	pgxp_track_read_word(opcode, val, mem);
 	if ((opcode >> 26) != OP_LWL && (opcode >> 26) != OP_LWR)
 		PGXP_CPU_ObserveInstruction(opcode);
 
@@ -3514,19 +3510,8 @@ static uint32_t cache_ctrl_read_word(struct lightrec_state *state,
 {
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
 	{
-		switch (opcode >> 26)
-		{
-			case OP_LW:
-				PGXP_CPU_LW(opcode, BIU, mem);
-				PGXP_CPU_ObserveInstruction(opcode);
-				break;
-			case OP_LWC2:
-				PGXP_GTE_LWC2(opcode, BIU, mem);
-				PGXP_CPU_ObserveInstruction(opcode);
-				break;
-			default:
-				break;
-		}
+		if (pgxp_track_read_word(opcode, BIU, mem))
+			PGXP_CPU_ObserveInstruction(opcode);
 	}
 
 	return BIU;
@@ -3538,19 +3523,7 @@ static void cache_ctrl_write_word(struct lightrec_state *state,
 	BIU = val;
 
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-	{
-		switch (opcode >> 26)
-		{
-			case OP_SW:
-				PGXP_CPU_SW(opcode, BIU, mem);
-				break;
-			case OP_SWC2:
-				PGXP_GTE_SWC2(opcode, BIU, mem);
-				break;
-			default:
-				break;
-		}
-	}
+		pgxp_track_write_word(opcode, BIU, mem);
 }
 
 static struct lightrec_mem_map_ops cache_ctrl_ops = {

@@ -46,8 +46,6 @@ int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
 		uint32_t after);
 void PGXP_CPU_MemoryDispatch(uint32_t instr,
 		uint32_t rdVal, uint32_t rsVal, uint32_t rtVal);
-void PGXP_CPU_TrackLineageShift(uint32_t instr, uint32_t before,
-		uint32_t after, int arithmetic);
 
 // -- CPU functions
 
@@ -122,7 +120,6 @@ void PGXP_CPU_MFLO(uint32_t instr, uint32_t rdVal, uint32_t loVal);
 void PGXP_CPU_MTLO(uint32_t instr, uint32_t loVal, uint32_t rdVal);
 
 /* Unified recompiler-facing dispatch (see pgxp_cpu.c for the contract). */
-int  PGXP_CPU_Tracks(uint32_t instr);
 void PGXP_CPU_Dispatch(uint32_t instr,
                        uint32_t rdVal, uint32_t rsVal, uint32_t rtVal,
                        uint32_t hiVal, uint32_t loVal, uint32_t addr);

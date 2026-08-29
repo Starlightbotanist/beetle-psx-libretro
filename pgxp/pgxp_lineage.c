@@ -46,6 +46,21 @@ static PGXP_lineage lineage_fifo[32];
 static PGXP_lineage lineage_cb[16];
 static uint32_t lineage_reg_touched;
 
+/* Register lineage is replaced, never merged. Centralize the destination
+ * bookkeeping so every new transport operation follows the same lifetime
+ * rules. Callers which may write a source register must snapshot it first. */
+static PGXP_lineage* lineage_begin_register_write(unsigned dest)
+{
+	PGXP_lineage* lineage;
+
+	if (dest == 0 || dest >= 32)
+		return NULL;
+	lineage_reg_touched |= UINT32_C(1) << dest;
+	lineage = &lineage_reg[dest];
+	memset(lineage, 0, sizeof(*lineage));
+	return lineage;
+}
+
 static unsigned lineage_stage(const PGXP_lineage* lineage)
 {
 	return (lineage->meta & PGXP_LINEAGE_STAGE_MASK) >>
@@ -120,6 +135,17 @@ static PGXP_lineage* lineage_memory_read(uint32_t addr)
 	return &lineage_memory[index];
 }
 
+static void lineage_copy_from_memory(PGXP_lineage* dest,
+		uint32_t addr, uint32_t value)
+{
+	PGXP_lineage* source = lineage_memory_read(addr);
+
+	if (!source || !(source->meta & PGXP_LINEAGE_VALID) ||
+	    source->value != value)
+		return;
+	*dest = *source;
+}
+
 void PGXP_LineageReset(void)
 {
 	if (lineage_memory_valid)
@@ -175,11 +201,9 @@ void PGXP_LineageMFC2(uint32_t instr, uint32_t value,
 	unsigned dest = (instr >> 16) & 31;
 	PGXP_lineage* lineage;
 
-	if (dest == 0)
+	lineage = lineage_begin_register_write(dest);
+	if (!lineage)
 		return;
-	lineage_reg_touched |= UINT32_C(1) << dest;
-	lineage = &lineage_reg[dest];
-	memset(lineage, 0, sizeof(*lineage));
 	if (!precise || precise->value != value ||
 	    (precise->flags & (VALID_01 | VALID_PROJECTION)) !=
 	    (VALID_01 | VALID_PROJECTION) ||
@@ -204,12 +228,12 @@ void PGXP_LineageShift(uint32_t instr, uint32_t before,
 	unsigned dest = (instr >> 11) & 31;
 	unsigned shift = (instr >> 6) & 31;
 	PGXP_lineage prior;
+	PGXP_lineage* lineage;
 
 	if (dest == 0)
 		return;
 	prior = lineage_reg[source];
-	lineage_reg_touched |= UINT32_C(1) << dest;
-	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	lineage = lineage_begin_register_write(dest);
 	if (!(prior.meta & PGXP_LINEAGE_VALID) || shift != 5)
 		return;
 
@@ -219,17 +243,17 @@ void PGXP_LineageShift(uint32_t instr, uint32_t before,
 	    lineage_stage(&prior) == PGXP_LINEAGE_STAGE_PROJECTED &&
 	    prior.value == before && lineage_sra5(after) == before)
 	{
-		lineage_reg[dest] = prior;
-		lineage_reg[dest].value = after;
-		lineage_set_stage(&lineage_reg[dest], PGXP_LINEAGE_STAGE_SHIFTED);
+		*lineage = prior;
+		lineage->value = after;
+		lineage_set_stage(lineage, PGXP_LINEAGE_STAGE_SHIFTED);
 	}
 	else if (arithmetic && dest == source &&
 	         lineage_stage(&prior) == PGXP_LINEAGE_STAGE_SHIFTED &&
 	         prior.value == before && lineage_sra5(before) == after)
 	{
-		lineage_reg[dest] = prior;
-		lineage_reg[dest].value = after;
-		lineage_set_stage(&lineage_reg[dest], PGXP_LINEAGE_STAGE_RESTORED);
+		*lineage = prior;
+		lineage->value = after;
+		lineage_set_stage(lineage, PGXP_LINEAGE_STAGE_RESTORED);
 	}
 }
 
@@ -239,6 +263,7 @@ void PGXP_LineageTaggedAdd(uint32_t instr, uint32_t before,
 	unsigned source = (instr >> 21) & 31;
 	unsigned dest = (instr >> 16) & 31;
 	PGXP_lineage prior;
+	PGXP_lineage* lineage;
 
 	if (dest == 0)
 		return;
@@ -247,8 +272,7 @@ void PGXP_LineageTaggedAdd(uint32_t instr, uint32_t before,
 	    lineage_stage(&prior) != PGXP_LINEAGE_STAGE_SHIFTED)
 		return;
 
-	lineage_reg_touched |= UINT32_C(1) << dest;
-	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	lineage = lineage_begin_register_write(dest);
 	if (prior.value != before)
 		return;
 	/* SLL 5 reserves bits 0..4. Changing only those bits cannot change the
@@ -257,26 +281,26 @@ void PGXP_LineageTaggedAdd(uint32_t instr, uint32_t before,
 	if ((before ^ after) & ~PGXP_LINEAGE_TAG_MASK)
 		return;
 
-	lineage_reg[dest] = prior;
-	lineage_reg[dest].value = after;
-	lineage_reg[dest].meta |= PGXP_LINEAGE_TAGGED;
+	*lineage = prior;
+	lineage->value = after;
+	lineage->meta |= PGXP_LINEAGE_TAGGED;
 }
 
 void PGXP_LineageIdentityMove(unsigned dest, unsigned source,
 		uint32_t before, uint32_t after)
 {
 	PGXP_lineage prior;
+	PGXP_lineage* lineage;
 
 	if (dest == 0 || dest >= 32 || source >= 32)
 		return;
 	prior = lineage_reg[source];
-	lineage_reg_touched |= UINT32_C(1) << dest;
-	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	lineage = lineage_begin_register_write(dest);
 	if (source == 0 || before != after ||
 	    !(prior.meta & PGXP_LINEAGE_VALID) || prior.value != before)
 		return;
-	lineage_reg[dest] = prior;
-	lineage_reg[dest].value = after;
+	*lineage = prior;
+	lineage->value = after;
 }
 
 void PGXP_LineageObserveRegisterWrite(unsigned dest)
@@ -294,19 +318,15 @@ void PGXP_LineageObserveRegisterWrite(unsigned dest)
 void PGXP_LineageLoad(uint32_t instr, uint32_t addr, uint32_t value)
 {
 	unsigned dest = (instr >> 16) & 31;
-	PGXP_lineage* source;
+	PGXP_lineage* lineage;
 
-	if (dest == 0)
+	lineage = lineage_begin_register_write(dest);
+	if (!lineage)
 		return;
-	lineage_reg_touched |= UINT32_C(1) << dest;
-	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
 	/* Partial and sub-word loads are not exact aliases of a stored word. */
 	if ((instr >> 26) != 0x23)
 		return;
-	source = lineage_memory_read(addr);
-	if (source && (source->meta & PGXP_LINEAGE_VALID) &&
-	    source->value == value)
-		lineage_reg[dest] = *source;
+	lineage_copy_from_memory(lineage, addr, value);
 }
 
 void PGXP_LineageMemoryWrite(uint32_t addr)
@@ -335,6 +355,12 @@ void PGXP_LineageMemoryWriteRange(uint32_t addr, uint32_t size)
 	}
 }
 
+void PGXP_LineageScratchWrite(uint32_t offset, uint32_t size)
+{
+	PGXP_LineageMemoryWriteRange(
+		UINT32_C(0x1f800000) | (offset & UINT32_C(0x3ff)), size);
+}
+
 void PGXP_LineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 {
 	unsigned source = (instr >> 16) & 31;
@@ -356,16 +382,10 @@ void PGXP_LineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 
 void PGXP_LineageFIFOWrite(unsigned pos, uint32_t addr, uint32_t value)
 {
-	PGXP_lineage* source;
-
 	if (pos >= 32)
 		return;
 	memset(&lineage_fifo[pos], 0, sizeof(lineage_fifo[pos]));
-	source = lineage_memory_read(addr);
-	if (!source || !(source->meta & PGXP_LINEAGE_VALID) ||
-	    source->value != value)
-		return;
-	lineage_fifo[pos] = *source;
+	lineage_copy_from_memory(&lineage_fifo[pos], addr, value);
 }
 
 void PGXP_LineageCBWrite(unsigned slot, unsigned fifo_pos)

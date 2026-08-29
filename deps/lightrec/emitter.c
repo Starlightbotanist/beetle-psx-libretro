@@ -10,6 +10,7 @@
 #include "emitter.h"
 #include "lightning-wrapper.h"
 #include "optimizer.h"
+#include "pgxp.h"
 #include "regcache.h"
 
 #include <stdbool.h>
@@ -3436,41 +3437,6 @@ static _Bool pgxp_cpu_tracked_memory(union code c)
 	}
 }
 
-/* Returns true if `c` is a non-memory CPU op that PGXP CPU mode tracks and
- * whose operands are available from the GPR file (so the post-execution
- * values can be read by the C wrapper after a regcache clean).  Loads and
- * stores are deliberately excluded here: their tracked value/address live in
- * the rec_io path and are handled separately. */
-static _Bool pgxp_cpu_tracked(union code c)
-{
-	switch (c.i.op) {
-	case OP_SPECIAL:
-		switch (c.r.op) {
-		case OP_SPECIAL_SLL:  case OP_SPECIAL_SRL:  case OP_SPECIAL_SRA:
-		case OP_SPECIAL_SLLV: case OP_SPECIAL_SRLV: case OP_SPECIAL_SRAV:
-		case OP_SPECIAL_MFHI: case OP_SPECIAL_MTHI:
-		case OP_SPECIAL_MFLO: case OP_SPECIAL_MTLO:
-		case OP_SPECIAL_MULT: case OP_SPECIAL_MULTU:
-		case OP_SPECIAL_DIV:  case OP_SPECIAL_DIVU:
-		case OP_SPECIAL_ADD:  case OP_SPECIAL_ADDU:
-		case OP_SPECIAL_SUB:  case OP_SPECIAL_SUBU:
-		case OP_SPECIAL_AND:  case OP_SPECIAL_OR:
-		case OP_SPECIAL_XOR:  case OP_SPECIAL_NOR:
-		case OP_SPECIAL_SLT:  case OP_SPECIAL_SLTU:
-			return true;
-		default:
-			return false;
-		}
-	case OP_ADDI:  case OP_ADDIU:
-	case OP_SLTI:  case OP_SLTIU:
-	case OP_ANDI:  case OP_ORI:
-	case OP_XORI:  case OP_LUI:
-		return true;
-	default:
-		return false;
-	}
-}
-
 /* Register writes without a PGXP arithmetic tracker still retire any
  * provenance associated with the destination register. */
 static _Bool pgxp_cpu_observed(union code c)
@@ -3597,7 +3563,8 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 
 	if (likely(op->opcode)) {
 		f = rec_standard[op->i.op];
-		if (state->state->ops.pgxp_cpu && pgxp_cpu_tracked(op->c))
+		if (state->state->ops.pgxp_cpu &&
+		    lightrec_pgxp_cpu_tracked(op->c))
 			rec_pgxp_cpu_capture(state, block, offset);
 		else if (state->state->ops.pgxp_cpu && pgxp_cpu_observed(op->c))
 			rec_pgxp_cpu_observe(state, block, offset);
@@ -3612,7 +3579,7 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 		 * non-memory op so recompiled code maintains the same
 		 * per-register precision metadata the interpreter would. */
 		if (state->state->ops.pgxp_cpu &&
-		    pgxp_cpu_tracked(op->c))
+		    lightrec_pgxp_cpu_tracked(op->c))
 			rec_pgxp_cpu_track(state, block, offset);
 	}
 

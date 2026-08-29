@@ -173,12 +173,12 @@ void PGXP_CPU_MemoryDispatch(uint32_t instr,
 			{
 				case 0x00: /* SLL */
 					if (rd(instr) != 0)
-						PGXP_CPU_TrackLineageShift(instr, rtVal,
+						PGXP_LineageShift(instr, rtVal,
 							rdVal, 0);
 					break;
 				case 0x03: /* SRA */
 					if (rd(instr) != 0)
-						PGXP_CPU_TrackLineageShift(instr, rtVal,
+						PGXP_LineageShift(instr, rtVal,
 							rdVal, 1);
 					break;
 				case 0x20: /* ADD */
@@ -1621,12 +1621,6 @@ void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 	PGXP_LineageStore(instr, rtVal, addr);
 }
 
-void PGXP_CPU_TrackLineageShift(uint32_t instr, uint32_t before,
-		uint32_t after, int arithmetic)
-{
-	PGXP_LineageShift(instr, before, after, arithmetic);
-}
-
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Mem[Rs + Im] = Rt */
@@ -1691,15 +1685,8 @@ void PGXP_CP0_RFE(uint32_t instr)
  * The 44 PGXP_CPU_* trackers above are hooked one-by-one from the mednafen
  * interpreter's per-instruction handlers (cpu.c BEGIN_OPF bodies).  The
  * lightrec recompiler does not run those handlers, so under DYNAREC_EXECUTE
- * the CPU-side tracking is never invoked.  To let recompiled code drive the
- * same tracking, the JIT needs (a) a way to ask, at block-compile time,
- * whether a given instruction is tracked, and (b) a single entry point to
- * call at run time that routes to the correct tracker.
- *
- * PGXP_CPU_Tracks(instr) answers (a) -- pure function of the opcode, so the
- * recompiler can decide whether to emit a tracking call site at all.
- *
- * PGXP_CPU_Dispatch() answers (b).  It is passed the canonical post-execution
+ * the CPU-side tracking is never invoked.  PGXP_CPU_Dispatch() provides the
+ * single host entry point used by Lightrec.  It is passed the post-execution
  * values the recompiler already has in hand (the destination/result values and
  * the source operand values, plus the effective address for loads/stores) and
  * forwards them to the matching tracker with that tracker's exact argument
@@ -1713,46 +1700,6 @@ void PGXP_CP0_RFE(uint32_t instr)
  * order) that the interpreter performs, so the resulting CPU_reg[] precision
  * state is identical regardless of which backend drove it.
  * ------------------------------------------------------------------------- */
-
-/* Does this instruction have a PGXP CPU-mode tracker?  Pure opcode predicate. */
-int PGXP_CPU_Tracks(uint32_t instr)
-{
-   switch (op(instr))
-   {
-      case 0x00: /* SPECIAL */
-         switch (func(instr))
-         {
-            case 0x00: /* SLL  */ case 0x02: /* SRL  */ case 0x03: /* SRA  */
-            case 0x04: /* SLLV */ case 0x06: /* SRLV */ case 0x07: /* SRAV */
-            case 0x10: /* MFHI */ case 0x11: /* MTHI */
-            case 0x12: /* MFLO */ case 0x13: /* MTLO */
-            case 0x18: /* MULT */ case 0x19: /* MULTU */
-            case 0x1A: /* DIV  */ case 0x1B: /* DIVU */
-            case 0x20: /* ADD  */ case 0x21: /* ADDU */
-            case 0x22: /* SUB  */ case 0x23: /* SUBU */
-            case 0x24: /* AND  */ case 0x25: /* OR   */
-            case 0x26: /* XOR  */ case 0x27: /* NOR  */
-            case 0x2A: /* SLT  */ case 0x2B: /* SLTU */
-               return 1;
-            default:
-               return 0;
-         }
-      case 0x08: /* ADDI  */ case 0x09: /* ADDIU */
-      case 0x0A: /* SLTI  */ case 0x0B: /* SLTIU */
-      case 0x0C: /* ANDI  */ case 0x0D: /* ORI   */
-      case 0x0E: /* XORI  */ case 0x0F: /* LUI   */
-      case 0x20: /* LB    */ case 0x21: /* LH    */
-      case 0x22: /* LWL   */ case 0x23: /* LW    */
-      case 0x24: /* LBU   */ case 0x25: /* LHU   */
-      case 0x26: /* LWR   */
-      case 0x28: /* SB    */ case 0x29: /* SH    */
-      case 0x2A: /* SWL   */ case 0x2B: /* SW    */
-      case 0x2E: /* SWR   */
-         return 1;
-      default:
-         return 0;
-   }
-}
 
 /* Route one tracked instruction to its PGXP_CPU_* tracker.
  *   rdVal : result written to Rd (R-type) or Rt (I-type / loads)
