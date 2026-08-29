@@ -196,6 +196,13 @@ void PGXP_CPU_MemoryDispatch(uint32_t instr,
 			break;
 		case 0x08: /* ADDI */
 		case 0x09: /* ADDIU */
+			if (imm(instr) != 0)
+			{
+				PGXP_LineageTaggedAdd(instr, rsVal, rdVal);
+				break;
+			}
+			PGXP_CPU_PreserveIdentityMove(instr, rsVal, rdVal);
+			break;
 		case 0x0d: /* ORI */
 		case 0x0e: /* XORI */
 			if (imm(instr) == 0)

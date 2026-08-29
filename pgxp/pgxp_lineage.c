@@ -15,6 +15,8 @@
 #define PGXP_LINEAGE_STAGE_SHIFT     1
 #define PGXP_LINEAGE_STAGE_MASK      (UINT32_C(3) << PGXP_LINEAGE_STAGE_SHIFT)
 #define PGXP_LINEAGE_VALID_W         (UINT32_C(1) << 3)
+#define PGXP_LINEAGE_TAGGED          (UINT32_C(1) << 4)
+#define PGXP_LINEAGE_TAG_MASK        UINT32_C(0x1f)
 
 enum PGXP_lineage_stage
 {
@@ -54,6 +56,15 @@ static void lineage_set_stage(PGXP_lineage* lineage, unsigned stage)
 {
 	lineage->meta = (lineage->meta & ~PGXP_LINEAGE_STAGE_MASK) |
 		((uint32_t)stage << PGXP_LINEAGE_STAGE_SHIFT);
+}
+
+static uint32_t lineage_sra5(uint32_t value)
+{
+	uint32_t result = value >> 5;
+
+	if (value & UINT32_C(0x80000000))
+		result |= UINT32_C(0xf8000000);
+	return result;
 }
 
 static uint32_t lineage_memory_index(uint32_t addr)
@@ -202,9 +213,11 @@ void PGXP_LineageShift(uint32_t instr, uint32_t before,
 	if (!(prior.meta & PGXP_LINEAGE_VALID) || shift != 5)
 		return;
 
+	/* Keep only shifts that SRA 5 can reverse exactly. This proves that the
+	 * packing step did not discard any coordinate bits. */
 	if (!arithmetic &&
 	    lineage_stage(&prior) == PGXP_LINEAGE_STAGE_PROJECTED &&
-	    prior.value == before)
+	    prior.value == before && lineage_sra5(after) == before)
 	{
 		lineage_reg[dest] = prior;
 		lineage_reg[dest].value = after;
@@ -212,12 +225,41 @@ void PGXP_LineageShift(uint32_t instr, uint32_t before,
 	}
 	else if (arithmetic && dest == source &&
 	         lineage_stage(&prior) == PGXP_LINEAGE_STAGE_SHIFTED &&
-	         prior.value == before)
+	         prior.value == before && lineage_sra5(before) == after)
 	{
 		lineage_reg[dest] = prior;
 		lineage_reg[dest].value = after;
 		lineage_set_stage(&lineage_reg[dest], PGXP_LINEAGE_STAGE_RESTORED);
 	}
+}
+
+void PGXP_LineageTaggedAdd(uint32_t instr, uint32_t before,
+		uint32_t after)
+{
+	unsigned source = (instr >> 21) & 31;
+	unsigned dest = (instr >> 16) & 31;
+	PGXP_lineage prior;
+
+	if (dest == 0)
+		return;
+	prior = lineage_reg[source];
+	if (!(prior.meta & PGXP_LINEAGE_VALID) ||
+	    lineage_stage(&prior) != PGXP_LINEAGE_STAGE_SHIFTED)
+		return;
+
+	lineage_reg_touched |= UINT32_C(1) << dest;
+	memset(&lineage_reg[dest], 0, sizeof(lineage_reg[dest]));
+	if (prior.value != before)
+		return;
+	/* SLL 5 reserves bits 0..4. Changing only those bits cannot change the
+	 * packed coordinate restored by SRA 5. Reject carries, borrows, and all
+	 * other arithmetic rather than treating them as coordinate transport. */
+	if ((before ^ after) & ~PGXP_LINEAGE_TAG_MASK)
+		return;
+
+	lineage_reg[dest] = prior;
+	lineage_reg[dest].value = after;
+	lineage_reg[dest].meta |= PGXP_LINEAGE_TAGGED;
 }
 
 void PGXP_LineageIdentityMove(unsigned dest, unsigned source,
@@ -342,6 +384,9 @@ int PGXP_LineageRecoverVertex(unsigned slot, uint32_t value,
 		return 0;
 	lineage = &lineage_cb[slot];
 	stage = lineage_stage(lineage);
+	if ((lineage->meta & PGXP_LINEAGE_TAGGED) &&
+	    stage != PGXP_LINEAGE_STAGE_RESTORED)
+		return 0;
 	if (!(lineage->meta & PGXP_LINEAGE_VALID) ||
 	    (stage != PGXP_LINEAGE_STAGE_SHIFTED &&
 	     stage != PGXP_LINEAGE_STAGE_RESTORED) ||

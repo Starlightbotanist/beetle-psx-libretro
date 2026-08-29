@@ -22,6 +22,8 @@ void PGXP_LineageMFC2(uint32_t instr, uint32_t value,
 		const PGXP_value* precise);
 void PGXP_LineageShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic);
+void PGXP_LineageTaggedAdd(uint32_t instr, uint32_t before,
+		uint32_t after);
 void PGXP_LineageIdentityMove(unsigned dest, unsigned source,
 		uint32_t before, uint32_t after);
 void PGXP_LineageObserveRegisterWrite(unsigned dest);

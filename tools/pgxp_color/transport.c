@@ -628,6 +628,76 @@ static void test_exact_shift_lineage(void)
       fail("full overwrite kept lineage", 1, 0);
 }
 
+static int recover_tagged_lineage(uint32_t packed, uint32_t shifted,
+                                  uint32_t tagged, uint32_t restored,
+                                  int restore)
+{
+   const uint32_t addr = 0x80106020u;
+   uint32_t output = tagged;
+   uint32_t output_addr = addr;
+   unsigned output_reg = 9;
+   uint32_t instr;
+   float x = 0.f;
+   float y = 0.f;
+   float z = 0.f;
+   int valid_w = 0;
+
+   PGXP_LineageReset();
+   PGXP_pushSXYZ2f(143.25f, -92.5f, 32768.f, packed);
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   PGXP_CPU_MemoryDispatch(instr, shifted, 0, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   instr = INSTR_OP(0x08) | INSTR_RS(9) | INSTR_RT(9) |
+      ((tagged - shifted) & 0xffffu);
+   PGXP_CPU_MemoryDispatch(instr, tagged, shifted, 0);
+   PGXP_CPU_ObserveInstruction(instr);
+   if (restore)
+   {
+      PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(9), tagged, addr);
+      PGXP_CPU_LW(INSTR_OP(0x23) | INSTR_RT(10), tagged, addr);
+      PGXP_CPU_ObserveInstruction(INSTR_OP(0x23) | INSTR_RT(10));
+      instr = INSTR_RT(10) | INSTR_RD(10) | INSTR_SA(5) | 0x03u;
+      PGXP_CPU_MemoryDispatch(instr, restored, 0, tagged);
+      PGXP_CPU_ObserveInstruction(instr);
+      output = restored;
+      output_addr = addr + 4;
+      output_reg = 10;
+   }
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(output_reg),
+      output, output_addr);
+   PGXP_LineageFIFOWrite(0, output_addr, output);
+   PGXP_LineageCBWrite(0, 0);
+   return PGXP_LineageRecoverVertex(0, output,
+      &x, &y, &z, &valid_w) && x == 143.25f && y == -92.5f &&
+      z == 32768.f && valid_w;
+}
+
+static void test_tagged_shift_lineage(void)
+{
+   const uint32_t packed = pack_vertex(143, -92);
+   const uint32_t shifted = packed << 5;
+   const uint32_t tagged = shifted + 8;
+   const uint32_t restored = (uint32_t)((int32_t)tagged >> 5);
+   const uint32_t lossy_packed = pack_vertex(143, 2048);
+   const uint32_t lossy_shifted = lossy_packed << 5;
+   const uint32_t lossy_restored =
+      (uint32_t)((int32_t)lossy_shifted >> 5);
+
+   if (!recover_tagged_lineage(packed, shifted, tagged, restored, 1))
+      fail("guarded tag transport missed exact round trip", 0, 1);
+   if (recover_tagged_lineage(packed, shifted, tagged, restored, 0))
+      fail("tag transport accepted an unrestored value", 1, 0);
+   if (recover_tagged_lineage(packed, shifted, shifted + 32,
+       (uint32_t)((int32_t)(shifted + 32) >> 5), 1))
+      fail("tag transport accepted upper-bit change", 1, 0);
+   if (recover_tagged_lineage(lossy_packed, lossy_shifted,
+       lossy_shifted + 8, lossy_restored, 1))
+      fail("tag transport accepted lossy shift round trip", 1, 0);
+}
+
 static void store_shifted_lineage(uint32_t addr, uint32_t packed,
                                   uint32_t shifted)
 {
@@ -849,6 +919,9 @@ int main(void)
 
    printf("[T19] sub-word store lineage invalidation\n");
    test_subword_store_lineage_invalidation();
+
+   printf("[T20] guarded low-bit tagged shift lineage\n");
+   test_tagged_shift_lineage();
 
    if (failures)
    {
