@@ -124,6 +124,12 @@ struct lightrec_ops {
 	 * this NULL keeps the fast path. */
 	void (*pgxp_cpu)(struct lightrec_state *state, u32 instr,
 			 u32 rd, u32 rs, u32 rt, u32 hi, u32 lo, u32 addr);
+	/* LWL/LWR/SWL/SWR are assembled around an aligned word access. The
+	 * completed value and original effective address are only both available
+	 * in lightrec_rw(), so hosts which track memory sidecars consume them
+	 * through this hook rather than the aligned map callback. */
+	void (*pgxp_unaligned)(struct lightrec_state *state, u32 instr,
+			       u32 value, u32 addr);
 };
 
 struct lightrec_registers {

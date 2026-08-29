@@ -301,6 +301,7 @@ u32 lightrec_rw(struct lightrec_state *state, union code op, u32 base,
 	bool was_tagged = true;
 	u16 old_flags;
 	u32 addr;
+	u32 ret;
 	void *host;
 
 	addr = kunseg(base + (s16) op.i.imm);
@@ -384,9 +385,13 @@ u32 lightrec_rw(struct lightrec_state *state, union code op, u32 base,
 		return 0;
 	case OP_SWL:
 		lightrec_swl(state, ops, opcode, host, addr, data);
+		if (state->ops.pgxp_unaligned)
+			state->ops.pgxp_unaligned(state, opcode, data, addr);
 		return 0;
 	case OP_SWR:
 		lightrec_swr(state, ops, opcode, host, addr, data);
+		if (state->ops.pgxp_unaligned)
+			state->ops.pgxp_unaligned(state, opcode, data, addr);
 		return 0;
 	case OP_SW:
 		ops->sw(state, opcode, host, addr, data);
@@ -406,9 +411,15 @@ u32 lightrec_rw(struct lightrec_state *state, union code op, u32 base,
 		lightrec_lwc2(state, op, ops, host, addr);
 		return 0;
 	case OP_LWL:
-		return lightrec_lwl(state, ops, opcode, host, addr, data);
+		ret = lightrec_lwl(state, ops, opcode, host, addr, data);
+		if (state->ops.pgxp_unaligned)
+			state->ops.pgxp_unaligned(state, opcode, ret, addr);
+		return ret;
 	case OP_LWR:
-		return lightrec_lwr(state, ops, opcode, host, addr, data);
+		ret = lightrec_lwr(state, ops, opcode, host, addr, data);
+		if (state->ops.pgxp_unaligned)
+			state->ops.pgxp_unaligned(state, opcode, ret, addr);
+		return ret;
 	case OP_META_LWU:
 		return ops->lwu(state, opcode, host, addr);
 	case OP_META_SWU:

@@ -3427,8 +3427,9 @@ static _Bool pgxp_cpu_tracked_memory(union code c)
 	switch (c.i.op) {
 	case OP_LB:  case OP_LBU: case OP_LH:  case OP_LHU:
 	case OP_LWL: case OP_LWR: case OP_LW:
+	case OP_LWC2:
 	case OP_SB:  case OP_SH:  case OP_SWL: case OP_SW:
-	case OP_SWR:
+	case OP_SWR: case OP_SWC2:
 		return true;
 	default:
 		return false;

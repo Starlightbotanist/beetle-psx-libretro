@@ -3103,6 +3103,36 @@ static void pgxp_cpu_track(struct lightrec_state *state, uint32_t instr,
 	PGXP_CPU_ObserveInstruction(instr);
 }
 
+/* Lightrec implements unaligned transfers by reading an aligned word and
+ * merging it in lightrec_rw(). Track the completed architectural operation
+ * there, with the runtime effective address, rather than attempting to
+ * reconstruct either value in the aligned map callback. */
+static void pgxp_unaligned_track(struct lightrec_state *state, uint32_t instr,
+                                 uint32_t value, uint32_t addr)
+{
+	(void)state;
+
+	switch (instr >> 26)
+	{
+		case OP_LWL:
+			PGXP_CPU_LWL(instr, value, addr);
+			PGXP_CPU_ObserveInstruction(instr);
+			break;
+		case OP_LWR:
+			PGXP_CPU_LWR(instr, value, addr);
+			PGXP_CPU_ObserveInstruction(instr);
+			break;
+		case OP_SWL:
+			PGXP_CPU_SWL(instr, value, addr);
+			break;
+		case OP_SWR:
+			PGXP_CPU_SWR(instr, value, addr);
+			break;
+		default:
+			break;
+	}
+}
+
 static bool cp2_ops[0x40] = {0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,0,
                              1,1,1,1,1,0,1,0,0,0,0,1,1,0,1,0,
                              1,0,0,0,0,0,0,0,1,1,1,0,0,1,1,0,
@@ -3223,14 +3253,8 @@ static void pgxp_nonhw_write_word(struct lightrec_state *state,
 	*(uint32_t *)host = HTOLE32(val);
 
 	switch (opcode >> 26){
-		case 0x2A:
-			PGXP_CPU_SWL(opcode, val, mem + (opcode & 0x3));
-			break;
 		case 0x2B:
 			PGXP_CPU_SW(opcode, val, mem);
-			break;
-		case 0x2E:
-			PGXP_CPU_SWR(opcode, val, mem + (opcode & 0x3));
 			break;
 		case 0x3A:
 			PGXP_GTE_SWC2(opcode, val, mem);
@@ -3267,14 +3291,8 @@ static void pgxp_hw_write_word(struct lightrec_state *state,
 	PSX_MemWrite32(timestamp, mem, val);
 
 	switch (opcode >> 26){
-		case OP_SWL:
-			PGXP_CPU_SWL(opcode, val, mem + (opcode & 0x3));
-			break;
 		case OP_SW:
 			PGXP_CPU_SW(opcode, val, mem);
-			break;
-		case OP_SWR:
-			PGXP_CPU_SWR(opcode, val, mem + (opcode & 0x3));
 			break;
 		case OP_SWC2:
 			PGXP_GTE_SWC2(opcode, val, mem);
@@ -3407,16 +3425,8 @@ static uint32_t pgxp_nonhw_read_word(struct lightrec_state *state,
 	uint32_t val = LE32TOH(*(uint32_t *)host);
 
 	switch (opcode >> 26){
-		case OP_LWL:
-			//TODO: OR with masked register
-			PGXP_CPU_LWL(opcode, val << (24-(opcode & 0x3)*8), mem + (opcode & 0x3));
-			break;
 		case OP_LW:
 			PGXP_CPU_LW(opcode, val, mem);
-			break;
-		case OP_LWR:
-			//TODO: OR with masked register
-			PGXP_CPU_LWR(opcode, val >> ((opcode & 0x3)*8), mem + (opcode & 0x3));
 			break;
 		case OP_LWC2:
 			PGXP_GTE_LWC2(opcode, val, mem);
@@ -3424,7 +3434,8 @@ static uint32_t pgxp_nonhw_read_word(struct lightrec_state *state,
 		default:
 			break;
 	}
-	PGXP_CPU_ObserveInstruction(opcode);
+	if ((opcode >> 26) != OP_LWL && (opcode >> 26) != OP_LWR)
+		PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3448,16 +3459,8 @@ static uint32_t pgxp_hw_read_word(struct lightrec_state *state,
 
 	switch (opcode >> 26)
 	{
-		case OP_LWL:
-			//TODO: OR with masked register
-			PGXP_CPU_LWL(opcode, val << (24-(opcode & 0x3)*8), mem + (opcode & 0x3));
-			break;
 		case OP_LW:
 			PGXP_CPU_LW(opcode, val, mem);
-			break;
-		case OP_LWR:
-			//TODO: OR with masked register
-			PGXP_CPU_LWR(opcode, val >> ((opcode & 0x3)*8), mem + (opcode & 0x3));
 			break;
 		case OP_LWC2:
 			PGXP_GTE_LWC2(opcode, val, mem);
@@ -3465,7 +3468,8 @@ static uint32_t pgxp_hw_read_word(struct lightrec_state *state,
 		default:
 			break;
 	}
-	PGXP_CPU_ObserveInstruction(opcode);
+	if ((opcode >> 26) != OP_LWL && (opcode >> 26) != OP_LWR)
+		PGXP_CPU_ObserveInstruction(opcode);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3508,9 +3512,21 @@ static struct lightrec_mem_map_ops hw_regs_ops = {
 static uint32_t cache_ctrl_read_word(struct lightrec_state *state,
 		uint32_t opcode, void *host, uint32_t mem)
 {
-	if (PGXP_GetModes() & PGXP_MODE_MEMORY) {
-		PGXP_CPU_LW(opcode, BIU, mem);
-		PGXP_CPU_ObserveInstruction(opcode);
+	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+	{
+		switch (opcode >> 26)
+		{
+			case OP_LW:
+				PGXP_CPU_LW(opcode, BIU, mem);
+				PGXP_CPU_ObserveInstruction(opcode);
+				break;
+			case OP_LWC2:
+				PGXP_GTE_LWC2(opcode, BIU, mem);
+				PGXP_CPU_ObserveInstruction(opcode);
+				break;
+			default:
+				break;
+		}
 	}
 
 	return BIU;
@@ -3522,7 +3538,19 @@ static void cache_ctrl_write_word(struct lightrec_state *state,
 	BIU = val;
 
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_SW(opcode, BIU, mem);
+	{
+		switch (opcode >> 26)
+		{
+			case OP_SW:
+				PGXP_CPU_SW(opcode, BIU, mem);
+				break;
+			case OP_SWC2:
+				PGXP_GTE_SWC2(opcode, BIU, mem);
+				break;
+			default:
+				break;
+		}
+	}
 }
 
 static struct lightrec_mem_map_ops cache_ctrl_ops = {
@@ -3623,6 +3651,7 @@ static struct lightrec_ops pgxp_ops = {
 	.cop2_op = cop2_op,
 	.enable_ram = enable_ram,
 	.pgxp_cpu = pgxp_cpu_track,
+	.pgxp_unaligned = pgxp_unaligned_track,
 };
 
 static int lightrec_plugin_init(PS_CPU *self)
