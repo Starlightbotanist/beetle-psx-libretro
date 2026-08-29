@@ -2417,6 +2417,14 @@ int lightrec_optimize(struct lightrec_state *state, struct block *block)
 
 	for (i = 0; i < ARRAY_SIZE(lightrec_optimizers); i++) {
 		if (lightrec_optimizers[i]) {
+			/* PGXP CPU tracking consumes the architectural instruction
+			 * stream. The generic transform pass can replace register
+			 * operations with Lightrec-only META operations or remove one
+			 * half of a combined sequence. */
+			if (state->ops.pgxp_cpu &&
+			    lightrec_optimizers[i] == lightrec_transform_ops)
+				continue;
+
 			ret = (*lightrec_optimizers[i])(state, block);
 			if (ret)
 				return ret;

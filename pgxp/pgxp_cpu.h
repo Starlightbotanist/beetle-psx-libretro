@@ -44,6 +44,8 @@ void PGXP_CPU_TrackProjectionWrite(unsigned dest);
 void PGXP_CPU_ObserveInstruction(uint32_t instr);
 int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
 		uint32_t after);
+void PGXP_CPU_MemoryDispatch(uint32_t instr,
+		uint32_t rdVal, uint32_t rsVal, uint32_t rtVal);
 void PGXP_CPU_TrackLineageShift(uint32_t instr, uint32_t before,
 		uint32_t after, int arithmetic);
 

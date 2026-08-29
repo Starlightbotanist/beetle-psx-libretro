@@ -142,6 +142,54 @@ int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
 	return 1;
 }
 
+/* Memory-only mode does not mirror general CPU arithmetic. It still needs
+ * the small set of operations which transport an exact projected value
+ * without changing it, plus the exact packing shifts used by command lists.
+ * Keep this dispatch shared by CPU backends so their register sidecars follow
+ * the same architectural instruction stream. */
+void PGXP_CPU_MemoryDispatch(uint32_t instr,
+		uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
+{
+	switch (op(instr))
+	{
+		case 0x00:
+			switch (func(instr))
+			{
+				case 0x00: /* SLL */
+					if (rd(instr) != 0)
+						PGXP_CPU_TrackLineageShift(instr, rtVal,
+							rdVal, 0);
+					break;
+				case 0x03: /* SRA */
+					if (rd(instr) != 0)
+						PGXP_CPU_TrackLineageShift(instr, rtVal,
+							rdVal, 1);
+					break;
+				case 0x20: /* ADD */
+				case 0x21: /* ADDU */
+				case 0x25: /* OR */
+				case 0x26: /* XOR */
+					if (rs(instr) == 0 || rt(instr) == 0)
+						PGXP_CPU_PreserveIdentityMove(instr,
+							rs(instr) == 0 ? rtVal : rsVal,
+							rdVal);
+					break;
+				default:
+					break;
+			}
+			break;
+		case 0x08: /* ADDI */
+		case 0x09: /* ADDIU */
+		case 0x0d: /* ORI */
+		case 0x0e: /* XORI */
+			if (imm(instr) == 0)
+				PGXP_CPU_PreserveIdentityMove(instr, rsVal, rdVal);
+			break;
+		default:
+			break;
+	}
+}
+
 /* invalidate register (invalid 8 bit read) */
 void InvalidLoad(uint32_t addr, uint32_t code, uint32_t value)
 {

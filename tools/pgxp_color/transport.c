@@ -440,6 +440,32 @@ static void test_projection_identity_moves(void)
       fail("identity accepted mismatched source", 1, 0);
 }
 
+static void test_memory_mode_dispatch(void)
+{
+   const uint32_t packed = pack_vertex(211, -63);
+   uint32_t instr;
+
+   PGXP_pushSXYZ2f(211.25f, -63.5f, 32768.f, packed);
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+
+   instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(9) | 0x21u;
+   PGXP_CPU_MemoryDispatch(instr, packed, packed, 0);
+   PGXP_CPU_ObserveInstruction(instr);
+   if ((CPU_reg[9].flags & (VALID_01 | VALID_PROJECTION)) !=
+       (VALID_01 | VALID_PROJECTION) ||
+      CPU_reg[9].x != 211.25f || CPU_reg[9].y != -63.5f)
+      fail("memory dispatch lost identity projection", 0, 1);
+
+   CPU_reg[10] = CPU_reg[9];
+   instr = INSTR_RS(9) | INSTR_RT(10) | INSTR_OP(0x0c) | 0xffffu;
+   PGXP_CPU_MemoryDispatch(instr, packed, packed, 0);
+   PGXP_CPU_ObserveInstruction(instr);
+   if (CPU_reg[10].flags & VALID_PROJECTION)
+      fail("memory dispatch kept changed projection", 1, 0);
+}
+
 static void test_projection_write_observer(void)
 {
    CPU_reg[31] = CPU_reg[9];
@@ -497,17 +523,17 @@ static void test_exact_shift_lineage(void)
       fail("unshifted lineage reached vertex", 1, 0);
 
    instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(7) | 0x21u;
-   PGXP_CPU_PreserveIdentityMove(instr, packed, packed);
+   PGXP_CPU_MemoryDispatch(instr, packed, packed, 0);
    PGXP_CPU_ObserveInstruction(instr);
 
    instr = INSTR_RT(7) | INSTR_RD(9) | INSTR_SA(5);
-   PGXP_CPU_TrackLineageShift(instr, packed, shifted, 0);
+   PGXP_CPU_MemoryDispatch(instr, shifted, 0, packed);
    PGXP_CPU_ObserveInstruction(instr);
    if ((CPU_reg[9].flags & VALID_01) == VALID_01)
       fail("shift lineage changed CPU shadow", 1, 0);
 
    instr = INSTR_RS(9) | INSTR_RT(0) | INSTR_RD(11) | 0x21u;
-   PGXP_CPU_PreserveIdentityMove(instr, shifted, shifted);
+   PGXP_CPU_MemoryDispatch(instr, shifted, shifted, 0);
    PGXP_CPU_ObserveInstruction(instr);
    if ((CPU_reg[11].flags & VALID_01) == VALID_01)
       fail("shift identity changed CPU shadow", 1, 0);
@@ -521,11 +547,11 @@ static void test_exact_shift_lineage(void)
    PGXP_CPU_LW(INSTR_OP(0x23) | INSTR_RT(10), shifted, shifted_addr);
    PGXP_CPU_ObserveInstruction(INSTR_OP(0x23) | INSTR_RT(10));
    instr = INSTR_RT(10) | INSTR_RD(10) | INSTR_SA(5) | 0x03u;
-   PGXP_CPU_TrackLineageShift(instr, shifted, restored, 1);
+   PGXP_CPU_MemoryDispatch(instr, restored, 0, shifted);
    PGXP_CPU_ObserveInstruction(instr);
 
    instr = INSTR_RS(10) | INSTR_RT(0) | INSTR_RD(12) | 0x21u;
-   PGXP_CPU_PreserveIdentityMove(instr, restored, restored);
+   PGXP_CPU_MemoryDispatch(instr, restored, restored, 0);
    PGXP_CPU_ObserveInstruction(instr);
    PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(12), restored, restored_addr);
    PGXP_LineageFIFOWrite(1, restored_addr, restored);
@@ -597,10 +623,13 @@ int main(void)
    printf("[T11] projected-depth identity moves\n");
    test_projection_identity_moves();
 
-   printf("[T12] projected-depth write observation\n");
+   printf("[T12] memory-mode CPU dispatch\n");
+   test_memory_mode_dispatch();
+
+   printf("[T13] projected-depth write observation\n");
    test_projection_write_observer();
 
-   printf("[T13] exact projected-coordinate shift lineage\n");
+   printf("[T14] exact projected-coordinate shift lineage\n");
    test_exact_shift_lineage();
 
    if (failures)

@@ -29,11 +29,84 @@ struct interpreter {
 	struct lightrec_state *state;
 	struct block *block;
 	struct opcode *op;
+	u32 pgxp_rs;
+	u32 pgxp_rt;
 	u32 cycles;
 	bool delay_slot;
 	bool load_delay;
 	u16 offset;
 };
+
+/* CPU-mode memory operations already pass through the host's PGXP-aware
+ * memory callbacks. This predicate covers only register arithmetic that must
+ * be mirrored explicitly by Lightrec's interpreter. */
+static bool pgxp_cpu_tracked(union code c)
+{
+	switch (c.i.op) {
+	case OP_SPECIAL:
+		switch (c.r.op) {
+		case OP_SPECIAL_SLL:  case OP_SPECIAL_SRL:  case OP_SPECIAL_SRA:
+		case OP_SPECIAL_SLLV: case OP_SPECIAL_SRLV: case OP_SPECIAL_SRAV:
+		case OP_SPECIAL_MFHI: case OP_SPECIAL_MTHI:
+		case OP_SPECIAL_MFLO: case OP_SPECIAL_MTLO:
+		case OP_SPECIAL_MULT: case OP_SPECIAL_MULTU:
+		case OP_SPECIAL_DIV:  case OP_SPECIAL_DIVU:
+		case OP_SPECIAL_ADD:  case OP_SPECIAL_ADDU:
+		case OP_SPECIAL_SUB:  case OP_SPECIAL_SUBU:
+		case OP_SPECIAL_AND:  case OP_SPECIAL_OR:
+		case OP_SPECIAL_XOR:  case OP_SPECIAL_NOR:
+		case OP_SPECIAL_SLT:  case OP_SPECIAL_SLTU:
+			return true;
+		default:
+			return false;
+		}
+	case OP_ADDI: case OP_ADDIU:
+	case OP_SLTI: case OP_SLTIU:
+	case OP_ANDI: case OP_ORI:
+	case OP_XORI: case OP_LUI:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool pgxp_cpu_observed(union code c)
+{
+	return c.i.op == OP_CP0 &&
+	       (c.r.rs == OP_CP0_MFC0 || c.r.rs == OP_CP0_CFC0);
+}
+
+static void pgxp_cpu_observe_link(struct interpreter *inter)
+{
+	struct lightrec_state *state = inter->state;
+
+	if (state->ops.pgxp_cpu)
+		(*state->ops.pgxp_cpu)(state, inter->op->c.opcode,
+				       0, 0, 0, 0, 0, 0);
+}
+
+static void pgxp_cpu_track(struct interpreter *inter)
+{
+	struct lightrec_state *state = inter->state;
+	union code c = inter->op->c;
+	u32 result;
+
+	if (!state->ops.pgxp_cpu)
+		return;
+
+	if (pgxp_cpu_tracked(c))
+		result = c.i.op == OP_SPECIAL ? state->regs.gpr[c.r.rd]
+						    : state->regs.gpr[c.i.rt];
+	else if (pgxp_cpu_observed(c))
+		result = 0;
+	else
+		return;
+
+	(*state->ops.pgxp_cpu)(state, c.opcode, result,
+			       inter->pgxp_rs, inter->pgxp_rt,
+			       state->regs.gpr[REG_HI],
+			       state->regs.gpr[REG_LO], 0);
+}
 
 static u32 int_get_branch_pc(const struct interpreter *inter)
 {
@@ -52,6 +125,13 @@ static inline struct opcode *next_op(const struct interpreter *inter)
 
 static inline u32 execute(lightrec_int_func_t func, struct interpreter *inter)
 {
+	union code c = inter->op->c;
+	u32 *regs = inter->state->regs.gpr;
+
+	/* Capture sources before execution because a destination may alias one
+	 * of them. */
+	inter->pgxp_rs = regs[c.r.rs];
+	inter->pgxp_rt = regs[c.r.rt];
 	return (*func)(inter);
 }
 
@@ -75,6 +155,7 @@ static inline u32 jump_skip(struct interpreter *inter)
 
 static inline u32 jump_next(struct interpreter *inter)
 {
+	pgxp_cpu_track(inter);
 	inter->cycles += lightrec_cycles_of_opcode(inter->state, inter->op->c);
 
 	if (unlikely(inter->delay_slot))
@@ -354,8 +435,10 @@ static u32 int_jump(struct interpreter *inter, bool link)
 	u32 old_pc = int_get_branch_pc(inter);
 	u32 pc = (old_pc & 0xf0000000) | (inter->op->j.imm << 2);
 
-	if (link)
+	if (link) {
 		state->regs.gpr[31] = old_pc + 8;
+		pgxp_cpu_observe_link(inter);
+	}
 
 	if (op_flag_no_ds(inter->op->flags))
 		return pc;
@@ -379,8 +462,10 @@ static u32 int_jumpr(struct interpreter *inter, u8 link_reg)
 	u32 old_pc = int_get_branch_pc(inter);
 	u32 next_pc = state->regs.gpr[inter->op->r.rs];
 
-	if (link_reg)
+	if (link_reg) {
 		state->regs.gpr[link_reg] = old_pc + 8;
+		pgxp_cpu_observe_link(inter);
+	}
 
 	if (op_flag_no_ds(inter->op->flags))
 		return next_pc;
@@ -463,8 +548,10 @@ static u32 int_bgez(struct interpreter *inter, bool link, bool lt, bool regimm)
 	u32 old_pc = int_get_branch_pc(inter);
 	s32 rs;
 
-	if (link)
+	if (link) {
 		inter->state->regs.gpr[31] = old_pc + 8;
+		pgxp_cpu_observe_link(inter);
+	}
 
 	rs = (s32)inter->state->regs.gpr[inter->op->i.rs];
 

@@ -1122,10 +1122,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADD(instr, result, GPR[rs], GPR[rt]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) &&
-	         (rs == 0 || rt == 0))
-		PGXP_CPU_PreserveIdentityMove(instr,
-			rs == 0 ? GPR[rt] : GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], GPR[rt]);
 
 	DO_LDS();
 
@@ -1154,8 +1152,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADDI(instr, result, GPR[rs]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && immediate == 0)
-		PGXP_CPU_PreserveIdentityMove(instr, GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], 0);
 
 	DO_LDS();
 
@@ -1183,8 +1181,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADDIU(instr, result, GPR[rs]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && immediate == 0)
-		PGXP_CPU_PreserveIdentityMove(instr, GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], 0);
 
 	DO_LDS();
 
@@ -1208,10 +1206,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADDU(instr, result, GPR[rs], GPR[rt]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) &&
-	         (rs == 0 || rt == 0))
-		PGXP_CPU_PreserveIdentityMove(instr,
-			rs == 0 ? GPR[rt] : GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], GPR[rt]);
 
 	DO_LDS();
 
@@ -2084,10 +2080,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_OR(instr, result, GPR[rs], GPR[rt]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) &&
-	         (rs == 0 || rt == 0))
-		PGXP_CPU_PreserveIdentityMove(instr,
-			rs == 0 ? GPR[rt] : GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], GPR[rt]);
 
 	DO_LDS();
 
@@ -2111,8 +2105,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ORI(instr, result, GPR[rs]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && immediate == 0)
-		PGXP_CPU_PreserveIdentityMove(instr, GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], 0);
 
 	DO_LDS();
 
@@ -2136,8 +2130,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLL(instr, result, GPR[rt]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && rd != 0)
-		PGXP_CPU_TrackLineageShift(instr, GPR[rt], result, 0);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, 0, GPR[rt]);
 
 	DO_LDS();
 
@@ -2278,8 +2272,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SRA(instr, result, GPR[rt]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && rd != 0)
-		PGXP_CPU_TrackLineageShift(instr, GPR[rt], result, 1);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, 0, GPR[rt]);
 
 	DO_LDS();
 
@@ -2438,10 +2432,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_XOR(instr, result, GPR[rs], GPR[rt]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) &&
-	         (rs == 0 || rt == 0))
-		PGXP_CPU_PreserveIdentityMove(instr,
-			rs == 0 ? GPR[rt] : GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], GPR[rt]);
 
 	DO_LDS();
 
@@ -2464,8 +2456,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_XORI(instr, result, GPR[rs]);
-	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && immediate == 0)
-		PGXP_CPU_PreserveIdentityMove(instr, GPR[rs], result);
+	else if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, result, GPR[rs], 0);
 
 	DO_LDS();
 
@@ -3079,20 +3071,25 @@ static void pgxp_cop2_notify(struct lightrec_state *state, uint32_t op, uint32_t
 			case 0x04: PGXP_GTE_MTC2(op, data, data); break;
 			case 0x06: PGXP_GTE_CTC2(op, data, data); break;
 		}
+		PGXP_CPU_ObserveInstruction(op);
 	}
 }
 
-/* PGXP CPU-mode tracking hook for the lightrec recompiler.  Installed in
- * pgxp_ops.pgxp_cpu only while PGXP_MODE_CPU is active.  The recompiler calls
- * this after each tracked op with the post-execution register values; route
- * them to the unified PGXP_CPU dispatcher, which keeps CPU_reg[] precision
- * metadata up to date just as the interpreter's per-instruction hooks do. */
+/* PGXP register-tracking hook for Lightrec. CPU mode mirrors all supported
+ * arithmetic, while memory-only mode mirrors only exact value transport.
+ * Both paths retire destination provenance after the instruction. */
 static void pgxp_cpu_track(struct lightrec_state *state, uint32_t instr,
                            uint32_t rd, uint32_t rs, uint32_t rt,
                            uint32_t hi, uint32_t lo, uint32_t addr)
 {
+	uint32_t modes = PGXP_GetModes();
+
 	(void)state;
-	PGXP_CPU_Dispatch(instr, rd, rs, rt, hi, lo, addr);
+	if ((modes & PGXP_MODE_CPU) && PGXP_CPU_Tracks(instr))
+		PGXP_CPU_Dispatch(instr, rd, rs, rt, hi, lo, addr);
+	else if (modes & PGXP_MODE_MEMORY)
+		PGXP_CPU_MemoryDispatch(instr, rd, rs, rt);
+	PGXP_CPU_ObserveInstruction(instr);
 }
 
 static bool cp2_ops[0x40] = {0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,0,
@@ -3302,6 +3299,7 @@ static uint8_t pgxp_nonhw_read_byte(struct lightrec_state *state,
 		PGXP_CPU_LB(opcode, val, mem);
 	else
 		PGXP_CPU_LBU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3316,6 +3314,7 @@ static uint8_t pgxp_hw_read_byte(struct lightrec_state *state,
 		PGXP_CPU_LB(opcode, val, mem);
 	else
 		PGXP_CPU_LBU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3350,6 +3349,7 @@ static uint16_t pgxp_nonhw_read_half(struct lightrec_state *state,
 		PGXP_CPU_LH(opcode, val, mem);
 	else
 		PGXP_CPU_LHU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3364,6 +3364,7 @@ static uint16_t pgxp_hw_read_half(struct lightrec_state *state,
 		PGXP_CPU_LH(opcode, val, mem);
 	else
 		PGXP_CPU_LHU(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3412,6 +3413,7 @@ static uint32_t pgxp_nonhw_read_word(struct lightrec_state *state,
 		default:
 			break;
 	}
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3422,6 +3424,7 @@ static uint32_t pgxp_nonhw_read_word_unsigned(struct lightrec_state *state,
 	uint32_t val = LE32TOH(*(uint32_t *)host);
 
 	PGXP_CPU_LW(opcode, val, mem);
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	return val;
 }
@@ -3451,6 +3454,7 @@ static uint32_t pgxp_hw_read_word(struct lightrec_state *state,
 		default:
 			break;
 	}
+	PGXP_CPU_ObserveInstruction(opcode);
 
 	/* Calling PSX_MemRead* might update timestamp - Make sure
 	 * here that state->current_cycle stays in sync. */
@@ -3493,8 +3497,10 @@ static struct lightrec_mem_map_ops hw_regs_ops = {
 static uint32_t cache_ctrl_read_word(struct lightrec_state *state,
 		uint32_t opcode, void *host, uint32_t mem)
 {
-	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+	if (PGXP_GetModes() & PGXP_MODE_MEMORY) {
 		PGXP_CPU_LW(opcode, BIU, mem);
+		PGXP_CPU_ObserveInstruction(opcode);
+	}
 
 	return BIU;
 }
@@ -3663,12 +3669,10 @@ static int lightrec_plugin_init(PS_CPU *self)
       lightrec_map[PSX_MAP_BIOS].ops            = &pgxp_nonhw_regs_ops;
       lightrec_map[PSX_MAP_SCRATCH_PAD].ops     = &pgxp_nonhw_regs_ops;
 
-      /* Drive PGXP CPU-mode tracking from recompiled code only when CPU
-       * mode is actually selected.  pgxp_ops is static and reused across
-       * re-inits, so clear the hook when CPU mode is off to keep the fast
-       * path after a mode change. */
-      pgxp_ops.pgxp_cpu = (PGXP_GetModes() & PGXP_MODE_CPU)
-                          ? pgxp_cpu_track : NULL;
+      /* Lightrec must mirror the same minimal register transport used by the
+       * Beetle interpreter in memory-only mode. pgxp_ops is static and reused
+       * across re-inits, so always set the hook for the active PGXP map. */
+      pgxp_ops.pgxp_cpu = pgxp_cpu_track;
 
       cop_ops = &pgxp_ops;
    }
