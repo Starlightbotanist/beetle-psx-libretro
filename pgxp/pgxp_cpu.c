@@ -97,8 +97,18 @@ void PGXP_CPU_ObserveInstruction(uint32_t instr)
 	unsigned dest;
 	uint32_t bit;
 
-	if (!PGXP_CPU_WrittenRegister(instr, &dest) || dest == 0)
+	if (!PGXP_CPU_WrittenRegister(instr, &dest))
 		return;
+	if (dest == 0)
+	{
+		/* The CPU discards writes to r0.  Some PGXP arithmetic handlers
+		 * calculate into their decoded destination before this common
+		 * end-of-instruction hook runs, so restore the architectural zero
+		 * value before a later instruction can consume the shadow. */
+		CPU_reg[0] = PGXP_value_zero;
+		projection_writes &= ~UINT32_C(1);
+		return;
+	}
 	bit = UINT32_C(1) << dest;
 	if (!(projection_writes & bit))
 		CPU_reg[dest].flags &= ~VALID_PROJECTION;

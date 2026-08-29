@@ -758,6 +758,34 @@ static void test_lineage_allocation_lifetime(void)
       fail("reallocated lineage unavailable", 0, 1);
 }
 
+static void test_zero_register_writes(void)
+{
+   const uint32_t addu = INSTR_RS(8) | INSTR_RT(9) |
+      INSTR_RD(0) | 0x21u;
+   const uint32_t addiu = INSTR_OP(0x09) | INSTR_RS(8) | INSTR_RT(0) | 1u;
+
+   CPU_reg[0] = PGXP_value_zero;
+   CPU_reg[8] = PGXP_value_zero;
+   CPU_reg[9] = PGXP_value_zero;
+   CPU_reg[8].x = 1.25f;
+   CPU_reg[8].value = 1;
+   CPU_reg[9].x = 2.5f;
+   CPU_reg[9].value = 2;
+
+   /* Beetle's interpreter calls the tracker directly, then the common
+    * observer at the end of the instruction. */
+   PGXP_CPU_ADDU(addu, 3, 1, 2);
+   PGXP_CPU_ObserveInstruction(addu);
+   if (memcmp(&CPU_reg[0], &PGXP_value_zero, sizeof(CPU_reg[0])) != 0)
+      fail("direct r0 write changed shadow", CPU_reg[0].value, 0);
+
+   /* Both Lightrec engines enter through the shared dispatcher. */
+   PGXP_CPU_Dispatch(addiu, 2, 1, 0, 0, 0, 0);
+   PGXP_CPU_ObserveInstruction(addiu);
+   if (memcmp(&CPU_reg[0], &PGXP_value_zero, sizeof(CPU_reg[0])) != 0)
+      fail("dispatched r0 write changed shadow", CPU_reg[0].value, 0);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -815,6 +843,9 @@ int main(void)
 
    printf("[T17] lineage allocation lifetime\n");
    test_lineage_allocation_lifetime();
+
+   printf("[T18] architectural zero-register writes\n");
+   test_zero_register_writes();
 
    printf("[T19] sub-word store lineage invalidation\n");
    test_subword_store_lineage_invalidation();
