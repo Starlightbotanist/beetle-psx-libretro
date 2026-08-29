@@ -104,6 +104,41 @@ void PGXP_CPU_ObserveInstruction(uint32_t instr)
 	projection_writes &= ~bit;
 }
 
+int PGXP_CPU_PreserveIdentityMove(uint32_t instr, uint32_t before,
+		uint32_t after)
+{
+	unsigned source;
+	unsigned dest;
+
+	if (op(instr) == 0)
+	{
+		if (rs(instr) == 0 && rt(instr) != 0)
+			source = rt(instr);
+		else if (rt(instr) == 0 && rs(instr) != 0)
+			source = rs(instr);
+		else
+			return 0;
+		dest = rd(instr);
+	}
+	else
+	{
+		source = rs(instr);
+		dest = rt(instr);
+	}
+
+	if (dest == 0 || source == 0 || before != after)
+		return 0;
+	Validate(&CPU_reg[source], before);
+	if ((CPU_reg[source].flags & (VALID_01 | VALID_PROJECTION)) !=
+	    (VALID_01 | VALID_PROJECTION))
+		return 0;
+
+	CPU_reg[dest] = CPU_reg[source];
+	CPU_reg[dest].value = after;
+	PGXP_CPU_TrackProjectionWrite(dest);
+	return 1;
+}
+
 /* invalidate register (invalid 8 bit read) */
 void InvalidLoad(uint32_t addr, uint32_t code, uint32_t value)
 {
@@ -163,6 +198,10 @@ void PGXP_CPU_ADDI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	psx_value tempImm;
 	PGXP_value ret;
 	float of;
+
+	if (imm(instr) == 0 &&
+	    PGXP_CPU_PreserveIdentityMove(instr, rsVal, rtVal))
+		return;
 
 	Validate(&CPU_reg[rs(instr)], rsVal);
 	ret = CPU_reg[rs(instr)];
@@ -230,6 +269,10 @@ void PGXP_CPU_ORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	psx_value vRt;
 	PGXP_value ret;
 
+	if (imm(instr) == 0 &&
+	    PGXP_CPU_PreserveIdentityMove(instr, rsVal, rtVal))
+		return;
+
 	Validate(&CPU_reg[rs(instr)], rsVal);
 	ret = CPU_reg[rs(instr)];
 
@@ -255,6 +298,10 @@ void PGXP_CPU_XORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	/* Rt = Rs ^ Imm */
 	psx_value vRt;
 	PGXP_value ret;
+
+	if (imm(instr) == 0 &&
+	    PGXP_CPU_PreserveIdentityMove(instr, rsVal, rtVal))
+		return;
 
 	Validate(&CPU_reg[rs(instr)], rsVal);
 	ret = CPU_reg[rs(instr)];
@@ -334,6 +381,11 @@ void PGXP_CPU_ADD(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 	/* Rd = Rs + Rt (signed) */
 	PGXP_value ret;
 	float of;
+
+	if ((rs(instr) == 0 || rt(instr) == 0) &&
+	    PGXP_CPU_PreserveIdentityMove(instr,
+		    rs(instr) == 0 ? rtVal : rsVal, rdVal))
+		return;
 
 	Validate(&CPU_reg[rs(instr)], rsVal);
 	Validate(&CPU_reg[rt(instr)], rtVal);
@@ -516,12 +568,20 @@ void PGXP_CPU_AND(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 void PGXP_CPU_OR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
 {
 	/* Rd = Rs | Rt */
+	if ((rs(instr) == 0 || rt(instr) == 0) &&
+	    PGXP_CPU_PreserveIdentityMove(instr,
+		    rs(instr) == 0 ? rtVal : rsVal, rdVal))
+		return;
 	PGXP_CPU_AND(instr, rdVal, rsVal, rtVal);
 }
 
 void PGXP_CPU_XOR(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
 {
 	/* Rd = Rs ^ Rt */
+	if ((rs(instr) == 0 || rt(instr) == 0) &&
+	    PGXP_CPU_PreserveIdentityMove(instr,
+		    rs(instr) == 0 ? rtVal : rsVal, rdVal))
+		return;
 	PGXP_CPU_AND(instr, rdVal, rsVal, rtVal);
 }
 
