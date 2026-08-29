@@ -51,6 +51,7 @@
 
 #include "../pgxp/pgxp_main.h"
 #include "../pgxp/pgxp_gpu.h"
+#include "../pgxp/pgxp_lineage.h"
 #include "../pgxp/pgxp_mem.h"
 
 /* Forward decl: gpu_common.h's PlotNativePixel template calls
@@ -1539,7 +1540,10 @@ static void ProcessFIFO(uint32_t in_count)
    for (i = 0; i < command_len; i++)
    {
       if(PGXP_enabled())
+      {
+         PGXP_LineageCBWrite(i, GPU_BlitterFIFO.read_pos);
          PGXP_WriteCB(PGXP_ReadFIFO(GPU_BlitterFIFO.read_pos), i);
+      }
       CB[i] = FastFIFO_Read(&GPU_BlitterFIFO);
    }
 
@@ -1578,7 +1582,10 @@ static INLINE void GPU_WriteCB(uint32_t InData, uint32_t addr)
       return;
 
    if(PGXP_enabled())
+   {
+      PGXP_LineageFIFOWrite(GPU_BlitterFIFO.write_pos, addr, InData);
       PGXP_WriteFIFO(ReadMem(addr), GPU_BlitterFIFO.write_pos);
+   }
    FastFIFO_Write(&GPU_BlitterFIFO, InData);
 
    if(GPU_BlitterFIFO.in_count && GPU.InCmd != INCMD_FBREAD)

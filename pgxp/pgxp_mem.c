@@ -3,6 +3,7 @@
 #include "pgxp_mem.h"
 #include "pgxp_cpu.h"
 #include "pgxp_gte.h"
+#include "pgxp_lineage.h"
 #include "pgxp_value.h"
 
 /* The PGXP shadow of PSX memory.  Previously a single
@@ -272,6 +273,7 @@ void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int s
 void WriteMem(PGXP_value* value, uint32_t addr)
 {
 	uint32_t paddr = PGXP_ConvertAddress(addr);
+	PGXP_LineageMemoryWrite(addr);
 
 	if (paddr < InvalidAddress)
 	{
@@ -284,6 +286,7 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 {
 	PGXP_value* dest = NULL;
 	uint32_t paddr = PGXP_ConvertAddress(addr);
+	PGXP_LineageMemoryWrite(addr);
 
 	if (paddr < InvalidAddress)
 	{

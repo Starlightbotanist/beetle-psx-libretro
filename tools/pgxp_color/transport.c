@@ -25,6 +25,7 @@
 #include "../../pgxp/pgxp_gpu.h"
 #include "../../pgxp/pgxp_gte.h"
 #include "../../pgxp/pgxp_cpu.h"
+#include "../../pgxp/pgxp_lineage.h"
 #include "../../pgxp/pgxp_mem.h"
 #include "../../pgxp/pgxp_main.h"
 #include "../../pgxp/pgxp_types.h"
@@ -54,6 +55,7 @@ static uint32_t gte_pack(int32_t m1, int32_t m2, int32_t m3, uint8_t cd)
 #define INSTR_RD(rd)          (((uint32_t)(rd) & 0x1F) << 11)
 #define INSTR_RS(rs)          (((uint32_t)(rs) & 0x1F) << 21)
 #define INSTR_OP(op)          (((uint32_t)(op) & 0x3F) << 26)
+#define INSTR_SA(sa)          (((uint32_t)(sa) & 0x1F) << 6)
 
 /* Scratch addresses in tracked RAM. */
 #define LIST_ADDR   0x80100000u
@@ -460,6 +462,101 @@ static void test_projection_write_observer(void)
       fail("register jump link kept stale projection", 1, 0);
 }
 
+static void test_exact_shift_lineage(void)
+{
+   const float precise_x = 143.25f;
+   const float precise_y = -92.5f;
+   const uint32_t packed = pack_vertex(143, -92);
+   const uint32_t shifted = packed << 5;
+   const uint32_t restored = (uint32_t)((int32_t)shifted >> 5);
+   const uint32_t projected_addr = 0x80105ffcu;
+   const uint32_t shifted_addr = 0x80106000u;
+   const uint32_t restored_addr = 0x80106004u;
+   PGXP_value partial = PGXP_value_zero;
+   PGXP_value overwrite = PGXP_value_zero;
+   OGLVertex vertex;
+   float x = 0.f;
+   float y = 0.f;
+   float z = 0.f;
+   int valid_w = 0;
+   uint32_t instr;
+
+   PGXP_InitCPU();
+   PGXP_InitGTE();
+   PGXP_EnableModes(PGXP_TEXTURE_CORRECTION);
+   PGXP_LineageReset();
+   PGXP_pushSXYZ2f(precise_x, precise_y, 32768.f, packed);
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(8), packed, projected_addr);
+   PGXP_LineageFIFOWrite(3, projected_addr, packed);
+   PGXP_LineageCBWrite(3, 3);
+   if (PGXP_LineageRecoverVertex(3, packed, &x, &y, &z, &valid_w))
+      fail("unshifted lineage reached vertex", 1, 0);
+
+   instr = INSTR_RS(8) | INSTR_RT(0) | INSTR_RD(7) | 0x21u;
+   PGXP_CPU_PreserveIdentityMove(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+
+   instr = INSTR_RT(7) | INSTR_RD(9) | INSTR_SA(5);
+   PGXP_CPU_TrackLineageShift(instr, packed, shifted, 0);
+   PGXP_CPU_ObserveInstruction(instr);
+   if ((CPU_reg[9].flags & VALID_01) == VALID_01)
+      fail("shift lineage changed CPU shadow", 1, 0);
+
+   instr = INSTR_RS(9) | INSTR_RT(0) | INSTR_RD(11) | 0x21u;
+   PGXP_CPU_PreserveIdentityMove(instr, shifted, shifted);
+   PGXP_CPU_ObserveInstruction(instr);
+   if ((CPU_reg[11].flags & VALID_01) == VALID_01)
+      fail("shift identity changed CPU shadow", 1, 0);
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(11), shifted, shifted_addr);
+   PGXP_LineageFIFOWrite(0, shifted_addr, shifted);
+   PGXP_LineageCBWrite(0, 0);
+   if (!PGXP_LineageRecoverVertex(0, shifted, &x, &y, &z, &valid_w) ||
+       x != precise_x || y != precise_y || z != 32768.f || !valid_w)
+      fail("shifted lineage recovery missed", 0, 1);
+
+   PGXP_CPU_LW(INSTR_OP(0x23) | INSTR_RT(10), shifted, shifted_addr);
+   PGXP_CPU_ObserveInstruction(INSTR_OP(0x23) | INSTR_RT(10));
+   instr = INSTR_RT(10) | INSTR_RD(10) | INSTR_SA(5) | 0x03u;
+   PGXP_CPU_TrackLineageShift(instr, shifted, restored, 1);
+   PGXP_CPU_ObserveInstruction(instr);
+
+   instr = INSTR_RS(10) | INSTR_RT(0) | INSTR_RD(12) | 0x21u;
+   PGXP_CPU_PreserveIdentityMove(instr, restored, restored);
+   PGXP_CPU_ObserveInstruction(instr);
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(12), restored, restored_addr);
+   PGXP_LineageFIFOWrite(1, restored_addr, restored);
+   PGXP_LineageCBWrite(1, 1);
+   if (!PGXP_LineageRecoverVertex(1, restored, &x, &y, &z, &valid_w) ||
+       x != precise_x || y != precise_y || z != 32768.f || !valid_w)
+      fail("restored lineage recovery missed", 0, 1);
+   memset(&vertex, 0, sizeof(vertex));
+   PGXP_GetVertex(1, &restored, &vertex, 0, 0);
+   if (vertex.x != precise_x || vertex.y != precise_y ||
+       vertex.w != 32768.f || !vertex.valid_w)
+      fail("vertex lookup ignored exact lineage", 0, 1);
+   if (PGXP_LineageRecoverVertex(1, restored ^ 1u,
+       &x, &y, &z, &valid_w))
+      fail("lineage accepted mismatched word", 1, 0);
+
+   partial.value = restored;
+   WriteMem16(&partial, restored_addr);
+   PGXP_LineageFIFOWrite(2, restored_addr, restored);
+   PGXP_LineageCBWrite(2, 2);
+   if (PGXP_LineageRecoverVertex(2, restored, &x, &y, &z, &valid_w))
+      fail("partial overwrite kept lineage", 1, 0);
+
+   overwrite.value = shifted;
+   WriteMem(&overwrite, shifted_addr);
+   PGXP_LineageFIFOWrite(4, shifted_addr, shifted);
+   PGXP_LineageCBWrite(4, 4);
+   if (PGXP_LineageRecoverVertex(4, shifted, &x, &y, &z, &valid_w))
+      fail("full overwrite kept lineage", 1, 0);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -502,6 +599,9 @@ int main(void)
 
    printf("[T12] projected-depth write observation\n");
    test_projection_write_observer();
+
+   printf("[T13] exact projected-coordinate shift lineage\n");
+   test_exact_shift_lineage();
 
    if (failures)
    {
