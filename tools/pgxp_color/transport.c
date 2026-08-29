@@ -53,6 +53,7 @@ static uint32_t gte_pack(int32_t m1, int32_t m2, int32_t m3, uint8_t cd)
 #define INSTR_RT(rt)          (((uint32_t)(rt) & 0x1F) << 16)
 #define INSTR_RD(rd)          (((uint32_t)(rd) & 0x1F) << 11)
 #define INSTR_RS(rs)          (((uint32_t)(rs) & 0x1F) << 21)
+#define INSTR_OP(op)          (((uint32_t)(op) & 0x3F) << 26)
 
 /* Scratch addresses in tracked RAM. */
 #define LIST_ADDR   0x80100000u
@@ -101,6 +102,8 @@ static void test_swc2_direct(void)
    float    rgb[3];
 
    packed = gte_produce(m1, m2, m3, 0x30);   /* 0x30 = shaded triangle */
+   if (GTE_data_reg[22].flags & VALID_PROJECTION)
+      fail("colour marked as projected vertex", 1, 0);
 
    /* swc2 $22, 0(rs) : Mem[addr] = GTE_D[22] */
    PGXP_GTE_SWC2(instr, packed, addr);
@@ -317,6 +320,74 @@ static void test_cpu_comparison_ordering(void)
       fail("SLT did not compare equal-high low halves", 0, 1);
 }
 
+static uint32_t pack_vertex(int16_t x, int16_t y)
+{
+   return (uint32_t)(uint16_t)x | ((uint32_t)(uint16_t)y << 16);
+}
+
+static void test_projection_provenance(void)
+{
+   PGXP_value tracked = PGXP_value_zero;
+   OGLVertex vertex;
+   uint32_t word;
+
+   word = pack_vertex(12, 34);
+   PGXP_pushSXYZ2f(12.f, 34.f, 2.f, word);
+   if (!(GTE_data_reg[14].flags & VALID_PROJECTION))
+      fail("projected vertex missing provenance", 0, 1);
+
+   word = pack_vertex(100, -100);
+   tracked.x = 100.5f;
+   tracked.y = -100.25f;
+   tracked.z = 2.f;
+   tracked.value = word;
+   tracked.flags = VALID_012 | VALID_PROJECTION;
+   PGXP_WriteCB(&tracked, 0);
+
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   if (!vertex.valid_w || vertex.w != 2.f)
+      fail("projected vertex W was rejected", vertex.valid_w, 1);
+
+   tracked.flags = VALID_012;
+   PGXP_WriteCB(&tracked, 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   if (vertex.valid_w)
+      fail("unproven vertex W was accepted", 1, 0);
+   if (vertex.x != 100.5f || vertex.y != -100.25f)
+      fail("W rejection discarded precise XY", 1, 0);
+}
+
+static void test_projection_provenance_transport(void)
+{
+   const uint32_t packed = pack_vertex(123, -45);
+   const uint32_t addr = 0x80105000u;
+   uint32_t instr;
+
+   PGXP_pushSXYZ2f(123.25f, -45.5f, 32768.f, packed);
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   if (!(CPU_reg[8].flags & VALID_PROJECTION))
+      fail("MFC2 lost projection provenance", 0, 1);
+
+   instr = INSTR_RS(8) | INSTR_RT(8) | INSTR_OP(0x0d) | 1u;
+   PGXP_CPU_ObserveInstruction(instr);
+   if (CPU_reg[8].flags & VALID_PROJECTION)
+      fail("untracked CPU write kept provenance", 1, 0);
+
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(8), packed, addr);
+   PGXP_CPU_LW(INSTR_OP(0x23) | INSTR_RT(9), packed, addr);
+   PGXP_CPU_ObserveInstruction(INSTR_OP(0x23) | INSTR_RT(9));
+   if (!(CPU_reg[9].flags & VALID_PROJECTION))
+      fail("full-word transport lost provenance", 0, 1);
+
+   PGXP_CPU_SWL(INSTR_OP(0x2a) | INSTR_RT(8), packed, addr);
+   if (ReadMem(addr)->flags & VALID_PROJECTION)
+      fail("partial store kept provenance", 1, 0);
+}
 int main(void)
 {
    PGXP_Init();
@@ -345,6 +416,11 @@ int main(void)
    printf("[T7] CPU comparison ordering\n");
    test_cpu_comparison_ordering();
 
+   printf("[T8] projection provenance\n");
+   test_projection_provenance();
+
+   printf("[T9] projected-depth CPU transport\n");
+   test_projection_provenance_transport();
    if (failures)
    {
       printf("\nfailures=%d\nFAIL\n", failures);

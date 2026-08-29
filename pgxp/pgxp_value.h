@@ -79,6 +79,7 @@ extern "C" {
 #define VALID_01  (VALID_0 | VALID_1)
 #define VALID_012  (VALID_0 | VALID_1 | VALID_2)
 #define VALID_ALL  (VALID_0 | VALID_1 | VALID_2 | VALID_3)
+#define VALID_PROJECTION VALID_3
 #define INV_VALID_ALL  (ALL ^ VALID_ALL)
 //} PGXP_value_flags;
 
