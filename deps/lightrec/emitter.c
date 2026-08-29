@@ -1812,7 +1812,7 @@ static void rec_store(struct lightrec_cstate *state,
 	union code c = block->opcode_list[offset].c;
 	bool is_swc2 = c.i.op == OP_SWC2;
 
-	/* PGXP CPU mode records memory operations through the map callbacks.
+	/* Active PGXP tracking records memory operations through map callbacks.
 	 * Keep tracked stores on that path instead of emitting a direct host
 	 * memory access that bypasses the shadow state update. */
 	if (state->state->ops.pgxp_cpu && pgxp_cpu_tracked_memory(c)) {
@@ -2337,7 +2337,7 @@ static void rec_load(struct lightrec_cstate *state, const struct block *block,
 	const struct opcode *op = &block->opcode_list[offset];
 	u32 flags = op->flags;
 
-	/* PGXP CPU mode records memory operations through the map callbacks.
+	/* Active PGXP tracking records memory operations through map callbacks.
 	 * Keep tracked loads on that path instead of emitting a direct host
 	 * memory access that bypasses the shadow state update. */
 	if (state->state->ops.pgxp_cpu && pgxp_cpu_tracked_memory(op->c)) {
@@ -3421,7 +3421,7 @@ static void rec_META(struct lightrec_cstate *state,
 		(*f)(state, block, offset);
 }
 
-/* Memory operations tracked by PGXP CPU mode. */
+/* Memory operations tracked whenever the host installs the PGXP hook. */
 static _Bool pgxp_cpu_tracked_memory(union code c)
 {
 	switch (c.i.op) {
@@ -3606,7 +3606,7 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 		else
 			(*f)(state, block, offset);
 
-		/* PGXP CPU-mode tracking: when the host has installed a
+		/* PGXP register tracking: when the host has installed a
 		 * pgxp_cpu hook, emit a tracking call after each tracked
 		 * non-memory op so recompiled code maintains the same
 		 * per-register precision metadata the interpreter would. */

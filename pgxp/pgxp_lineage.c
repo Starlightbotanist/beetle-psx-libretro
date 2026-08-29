@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "pgxp_lineage.h"
@@ -33,10 +34,11 @@ typedef struct
 } PGXP_lineage;
 
 /* Records are direct-addressed so provenance attached to display-list memory
- * remains valid until that architectural word is overwritten. The bitmap is
- * checked first, keeping invalid entries out of the hot memory path. */
-static PGXP_lineage lineage_memory[PGXP_LINEAGE_MEMORY_WORDS];
-static uint32_t lineage_memory_valid[(PGXP_LINEAGE_MEMORY_WORDS + 31) / 32];
+ * remains valid until that architectural word is overwritten. Allocate the
+ * sidecar only while PGXP memory tracking is active; the bitmap is checked
+ * first, keeping invalid entries out of the hot memory path. */
+static PGXP_lineage* lineage_memory;
+static uint32_t* lineage_memory_valid;
 static PGXP_lineage lineage_reg[32];
 static PGXP_lineage lineage_fifo[32];
 static PGXP_lineage lineage_cb[16];
@@ -56,41 +58,52 @@ static void lineage_set_stage(PGXP_lineage* lineage, unsigned stage)
 
 static uint32_t lineage_memory_index(uint32_t addr)
 {
-	switch (addr >> 24)
-	{
-		case 0x00:
-		case 0x80:
-		case 0xa0:
-			return (addr & UINT32_C(0x001ffffc)) >> 2;
-		default:
-			if (addr >= UINT32_C(0x1f800000) &&
-			    addr < UINT32_C(0x1f800400))
-				return PGXP_LINEAGE_RAM_WORDS +
-					((addr - UINT32_C(0x1f800000)) >> 2);
-			return PGXP_LINEAGE_INVALID_INDEX;
-	}
+	uint32_t segment = addr >> 29;
+	uint32_t physical;
+
+	/* Only KUSEG, KSEG0, and KSEG1 have direct physical aliases. Do not
+	 * fold KSEG2/3 addresses onto RAM merely because their low bits match. */
+	if (segment != 0 && segment != 4 && segment != 5)
+		return PGXP_LINEAGE_INVALID_INDEX;
+	physical = addr & UINT32_C(0x1fffffff);
+
+	/* The first 8 MiB are four mirrors of the 2 MiB main RAM. Addresses
+	 * from 8 MiB through 16 MiB are unmapped and must not alias lineage. */
+	if (physical < UINT32_C(0x00800000))
+		return (physical & UINT32_C(0x001ffffc)) >> 2;
+	if (physical >= UINT32_C(0x1f800000) &&
+	    physical < UINT32_C(0x1f800400))
+		return PGXP_LINEAGE_RAM_WORDS +
+			((physical - UINT32_C(0x1f800000)) >> 2);
+	return PGXP_LINEAGE_INVALID_INDEX;
 }
 
 static int lineage_memory_is_valid(uint32_t index)
 {
+	if (!lineage_memory_valid)
+		return 0;
 	return (lineage_memory_valid[index >> 5] >> (index & 31)) & 1;
 }
 
 static void lineage_memory_set_valid(uint32_t index)
 {
-	lineage_memory_valid[index >> 5] |= UINT32_C(1) << (index & 31);
+	if (lineage_memory_valid)
+		lineage_memory_valid[index >> 5] |=
+			UINT32_C(1) << (index & 31);
 }
 
 static void lineage_memory_clear(uint32_t index)
 {
-	lineage_memory_valid[index >> 5] &= ~(UINT32_C(1) << (index & 31));
+	if (lineage_memory_valid)
+		lineage_memory_valid[index >> 5] &=
+			~(UINT32_C(1) << (index & 31));
 }
 
 static PGXP_lineage* lineage_memory_read(uint32_t addr)
 {
 	uint32_t index = lineage_memory_index(addr);
 
-	if (index == PGXP_LINEAGE_INVALID_INDEX ||
+	if (!lineage_memory || index == PGXP_LINEAGE_INVALID_INDEX ||
 	    !lineage_memory_is_valid(index))
 		return NULL;
 	return &lineage_memory[index];
@@ -98,11 +111,51 @@ static PGXP_lineage* lineage_memory_read(uint32_t addr)
 
 void PGXP_LineageReset(void)
 {
-	memset(lineage_memory_valid, 0, sizeof(lineage_memory_valid));
+	if (lineage_memory_valid)
+		memset(lineage_memory_valid, 0,
+			((PGXP_LINEAGE_MEMORY_WORDS + 31) / 32) *
+			sizeof(*lineage_memory_valid));
 	memset(lineage_reg, 0, sizeof(lineage_reg));
 	memset(lineage_fifo, 0, sizeof(lineage_fifo));
 	memset(lineage_cb, 0, sizeof(lineage_cb));
 	lineage_reg_touched = 0;
+}
+
+int PGXP_LineageSetEnabled(int enabled)
+{
+	PGXP_lineage* memory;
+	uint32_t* valid;
+
+	if (!enabled)
+	{
+		free(lineage_memory);
+		free(lineage_memory_valid);
+		lineage_memory = NULL;
+		lineage_memory_valid = NULL;
+		PGXP_LineageReset();
+		return 1;
+	}
+	if (lineage_memory && lineage_memory_valid)
+		return 1;
+
+	memory = (PGXP_lineage*)malloc(PGXP_LINEAGE_MEMORY_WORDS *
+		sizeof(*memory));
+	valid = (uint32_t*)calloc((PGXP_LINEAGE_MEMORY_WORDS + 31) / 32,
+		sizeof(*valid));
+	if (!memory || !valid)
+	{
+		free(memory);
+		free(valid);
+		lineage_memory = NULL;
+		lineage_memory_valid = NULL;
+		PGXP_LineageReset();
+		return 0;
+	}
+
+	lineage_memory = memory;
+	lineage_memory_valid = valid;
+	PGXP_LineageReset();
+	return 1;
 }
 
 void PGXP_LineageMFC2(uint32_t instr, uint32_t value,
@@ -222,13 +275,32 @@ void PGXP_LineageMemoryWrite(uint32_t addr)
 		lineage_memory_clear(index);
 }
 
+void PGXP_LineageMemoryWriteRange(uint32_t addr, uint32_t size)
+{
+	while (lineage_memory_valid && size)
+	{
+		uint32_t index = lineage_memory_index(addr);
+		uint32_t step = 4 - (addr & 3);
+
+		if (index != PGXP_LINEAGE_INVALID_INDEX)
+			lineage_memory_clear(index);
+		if (step > size)
+			step = size;
+		size -= step;
+		if (addr > UINT32_MAX - step)
+			break;
+		addr += step;
+	}
+}
+
 void PGXP_LineageStore(uint32_t instr, uint32_t value, uint32_t addr)
 {
 	unsigned source = (instr >> 16) & 31;
 	uint32_t index = lineage_memory_index(addr);
 	const PGXP_lineage* lineage = &lineage_reg[source];
 
-	if (index == PGXP_LINEAGE_INVALID_INDEX)
+	if (!lineage_memory || !lineage_memory_valid ||
+	    index == PGXP_LINEAGE_INVALID_INDEX)
 		return;
 	lineage_memory_clear(index);
 	/* SWL and SWR share the ordinary store helper, but do not preserve an

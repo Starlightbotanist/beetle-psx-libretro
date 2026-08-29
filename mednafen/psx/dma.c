@@ -33,6 +33,8 @@
 #include "mdec.h"
 #include "gpu.h"
 #include "dma.h"
+#include "../../pgxp/pgxp_lineage.h"
+#include "../../pgxp/pgxp_main.h"
 
 /* Notes:
 
@@ -450,6 +452,8 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
             {
                uint32_t waddr = (DMACH[ch].CurAddr + (voffs << 2)) & 0x1FFFFC;
                MASMEM_WriteU32(MainRAM, waddr, vtmp);
+               if(PGXP_GetModes() & PGXP_MODE_MEMORY)
+                  PGXP_LineageMemoryWrite(waddr);
 #ifdef HAVE_LIGHTREC
                if(!inv_count)
                {

@@ -5,6 +5,10 @@
 #include "pgxp_mem.h"
 #include "pgxp_gte.h"
 
+#include <libretro.h>
+
+extern retro_log_printf_t log_cb;
+
 /* Hot-path: gMode is read on every CPU instruction with a PGXP
  * branch (see the 50+ PGXP_GetModes() call sites in mednafen/psx/
  * cpu.c).  Make it externally visible so PGXP_GetModes can live
@@ -25,6 +29,7 @@ void PGXP_Shutdown(void)
 {
 	gMode = 0;
 	PGXP_FreeVertexCache();
+	PGXP_LineageSetEnabled(0);
 }
 
 /* Apply a mode transition.  If the PGXP_VERTEX_CACHE bit is being
@@ -34,7 +39,11 @@ void PGXP_Shutdown(void)
 static void apply_modes(uint32_t new_modes)
 {
 	uint32_t old_modes = gMode;
+	uint32_t lineage_modes = PGXP_MODE_MEMORY | PGXP_MODE_GTE;
 	gMode = new_modes;
+	if (!PGXP_LineageSetEnabled((new_modes & lineage_modes) != 0) && log_cb)
+		log_cb(RETRO_LOG_ERROR,
+			"PGXP: exact-lineage allocation failed; recovery disabled\n");
 	if ((old_modes & PGXP_VERTEX_CACHE) && !(new_modes & PGXP_VERTEX_CACHE))
 		PGXP_FreeVertexCache();
 	/* Off to on: TransformXY skips the vertex push entirely while gMode is

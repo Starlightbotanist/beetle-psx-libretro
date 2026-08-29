@@ -628,6 +628,136 @@ static void test_exact_shift_lineage(void)
       fail("full overwrite kept lineage", 1, 0);
 }
 
+static void store_shifted_lineage(uint32_t addr, uint32_t packed,
+                                  uint32_t shifted)
+{
+   uint32_t instr;
+
+   PGXP_pushSXYZ2f(143.25f, -92.5f, 32768.f, packed);
+   instr = INSTR_RT(8) | INSTR_RD(14) | INSTR_OP(0x12);
+   PGXP_GTE_MFC2(instr, packed, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   instr = INSTR_RT(8) | INSTR_RD(9) | INSTR_SA(5);
+   PGXP_CPU_MemoryDispatch(instr, shifted, 0, packed);
+   PGXP_CPU_ObserveInstruction(instr);
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(9), shifted, addr);
+}
+
+static int recover_shifted_lineage(uint32_t addr, uint32_t shifted)
+{
+   float x = 0.f;
+   float y = 0.f;
+   float z = 0.f;
+   int valid_w = 0;
+
+   PGXP_LineageFIFOWrite(0, addr, shifted);
+   PGXP_LineageCBWrite(0, 0);
+   return PGXP_LineageRecoverVertex(0, shifted,
+      &x, &y, &z, &valid_w) && x == 143.25f && y == -92.5f &&
+      z == 32768.f && valid_w;
+}
+
+static void test_lineage_memory_addressing(void)
+{
+   const uint32_t packed = pack_vertex(143, -92);
+   const uint32_t shifted = packed << 5;
+   const uint32_t base = 0x80106000u;
+   const uint32_t mirror = 0x80306000u;
+   PGXP_value shadow = PGXP_value_zero;
+   PGXP_value overwrite = PGXP_value_zero;
+
+   shadow.value = shifted;
+   shadow.x = 143.25f;
+   overwrite.value = shifted ^ 1u;
+   overwrite.x = -1.f;
+   WriteMem(&shadow, base);
+   WriteMem(&overwrite, 0x80906000u);
+   if (ReadMem(0x80906000u) || !ReadMem(base) ||
+       ReadMem(base)->value != shifted || ReadMem(base)->x != 143.25f)
+      fail("unmapped address aliased shadow RAM", 1, 0);
+
+   PGXP_LineageReset();
+   store_shifted_lineage(base, packed, shifted);
+   if (!recover_shifted_lineage(mirror, shifted))
+      fail("RAM mirror lost lineage", 0, 1);
+
+   PGXP_LineageMemoryWrite(0x00906000u);
+   PGXP_LineageMemoryWrite(0x80906000u);
+   PGXP_LineageMemoryWrite(0xC0106000u);
+   if (!recover_shifted_lineage(base, shifted))
+      fail("unmapped address aliased RAM", 1, 0);
+
+   PGXP_LineageMemoryWrite(mirror);
+   if (recover_shifted_lineage(base, shifted))
+      fail("RAM mirror failed to invalidate", 1, 0);
+
+   store_shifted_lineage(0x80906000u, packed, shifted);
+   if (recover_shifted_lineage(base, shifted))
+      fail("unmapped store created RAM lineage", 1, 0);
+
+   store_shifted_lineage(base, packed, shifted);
+   PGXP_CPU_SW(INSTR_OP(0x2b) | INSTR_RT(9), shifted, base + 4);
+   PGXP_LineageMemoryWriteRange(base + 3, 2);
+   if (recover_shifted_lineage(base, shifted) ||
+       recover_shifted_lineage(base + 4, shifted))
+      fail("cross-word range kept lineage", 1, 0);
+
+   store_shifted_lineage(0x1F800020u, packed, shifted);
+   if (!recover_shifted_lineage(0xBF800020u, shifted))
+      fail("scratchpad alias lost lineage", 0, 1);
+   PGXP_LineageMemoryWriteRange(0x9F800021u, 2);
+   if (recover_shifted_lineage(0x1F800020u, shifted))
+      fail("scratchpad alias kept lineage", 1, 0);
+}
+
+static void test_subword_store_lineage_invalidation(void)
+{
+   const uint32_t packed = pack_vertex(143, -92);
+   const uint32_t shifted = packed << 5;
+   const uint32_t addr = 0x80106000u;
+
+   PGXP_LineageReset();
+   store_shifted_lineage(addr, packed, shifted);
+   if (!recover_shifted_lineage(addr, shifted))
+      fail("SB lineage setup failed", 0, 1);
+   PGXP_CPU_SB(INSTR_OP(0x28) | INSTR_RT(9),
+      (uint8_t)shifted, addr + 1);
+   if (recover_shifted_lineage(addr, shifted))
+      fail("SB kept exact lineage", 1, 0);
+
+   store_shifted_lineage(addr, packed, shifted);
+   if (!recover_shifted_lineage(addr, shifted))
+      fail("SH lineage setup failed", 0, 1);
+   PGXP_CPU_SH(INSTR_OP(0x29) | INSTR_RT(9),
+      (uint16_t)shifted, addr + 2);
+   if (recover_shifted_lineage(addr, shifted))
+      fail("SH kept exact lineage", 1, 0);
+}
+
+static void test_lineage_allocation_lifetime(void)
+{
+   const uint32_t packed = pack_vertex(143, -92);
+   const uint32_t shifted = packed << 5;
+   const uint32_t addr = 0x80106000u;
+
+   PGXP_LineageReset();
+   store_shifted_lineage(addr, packed, shifted);
+   if (!recover_shifted_lineage(addr, shifted))
+      fail("allocated lineage unavailable", 0, 1);
+
+   PGXP_SetModes(PGXP_MODE_NONE);
+   PGXP_LineageMemoryWriteRange(addr, 4);
+   if (recover_shifted_lineage(addr, shifted))
+      fail("disabled lineage remained live", 1, 0);
+
+   PGXP_SetModes(PGXP_MODE_MEMORY | PGXP_TEXTURE_CORRECTION);
+   if (recover_shifted_lineage(addr, shifted))
+      fail("reallocated lineage retained data", 1, 0);
+   store_shifted_lineage(addr, packed, shifted);
+   if (!recover_shifted_lineage(addr, shifted))
+      fail("reallocated lineage unavailable", 0, 1);
+}
+
 int main(void)
 {
    PGXP_Init();
@@ -680,11 +810,22 @@ int main(void)
    printf("[T15] exact projected-coordinate shift lineage\n");
    test_exact_shift_lineage();
 
+   printf("[T16] lineage address decoding and range invalidation\n");
+   test_lineage_memory_addressing();
+
+   printf("[T17] lineage allocation lifetime\n");
+   test_lineage_allocation_lifetime();
+
+   printf("[T19] sub-word store lineage invalidation\n");
+   test_subword_store_lineage_invalidation();
+
    if (failures)
    {
+      PGXP_Shutdown();
       printf("\nfailures=%d\nFAIL\n", failures);
       return 1;
    }
+   PGXP_Shutdown();
    printf("\nFAIL count 0\nPASS\n");
    return 0;
 }

@@ -14,6 +14,10 @@ extern "C" {
  * state; this sidecar only carries the original projected payload and proof
  * of the recognized transform sequence. */
 void PGXP_LineageReset(void);
+/* Allocate the direct-address sidecar on enable and release it on disable.
+ * Allocation failure leaves exact recovery disabled rather than accepting
+ * provenance without storage. */
+int PGXP_LineageSetEnabled(int enabled);
 void PGXP_LineageMFC2(uint32_t instr, uint32_t value,
 		const PGXP_value* precise);
 void PGXP_LineageShift(uint32_t instr, uint32_t before,
@@ -23,6 +27,8 @@ void PGXP_LineageIdentityMove(unsigned dest, unsigned source,
 void PGXP_LineageObserveRegisterWrite(unsigned dest);
 void PGXP_LineageLoad(uint32_t instr, uint32_t addr, uint32_t value);
 void PGXP_LineageMemoryWrite(uint32_t addr);
+/* Invalidate every architectural word touched by a raw memory write. */
+void PGXP_LineageMemoryWriteRange(uint32_t addr, uint32_t size);
 void PGXP_LineageStore(uint32_t instr, uint32_t value, uint32_t addr);
 void PGXP_LineageFIFOWrite(unsigned pos, uint32_t addr, uint32_t value);
 void PGXP_LineageCBWrite(unsigned slot, unsigned fifo_pos);

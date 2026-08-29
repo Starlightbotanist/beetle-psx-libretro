@@ -40,6 +40,7 @@
 /* PGXP */
 #include "../pgxp/pgxp_cpu.h"
 #include "../pgxp/pgxp_gte.h"
+#include "../pgxp/pgxp_lineage.h"
 #include "../pgxp/pgxp_main.h"
 int pgxpMode;
 
@@ -654,7 +655,11 @@ static INLINE void WriteMemory_u8(int32_t *timestamp, uint32_t address, uint32_t
    WriteMemory_IsC_misc(address, value);
 
    if ((BIU & 0x081) == 0x080)
+   {
       MASMEM_WriteU8(ScratchRAM, address & 0x3FF, value);
+      PGXP_LineageMemoryWriteRange(
+         0x1F800000 | (address & 0x3FF), 1);
+   }
 }
 
 static INLINE void WriteMemory_u16(int32_t *timestamp, uint32_t address, uint32_t value)
@@ -675,7 +680,11 @@ static INLINE void WriteMemory_u16(int32_t *timestamp, uint32_t address, uint32_
    WriteMemory_IsC_misc(address, value);
 
    if ((BIU & 0x081) == 0x080)
+   {
       MASMEM_WriteU16(ScratchRAM, address & 0x3FF, value);
+      PGXP_LineageMemoryWriteRange(
+         0x1F800000 | (address & 0x3FF), 2);
+   }
 }
 
 static INLINE void WriteMemory_u32(int32_t *timestamp, uint32_t address, uint32_t value, bool DS24)
@@ -708,6 +717,8 @@ static INLINE void WriteMemory_u32(int32_t *timestamp, uint32_t address, uint32_
          MASMEM_WriteU24(ScratchRAM, address & 0x3FF, value);
       else
          MASMEM_WriteU32(ScratchRAM, address & 0x3FF, value);
+      PGXP_LineageMemoryWriteRange(
+         0x1F800000 | (address & 0x3FF), DS24 ? 3 : 4);
    }
 }
 
@@ -3596,6 +3607,7 @@ static void enable_ram(struct lightrec_state *state, _Bool enable)
 {
 	if (enable) {
 		memcpy(MainRAM->data8, cache_buf, sizeof(cache_buf));
+		PGXP_LineageMemoryWriteRange(0, sizeof(cache_buf));
 	} else {
 		memcpy(cache_buf, MainRAM->data8, sizeof(cache_buf));
 	}
@@ -3610,6 +3622,7 @@ static struct lightrec_ops pgxp_ops = {
 	.cop2_notify = pgxp_cop2_notify,
 	.cop2_op = cop2_op,
 	.enable_ram = enable_ram,
+	.pgxp_cpu = pgxp_cpu_track,
 };
 
 static int lightrec_plugin_init(PS_CPU *self)
@@ -3668,11 +3681,6 @@ static int lightrec_plugin_init(PS_CPU *self)
       lightrec_map[PSX_MAP_KERNEL_USER_RAM].ops = &pgxp_nonhw_regs_ops;
       lightrec_map[PSX_MAP_BIOS].ops            = &pgxp_nonhw_regs_ops;
       lightrec_map[PSX_MAP_SCRATCH_PAD].ops     = &pgxp_nonhw_regs_ops;
-
-      /* Lightrec must mirror the same minimal register transport used by the
-       * Beetle interpreter in memory-only mode. pgxp_ops is static and reused
-       * across re-inits, so always set the hook for the active PGXP map. */
-      pgxp_ops.pgxp_cpu = pgxp_cpu_track;
 
       cop_ops = &pgxp_ops;
    }

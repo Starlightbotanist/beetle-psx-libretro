@@ -1024,10 +1024,29 @@ uint8_t  ScratchRAM_ReadU8 (uint32_t address) { return MASMEM_ReadU8(ScratchRAM,
 uint16_t ScratchRAM_ReadU16(uint32_t address) { return MASMEM_ReadU16(ScratchRAM, address); }
 uint32_t ScratchRAM_ReadU24(uint32_t address) { return MASMEM_ReadU24(ScratchRAM, address); }
 uint32_t ScratchRAM_ReadU32(uint32_t address) { return MASMEM_ReadU32(ScratchRAM, address); }
-void     ScratchRAM_WriteU8 (uint32_t address, uint8_t  value) { MASMEM_WriteU8(ScratchRAM, address, value); }
-void     ScratchRAM_WriteU16(uint32_t address, uint16_t value) { MASMEM_WriteU16(ScratchRAM, address, value); }
-void     ScratchRAM_WriteU24(uint32_t address, uint32_t value) { MASMEM_WriteU24(ScratchRAM, address, value); }
-void     ScratchRAM_WriteU32(uint32_t address, uint32_t value) { MASMEM_WriteU32(ScratchRAM, address, value); }
+void ScratchRAM_WriteU8(uint32_t address, uint8_t value)
+{
+   MASMEM_WriteU8(ScratchRAM, address, value);
+   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 1);
+}
+
+void ScratchRAM_WriteU16(uint32_t address, uint16_t value)
+{
+   MASMEM_WriteU16(ScratchRAM, address, value);
+   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 2);
+}
+
+void ScratchRAM_WriteU24(uint32_t address, uint32_t value)
+{
+   MASMEM_WriteU24(ScratchRAM, address, value);
+   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 3);
+}
+
+void ScratchRAM_WriteU32(uint32_t address, uint32_t value)
+{
+   MASMEM_WriteU32(ScratchRAM, address, value);
+   PGXP_LineageMemoryWriteRange(0x1F800000 | (address & 0x3FF), 4);
+}
 uint8_t *ScratchRAM_data8(void) { return ScratchRAM->data8; }
 uint8_t *MainRAM_data8   (void) { return MainRAM->data8;    }
 uint8_t *BIOSROM_data8   (void) { return BIOSROM->data8;    }
@@ -1808,6 +1827,8 @@ static INLINE void MemPoke(int32_t timestamp, uint32_t A, uint32_t V, unsigned s
          else
             MASMEM_WriteU8(MainRAM, A & 0x1FFFFF, V);
       }
+
+      PGXP_LineageMemoryWriteRange(A, access24 ? 3 : size);
 
       return;
    }
@@ -6634,7 +6655,7 @@ void retro_deinit(void)
     * correctly. */
    CDUtility_Kill();
 
-   /* Free any lazily-allocated PGXP buffers (vertex cache).  Same
+   /* Free any lazily-allocated PGXP buffers. Same
     * dlopen/dlclose-cycle leak concern as CDUtility above. */
    PGXP_Shutdown();
 

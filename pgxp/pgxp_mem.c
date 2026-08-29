@@ -137,6 +137,11 @@ uint32_t PGXP_ConvertAddress(uint32_t addr)
 	case 0x80:
 	case 0xa0:
 	case 0x00:
+		if ((paddr & 0x1FFFFFFF) >= 0x00800000)
+		{
+			paddr = InvalidAddress;
+			break;
+		}
 		/* RAM further mirrored over 8MB */
 		paddr = ((paddr & 0x7FFFFF) % 0x200000) >> 2;
 		paddr = UserMemOffset + paddr;
