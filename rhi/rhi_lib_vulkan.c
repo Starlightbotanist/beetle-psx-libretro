@@ -155,6 +155,7 @@ extern PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 extern PFN_vkGetDeviceQueue vkGetDeviceQueue;
 extern PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
 extern PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
+extern PFN_vkMergePipelineCaches vkMergePipelineCaches;
 extern PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 extern PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 extern PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -303,6 +304,7 @@ static void volkGenLoadDevice(void* context,
    vkGetDeviceQueue = (PFN_vkGetDeviceQueue)load(context, "vkGetDeviceQueue");
    vkGetImageMemoryRequirements = (PFN_vkGetImageMemoryRequirements)load(context, "vkGetImageMemoryRequirements");
    vkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)load(context, "vkGetPipelineCacheData");
+   vkMergePipelineCaches = (PFN_vkMergePipelineCaches)load(context, "vkMergePipelineCaches");
    vkInvalidateMappedMemoryRanges = (PFN_vkInvalidateMappedMemoryRanges)load(context, "vkInvalidateMappedMemoryRanges");
    vkMapMemory = (PFN_vkMapMemory)load(context, "vkMapMemory");
    vkQueueSubmit = (PFN_vkQueueSubmit)load(context, "vkQueueSubmit");
@@ -410,6 +412,7 @@ PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 PFN_vkGetDeviceQueue vkGetDeviceQueue;
 PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
 PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
+PFN_vkMergePipelineCaches vkMergePipelineCaches;
 PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -3419,6 +3422,7 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
 
    static struct VulkanPipelineDiagnosticState vulkan_pipeline_diagnostic;
    static bool vulkan_shader_precompilation;
+   static bool super_sampling;
 
    /* Deep copy of one graphics-pipeline description. During shader
     * precompilation the normal renderer still produces each state through its
@@ -3474,6 +3478,35 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
 
    static struct VulkanGraphicsPrecompileJobVec
       vulkan_graphics_precompile_jobs;
+
+   struct VulkanComputePrecompileJob
+   {
+      Program *program;
+      Hash hash;
+      VkComputePipelineCreateInfo pipe;
+      VkPipelineShaderStageCreateInfo stage;
+      VkSpecializationInfo specialization;
+      VkSpecializationMapEntry
+         specialization_entries[VULKAN_NUM_SPEC_CONSTANTS];
+      uint32_t specialization_data[VULKAN_NUM_SPEC_CONSTANTS];
+      VkPipeline pipeline;
+      VkResult result;
+      retro_time_t elapsed_usec;
+      Hash program_key;
+      uint32_t spec_mask;
+      uint32_t spec_constants[VULKAN_NUM_SPEC_CONSTANTS];
+   };
+
+   struct VulkanComputePrecompileJobVec
+   {
+      struct VulkanComputePrecompileJob *items;
+      unsigned count;
+      unsigned capacity;
+      bool capture_failed;
+   };
+
+   static struct VulkanComputePrecompileJobVec
+      vulkan_compute_precompile_jobs;
 
    static void vulkan_pipeline_diagnostic_reset(unsigned scaling,
          unsigned msaa)
@@ -6112,11 +6145,17 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_hd_texture_uniforms(Renderer *self,
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
-   static void renderer_precompile_primitive_shaders(Renderer *self);
+   static void renderer_precompile_current_configuration_pipelines(
+         Renderer *self);
    static void vulkan_precompile_jobs_begin(void);
    static bool vulkan_precompile_jobs_finish(Device *device,
-         unsigned *job_count, unsigned *worker_count,
+         unsigned *job_count, unsigned *graphics_job_count,
+         unsigned *compute_job_count, unsigned *worker_count,
          retro_time_t *compile_elapsed_usec);
+   static bool vulkan_precompile_queue_compute_pipeline(
+         struct CommandBuffer *self,
+         Hash hash,
+         const VkComputePipelineCreateInfo *pipe);
    static void renderer_flush_blit(Renderer *self,
          const BlitInfoVec *infos,
          Program *program,
@@ -6900,7 +6939,7 @@ static void renderer_init(Renderer *self,
        * frame. This is intentionally blocking: the Android worker only
        * parallelises the startup work and never overlaps compilation with
        * gameplay. Other Vulkan platforms use the same deterministic set. */
-      renderer_precompile_primitive_shaders(self);
+      renderer_precompile_current_configuration_pipelines(self);
       {
          VkClearValue clear_zero;
          memset(&clear_zero, 0, sizeof(clear_zero));
@@ -9770,7 +9809,78 @@ static void renderer_precompile_textured_batch_variant(
    PrimitiveInfoVec_push(scissors, &info);
 }
 
-static void renderer_precompile_primitive_shaders(Renderer *self)
+static void renderer_precompile_quad_pipeline(Renderer *self,
+      Program *program,
+      VkFormat format)
+{
+   ImageCreateInfo image_info = image_create_info_render_target(1, 1, format);
+   ImageHandle image = ih_make(NULL);
+   RenderPassInfo pass;
+   CommandBuffer *cmd;
+
+   image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+   image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+   ih_move(&image, device_create_image(self->device, &image_info, NULL));
+
+   render_pass_info_defaults(&pass);
+   pass.color_attachments[0] = image_get_view(ih_get(&image));
+   pass.num_color_attachments = 1;
+   pass.clear_attachments = 1;
+   pass.store_attachments = 1;
+
+   /* Only the compatible render-pass key is part of the pipeline. Avoid
+    * recording a synthetic begin/end render pass into the live command
+    * buffer: that would keep this temporary image alive until submission. */
+   renderer_ensure_command_buffer(self);
+   cmd = cbh_get(&self->cmd);
+   VK_ASSERT(!cmd->compatible_render_pass);
+   VK_ASSERT(!cmd->actual_render_pass);
+   VK_ASSERT(!cmd->framebuffer);
+   cmd->compatible_render_pass =
+      device_request_render_pass(self->device, &pass, true);
+   cmd->current_subpass = 0;
+   commandbuffer_begin_graphics(cmd);
+   commandbuffer_set_quad_state(cmd);
+   commandbuffer_set_program(cmd, program);
+   commandbuffer_set_vertex_binding(cmd, 0,
+         bh_get(&self->quad), 0, 8, VK_VERTEX_INPUT_RATE_VERTEX);
+   commandbuffer_set_vertex_attrib(cmd, 0, 0,
+         VK_FORMAT_R32G32_SFLOAT, 0);
+   commandbuffer_set_primitive_topology(cmd,
+         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+   commandbuffer_draw(cmd, 4, 1, 0, 0);
+   cmd->compatible_render_pass = NULL;
+   commandbuffer_begin_compute(cmd);
+   ih_reset(&image);
+}
+
+static void renderer_precompile_compute_pipeline(Renderer *self,
+      Program *program,
+      unsigned filter_mode)
+{
+   CommandBuffer *cmd;
+
+   if (!program)
+      return;
+
+   renderer_ensure_command_buffer(self);
+   cmd = cbh_get(&self->cmd);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Samples,
+         self->msaa);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode,
+         filter_mode);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Scaling,
+         self->scaling);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_ResolveEotf,
+         psx_hdr_sdr_eotf);
+   commandbuffer_set_specialization_constant_mask(cmd, ~0u);
+   commandbuffer_set_program(cmd, program);
+   commandbuffer_dispatch(cmd, 1, 1, 1);
+}
+
+static void renderer_precompile_current_configuration_pipelines(
+      Renderer *self)
 {
    static const SemiTransparentMode modes[] = {
       SemiTransparentMode_None,
@@ -9785,6 +9895,8 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
    retro_time_t compile_elapsed_usec = 0;
    unsigned variants = 0;
    unsigned jobs = 0;
+   unsigned graphics_jobs = 0;
+   unsigned compute_jobs = 0;
    unsigned workers = 0;
    bool complete;
 
@@ -9798,7 +9910,6 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
    {
       unsigned textured;
       self->render_pass_is_feedback = feedback != 0;
-      if (!feedback)
       {
          BufferVertex vertex;
          PrimitiveInfo info;
@@ -9894,7 +10005,33 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
        * observed runtime pipelines are already below one 60 Hz frame. */
       if (feedback)
       {
+         unsigned mode;
          unsigned scaled_read;
+         /* A pass made feedback-compatible by one primitive can still contain
+          * ordinary untextured draws. They use the flat program and normal
+          * fixed-function blend states, but the compatible render pass is
+          * distinct from the non-feedback pass. Exercise those combinations
+          * explicitly; batching them only with masked draws selects the
+          * feedback program instead and misses the runtime pipelines. */
+         for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
+         {
+            SemiTransparentState state;
+            BufferVertex vertex;
+            unsigned i;
+            memset(&state, 0, sizeof(state));
+            state.scissor_index = -1;
+            state.semi_transparent = modes[mode];
+            SemiTransparentStateVec_push(
+                  &self->queue.semi_transparent_state, &state);
+
+            memset(&vertex, 0, sizeof(vertex));
+            vertex.z = 0.5f;
+            vertex.w = 1.0f;
+            for (i = 0; i < 3; i++)
+               BufferVertexVec_push(&self->queue.semi_transparent, &vertex);
+            variants++;
+         }
+
          for (scaled_read = 0; scaled_read < 2; scaled_read++)
          {
             unsigned shift;
@@ -9936,8 +10073,80 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
       renderer_flush_render_pass(self, &rect);
    }
 
-   complete = vulkan_precompile_jobs_finish(self->device, &jobs, &workers,
-         &compile_elapsed_usec);
+   /* Normal gameplay can switch among 32-bit, PlayStation 15-bit dither and
+    * 24-bit/MDEC scanout without changing core options. Their quad pipelines
+    * use distinct compatible render passes and are outside the primitive
+    * render pass above. Capture them before the first frame. */
+   renderer_precompile_quad_pipeline(self,
+         self->pipelines.scaled_quad_blitter,
+         VK_FORMAT_R8G8B8A8_UNORM);
+   renderer_precompile_quad_pipeline(self,
+         self->pipelines.scaled_dither_quad_blitter,
+         VK_FORMAT_A1R5G5B5_UNORM_PACK16);
+   renderer_precompile_quad_pipeline(self,
+         self->pipelines.unscaled_dither_quad_blitter,
+         VK_FORMAT_A1R5G5B5_UNORM_PACK16);
+   renderer_precompile_quad_pipeline(self,
+         self->pipelines.bpp24_quad_blitter,
+         VK_FORMAT_R8G8B8A8_UNORM);
+   renderer_precompile_quad_pipeline(self,
+         self->pipelines.bpp24_yuv_quad_blitter,
+         VK_FORMAT_R8G8B8A8_UNORM);
+
+   /* Compute programs have one pipeline apiece for the active renderer
+    * configuration, except the downscale resolve whose nearest and linear
+    * filter modes are both reachable. Queue the renderer's ordinary VRAM,
+    * resolve and blit paths; unused specialization slots are masked by each
+    * program's reflected layout, and duplicate program/hash pairs collapse in
+    * the job queue. */
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.resolve_to_scaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.resolve_to_unscaled, FilterMode_NearestNeighbor);
+   if (super_sampling && self->scaling != 1)
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.resolve_to_unscaled, 1u);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.copy_to_vram, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.copy_to_vram_masked, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_scaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_scaled_masked, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_scaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_scaled_masked,
+         FilterMode_NearestNeighbor);
+   if (self->msaa > 1)
+   {
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_msaa_cached_scaled,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_msaa_cached_scaled_masked,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
+               ? self->pipelines.msaa_resolve_weighted
+               : self->pipelines.msaa_resolve_weighted_sdr,
+            FilterMode_NearestNeighbor);
+   }
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_unscaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_unscaled_masked,
+         FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_unscaled,
+         FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_unscaled_masked,
+         FilterMode_NearestNeighbor);
+
+   complete = vulkan_precompile_jobs_finish(self->device, &jobs,
+         &graphics_jobs, &compute_jobs, &workers, &compile_elapsed_usec);
    vulkan_pipeline_diagnostic.precompiling = false;
 
    /* Android may terminate the process without a clean libretro teardown.
@@ -9955,8 +10164,9 @@ static void renderer_precompile_primitive_shaders(Renderer *self)
                driver_cache,
                &driver_cache_bytes, NULL)
          : VK_ERROR_INITIALIZATION_FAILED;
-      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
-         variants, jobs, workers, complete ? 1u : 0u,
+      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u graphics_jobs=%u compute_jobs=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
+         variants, jobs, graphics_jobs, compute_jobs, workers,
+         complete ? 1u : 0u,
          (long long)compile_elapsed_usec,
          (long long)(cpu_features_get_time_usec() - start_usec),
          (int)cache_result,
@@ -10057,9 +10267,12 @@ static void renderer_dispatch(Renderer *self,
 
    renderer_hd_texture_uniforms(self, hd_texture);
    commandbuffer_set_scissor(cbh_get(&self->cmd), scissor < 0 ? &self->queue.default_scissor : Rect2DVec_at(&self->queue.scissors, scissor));
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift, shift);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV, (int)offset_uv);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
+         textured && filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
+         textured ? shift : 0);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
+         textured && offset_uv ? 1 : 0);
    renderer_dispatch_set_scaled_read_texture(self, scaled_read, textured);
    memcpy(vert, BufferVertexVec_data((struct BufferVertexVec *)vertices) + 3 * (*PrimitiveInfoVec_front(scissors)).triangle_index, 3 * sizeof(BufferVertex));
    vert += 3;
@@ -10085,7 +10298,8 @@ static void renderer_dispatch(Renderer *self,
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).filtering != filtering) {
             filtering = (*PrimitiveInfoVec_at(scissors, i)).filtering;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
+                  textured && filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).scaled_read != scaled_read) {
             scaled_read = (*PrimitiveInfoVec_at(scissors, i)).scaled_read;
@@ -10093,11 +10307,13 @@ static void renderer_dispatch(Renderer *self,
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).shift != shift) {
             shift = (*PrimitiveInfoVec_at(scissors, i)).shift;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift, shift);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
+                  textured ? shift : 0);
          }
          if ((*PrimitiveInfoVec_at(scissors, i)).offset_uv != offset_uv) {
             offset_uv = (*PrimitiveInfoVec_at(scissors, i)).offset_uv;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV, (int)offset_uv);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
+                  textured && offset_uv ? 1 : 0);
          }
       }
       memcpy(vert, BufferVertexVec_data((struct BufferVertexVec *)vertices) + 3 * (*PrimitiveInfoVec_at(scissors, i)).triangle_index, 3 * sizeof(BufferVertex));
@@ -10864,10 +11080,17 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    renderer_hd_texture_uniforms(self, state->hd_texture_index);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, state->filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
+         state->textured && state->filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift, state->shift);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV, (int)state->offset_uv);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
+         state->textured ? state->shift : 0);
+   /* The flat vertex variant retains the shared OFFSET_UV specialization
+    * declaration even though its TEXTURED block is compiled out. Do not let
+    * the preceding textured primitive split otherwise-identical flat
+    * pipelines on a value which cannot affect their output. */
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
+         state->textured && state->offset_uv ? 1 : 0);
    /* Off the 16F target the UNORM write clamps anyway, so hot would only
     * split pipelines for an identical result; force it off there. This is
     * also what makes primitive.frag's hot path SDR-safe by construction. */
@@ -14536,6 +14759,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
       }
 
+      if (vulkan_pipeline_diagnostic.precompiling)
+      {
+         vulkan_precompile_queue_compute_pipeline(self, hash, &info);
+         return VK_NULL_HANDLE;
+      }
 
       start_usec = cpu_features_get_time_usec();
       res = vkCreateComputePipelines(device_get_device(self->device),
@@ -14739,9 +14967,102 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return true;
    }
 
+   static void vulkan_precompile_compute_job_fix_pointers(
+         struct VulkanComputePrecompileJob *job)
+   {
+      if (job->specialization.mapEntryCount)
+      {
+         job->specialization.pMapEntries = job->specialization_entries;
+         job->specialization.pData = job->specialization_data;
+         job->stage.pSpecializationInfo = &job->specialization;
+      }
+      else
+         job->stage.pSpecializationInfo = NULL;
+      job->pipe.stage = job->stage;
+   }
+
+   static bool vulkan_precompile_queue_compute_pipeline(
+         struct CommandBuffer *self,
+         Hash hash,
+         const VkComputePipelineCreateInfo *pipe)
+   {
+      struct VulkanComputePrecompileJobVec *jobs =
+         &vulkan_compute_precompile_jobs;
+      struct VulkanComputePrecompileJob *job;
+      const VkSpecializationInfo *source = pipe->stage.pSpecializationInfo;
+      unsigned i;
+
+      for (i = 0; i < jobs->count; i++)
+      {
+         if (jobs->items[i].program == self->current_program &&
+             jobs->items[i].hash == hash)
+            return true;
+      }
+
+      if (jobs->count == jobs->capacity)
+      {
+         unsigned new_capacity = jobs->capacity ? jobs->capacity * 2u : 16u;
+         struct VulkanComputePrecompileJob *new_items =
+            (struct VulkanComputePrecompileJob *)realloc(jobs->items,
+               (size_t)new_capacity * sizeof(*new_items));
+         if (!new_items)
+         {
+            if (!jobs->capture_failed)
+               LOGE("[Vulkan shader precompilation] could not allocate compute pipeline job storage\n");
+            jobs->capture_failed = true;
+            return false;
+         }
+         jobs->items = new_items;
+         jobs->capacity = new_capacity;
+      }
+
+      if (pipe->pNext || pipe->stage.pNext || !pipe->stage.pName ||
+          (source &&
+             (source->mapEntryCount > VULKAN_NUM_SPEC_CONSTANTS ||
+              source->dataSize > sizeof(job->specialization_data) ||
+              (source->mapEntryCount && !source->pMapEntries) ||
+              (source->dataSize && !source->pData))))
+      {
+         LOGE("[Vulkan shader precompilation] unsupported compute pipeline description; precompilation is incomplete\n");
+         jobs->capture_failed = true;
+         return false;
+      }
+
+      job = &jobs->items[jobs->count++];
+      memset(job, 0, sizeof(*job));
+      job->program = self->current_program;
+      job->hash = hash;
+      job->pipe = *pipe;
+      job->stage = pipe->stage;
+      if (source)
+      {
+         job->specialization = *source;
+         if (source->mapEntryCount)
+            memcpy(job->specialization_entries, source->pMapEntries,
+                  source->mapEntryCount *
+                     sizeof(job->specialization_entries[0]));
+         if (source->dataSize)
+            memcpy(job->specialization_data, source->pData,
+                  source->dataSize);
+      }
+
+      job->pipeline = VK_NULL_HANDLE;
+      job->result = VK_NOT_READY;
+      job->program_key = self->current_program->intrusive_node.key;
+      job->spec_mask =
+         pipeline_layout_get_resource_layout(self->current_layout)->
+            combined_spec_constant_mask &
+         self->static_state.state.spec_constant_mask;
+      memcpy(job->spec_constants,
+            self->potential_static_state.spec_constants,
+            sizeof(job->spec_constants));
+      return true;
+   }
+
    struct VulkanPrecompileWorker
    {
       Device *device;
+      VkPipelineCache pipeline_cache;
       unsigned first;
       unsigned stride;
    };
@@ -14750,20 +15071,37 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       struct VulkanPrecompileWorker *worker =
          (struct VulkanPrecompileWorker *)userdata;
+      unsigned graphics_count = vulkan_graphics_precompile_jobs.count;
+      unsigned total_count = graphics_count +
+         vulkan_compute_precompile_jobs.count;
       unsigned i;
 
       for (i = worker->first;
-           i < vulkan_graphics_precompile_jobs.count;
+           i < total_count;
            i += worker->stride)
       {
-         struct VulkanGraphicsPrecompileJob *job =
-            &vulkan_graphics_precompile_jobs.items[i];
-         retro_time_t start_usec = cpu_features_get_time_usec();
-         job->result = vkCreateGraphicsPipelines(
-               device_get_device(worker->device),
-               device_get_pipeline_cache(worker->device),
-               1, &job->pipe, NULL, &job->pipeline);
-         job->elapsed_usec = cpu_features_get_time_usec() - start_usec;
+         if (i < graphics_count)
+         {
+            struct VulkanGraphicsPrecompileJob *job =
+               &vulkan_graphics_precompile_jobs.items[i];
+            retro_time_t start_usec = cpu_features_get_time_usec();
+            job->result = vkCreateGraphicsPipelines(
+                  device_get_device(worker->device),
+                  worker->pipeline_cache,
+                  1, &job->pipe, NULL, &job->pipeline);
+            job->elapsed_usec = cpu_features_get_time_usec() - start_usec;
+         }
+         else
+         {
+            struct VulkanComputePrecompileJob *job =
+               &vulkan_compute_precompile_jobs.items[i - graphics_count];
+            retro_time_t start_usec = cpu_features_get_time_usec();
+            job->result = vkCreateComputePipelines(
+                  device_get_device(worker->device),
+                  worker->pipeline_cache,
+                  1, &job->pipe, NULL, &job->pipeline);
+            job->elapsed_usec = cpu_features_get_time_usec() - start_usec;
+         }
       }
    }
 
@@ -14772,49 +15110,143 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       free(vulkan_graphics_precompile_jobs.items);
       memset(&vulkan_graphics_precompile_jobs, 0,
             sizeof(vulkan_graphics_precompile_jobs));
+      free(vulkan_compute_precompile_jobs.items);
+      memset(&vulkan_compute_precompile_jobs, 0,
+            sizeof(vulkan_compute_precompile_jobs));
    }
 
    static bool vulkan_precompile_jobs_finish(Device *device,
-         unsigned *job_count, unsigned *worker_count,
+         unsigned *job_count, unsigned *graphics_job_count,
+         unsigned *compute_job_count, unsigned *worker_count,
          retro_time_t *compile_elapsed_usec)
    {
       struct VulkanGraphicsPrecompileJobVec *jobs =
          &vulkan_graphics_precompile_jobs;
+      struct VulkanComputePrecompileJobVec *compute_jobs =
+         &vulkan_compute_precompile_jobs;
       struct VulkanPrecompileWorker worker[2];
       sthread_t *thread = NULL;
+      VkPipelineCache private_cache[2] = {
+         VK_NULL_HANDLE, VK_NULL_HANDLE
+      };
+      void *initial_cache_data = NULL;
+      size_t initial_cache_size = 0;
       retro_time_t start_usec;
       bool complete;
       unsigned workers = 1;
+      unsigned total_count;
       unsigned i;
 
-      *job_count = jobs->count;
+      total_count = jobs->count + compute_jobs->count;
+      *job_count = total_count;
+      *graphics_job_count = jobs->count;
+      *compute_job_count = compute_jobs->count;
       *worker_count = 0;
       *compile_elapsed_usec = 0;
-      complete = jobs->count != 0 && !jobs->capture_failed;
+      complete = total_count != 0 && !jobs->capture_failed &&
+         !compute_jobs->capture_failed;
 
       for (i = 0; i < jobs->count; i++)
          vulkan_precompile_job_fix_pointers(&jobs->items[i]);
+      for (i = 0; i < compute_jobs->count; i++)
+         vulkan_precompile_compute_job_fix_pointers(
+               &compute_jobs->items[i]);
 
       start_usec = cpu_features_get_time_usec();
 #if defined(ANDROID)
-      if (jobs->count > 1)
+      if (total_count > 1)
       {
-         worker[1].device = device;
-         worker[1].first = 1;
-         worker[1].stride = 2;
-         thread = sthread_create(vulkan_precompile_worker, &worker[1]);
-         if (thread)
-            workers = 2;
+         VkPipelineCache device_cache = device_get_pipeline_cache(device);
+         VkResult cache_result = vkGetPipelineCacheData(
+               device_get_device(device), device_cache,
+               &initial_cache_size, NULL);
+         VkPipelineCacheCreateInfo cache_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
+         };
+
+         if (cache_result == VK_SUCCESS && initial_cache_size)
+         {
+            initial_cache_data = malloc(initial_cache_size);
+            if (initial_cache_data)
+               cache_result = vkGetPipelineCacheData(
+                     device_get_device(device), device_cache,
+                     &initial_cache_size, initial_cache_data);
+            else
+               cache_result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         }
+
+         if (cache_result == VK_SUCCESS)
+         {
+            unsigned cache_index;
+            cache_info.initialDataSize = initial_cache_size;
+            cache_info.pInitialData = initial_cache_data;
+            for (cache_index = 0; cache_index < 2; cache_index++)
+            {
+               cache_result = vkCreatePipelineCache(
+                     device_get_device(device), &cache_info, NULL,
+                     &private_cache[cache_index]);
+               if (cache_result != VK_SUCCESS)
+                  break;
+            }
+         }
+
+         if (cache_result == VK_SUCCESS)
+         {
+            worker[1].device = device;
+            worker[1].pipeline_cache = private_cache[1];
+            worker[1].first = 1;
+            worker[1].stride = 2;
+            thread = sthread_create(vulkan_precompile_worker, &worker[1]);
+            if (thread)
+               workers = 2;
+         }
+
+         if (workers != 2)
+         {
+            unsigned cache_index;
+            LOGI("[Vulkan shader precompilation] private worker caches unavailable; using one worker\n");
+            for (cache_index = 0; cache_index < 2; cache_index++)
+            {
+               if (private_cache[cache_index] != VK_NULL_HANDLE)
+               {
+                  vkDestroyPipelineCache(device_get_device(device),
+                        private_cache[cache_index], NULL);
+                  private_cache[cache_index] = VK_NULL_HANDLE;
+               }
+            }
+         }
       }
 #endif
       worker[0].device = device;
+      worker[0].pipeline_cache = workers == 2
+         ? private_cache[0] : device_get_pipeline_cache(device);
       worker[0].first = 0;
       worker[0].stride = workers;
       vulkan_precompile_worker(&worker[0]);
       if (thread)
          sthread_join(thread);
+
+#if defined(ANDROID)
+      if (workers == 2)
+      {
+         VkResult merge_result = vkMergePipelineCaches(
+               device_get_device(device), device_get_pipeline_cache(device),
+               2, private_cache);
+         unsigned cache_index;
+         if (merge_result != VK_SUCCESS)
+         {
+            LOGE("[Vulkan shader precompilation] worker cache merge failed result=%d\n",
+                  (int)merge_result);
+            complete = false;
+         }
+         for (cache_index = 0; cache_index < 2; cache_index++)
+            vkDestroyPipelineCache(device_get_device(device),
+                  private_cache[cache_index], NULL);
+      }
+#endif
+      free(initial_cache_data);
       *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
-      *worker_count = jobs->count ? workers : 0;
+      *worker_count = total_count ? workers : 0;
 
       for (i = 0; i < jobs->count; i++)
       {
@@ -14861,8 +15293,52 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             complete = false;
       }
 
+      for (i = 0; i < compute_jobs->count; i++)
+      {
+         struct VulkanComputePrecompileJob *job = &compute_jobs->items[i];
+         IntrusivePODWrapperPipeline *entry;
+         LOGI("[Vulkan pipeline diagnostic] compute_pipeline cache=miss program=%016llx pipeline=%016llx result=%d elapsed_us=%lld spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+               (unsigned long long)job->program_key,
+               (unsigned long long)job->hash,
+               (int)job->result,
+               (long long)job->elapsed_usec,
+               job->spec_mask,
+               job->spec_constants[0], job->spec_constants[1],
+               job->spec_constants[2], job->spec_constants[3],
+               job->spec_constants[4], job->spec_constants[5],
+               job->spec_constants[6], job->spec_constants[7],
+               job->spec_constants[8], job->spec_constants[9]);
+
+         if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
+         {
+            LOGE("[Vulkan shader precompilation] compute pipeline creation failed result=%d\n",
+                  (int)job->result);
+            if (job->pipeline != VK_NULL_HANDLE)
+               vkDestroyPipeline(device_get_device(device), job->pipeline,
+                     NULL);
+            complete = false;
+            continue;
+         }
+
+         entry = program_find_pipeline(job->program, job->hash);
+         if (entry == NULL)
+         {
+            program_add_pipeline(job->program, job->hash, job->pipeline);
+            entry = program_find_pipeline(job->program, job->hash);
+         }
+         else
+            vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
+
+         if (entry != NULL)
+            entry->diagnostic_precompiled = true;
+         else
+            complete = false;
+      }
+
       free(jobs->items);
       memset(jobs, 0, sizeof(*jobs));
+      free(compute_jobs->items);
+      memset(compute_jobs, 0, sizeof(*compute_jobs));
       return complete;
    }
 
@@ -15917,6 +16393,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(self->is_compute);
+      if (vulkan_pipeline_diagnostic.precompiling)
+      {
+         /* As with synthetic draws, capture the exact runtime pipeline but do
+          * not bind descriptors or record a dispatch into the live buffer. */
+         commandbuffer_flush_compute_pipeline(self);
+         return;
+      }
       commandbuffer_flush_compute_state(self);
       vkCmdDispatch(self->cmd, groups_x, groups_y, groups_z);
    }
@@ -19981,7 +20464,6 @@ static bool scaled_uv_offset;
 static int filter_exclude_sprites;
 static int filter_exclude_2d_polygons;
 static bool adaptive_smoothing;
-static bool super_sampling;
 static unsigned msaa = 1;
 static bool mdec_yuv;
 /*
