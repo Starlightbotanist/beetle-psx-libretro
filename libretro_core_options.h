@@ -341,37 +341,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "disabled"
    },
-#if defined(ANDROID)
-   {
-      BEETLE_OPT(vulkan_shader_precompilation_workers),
-      "Vulkan Shader Precompilation Workers",
-      NULL,
-      "Select the number of Android worker threads used for Vulkan shader precompilation. Higher values can reduce cold-start time but may increase temporary memory use and CPU contention. Only used when 'Vulkan Shader Precompilation' is enabled. Restart required.",
-      NULL,
-      "video",
-      {
-         { "4", NULL },
-         { "6", NULL },
-         { "8", NULL },
-         { NULL, NULL },
-      },
-      "4"
-   },
-   {
-      BEETLE_OPT(vulkan_shader_precompilation_cache_mode),
-      "Vulkan Shader Precompilation Cache Mode",
-      NULL,
-      "Select how Android precompilation workers access the Vulkan driver cache. 'Private' gives each worker an independent cache and merges them after compilation. 'Shared (Experimental)' lets the Vulkan driver synchronize one shared cache, which may improve reuse or reduce parallelism depending on the driver. Only used when 'Vulkan Shader Precompilation' is enabled. Restart required.",
-      NULL,
-      "video",
-      {
-         { "private", "Private" },
-         { "shared",  "Shared (Experimental)" },
-         { NULL, NULL },
-      },
-      "private"
-   },
-#endif
 #endif
    {
       BEETLE_OPT(renderer_software_fb),

@@ -156,7 +156,6 @@ extern PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 extern PFN_vkGetDeviceQueue vkGetDeviceQueue;
 extern PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
 extern PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
-extern PFN_vkMergePipelineCaches vkMergePipelineCaches;
 extern PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 extern PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 extern PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -305,7 +304,6 @@ static void volkGenLoadDevice(void* context,
    vkGetDeviceQueue = (PFN_vkGetDeviceQueue)load(context, "vkGetDeviceQueue");
    vkGetImageMemoryRequirements = (PFN_vkGetImageMemoryRequirements)load(context, "vkGetImageMemoryRequirements");
    vkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)load(context, "vkGetPipelineCacheData");
-   vkMergePipelineCaches = (PFN_vkMergePipelineCaches)load(context, "vkMergePipelineCaches");
    vkInvalidateMappedMemoryRanges = (PFN_vkInvalidateMappedMemoryRanges)load(context, "vkInvalidateMappedMemoryRanges");
    vkMapMemory = (PFN_vkMapMemory)load(context, "vkMapMemory");
    vkQueueSubmit = (PFN_vkQueueSubmit)load(context, "vkQueueSubmit");
@@ -413,7 +411,6 @@ PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 PFN_vkGetDeviceQueue vkGetDeviceQueue;
 PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
 PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
-PFN_vkMergePipelineCaches vkMergePipelineCaches;
 PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -3423,10 +3420,6 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
 
    static struct VulkanPipelineDiagnosticState vulkan_pipeline_diagnostic;
    static bool vulkan_shader_precompilation;
-#if defined(ANDROID)
-   static unsigned vulkan_shader_precompilation_workers = 4;
-   static bool vulkan_shader_precompilation_shared_cache;
-#endif
    static bool super_sampling;
    /* Core options needed while the renderer is being constructed. Keep these
     * declarations above renderer_init: precompilation runs before the ordinary
@@ -15543,24 +15536,19 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          &vulkan_graphics_precompile_jobs;
       struct VulkanComputePrecompileJobVec *compute_jobs =
          &vulkan_compute_precompile_jobs;
-      enum { VulkanPrecompileMaxWorkers = 8 };
+      enum { VulkanPrecompileMaxWorkers = 4 };
       struct VulkanPrecompileWorker worker[VulkanPrecompileMaxWorkers];
       struct VulkanPrecompileQueue queue;
       sthread_t *threads[VulkanPrecompileMaxWorkers - 1];
-      VkPipelineCache private_cache[VulkanPrecompileMaxWorkers];
-      void *initial_cache_data = NULL;
-      size_t initial_cache_size = 0;
       retro_time_t start_usec;
       bool complete;
       unsigned workers = 1;
-      unsigned private_cache_count = 0;
       unsigned total_count;
       unsigned i;
 
       memset(worker, 0, sizeof(worker));
       memset(&queue, 0, sizeof(queue));
       memset(threads, 0, sizeof(threads));
-      memset(private_cache, 0, sizeof(private_cache));
 
       total_count = jobs->count + compute_jobs->count;
       *job_count = total_count;
@@ -15581,68 +15569,20 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #if defined(ANDROID)
       if (total_count > 1)
       {
-         unsigned available_workers;
          unsigned available_cores = cpu_features_get_core_amount();
-         unsigned desired_workers = vulkan_shader_precompilation_workers;
+         unsigned desired_workers = available_cores;
          VkPipelineCache device_cache = device_get_pipeline_cache(device);
-         VkResult cache_result = VK_SUCCESS;
 
-         if (!desired_workers ||
-             desired_workers > VulkanPrecompileMaxWorkers)
+         if (desired_workers > VulkanPrecompileMaxWorkers)
             desired_workers = VulkanPrecompileMaxWorkers;
-         if (desired_workers > available_cores)
-            desired_workers = available_cores;
          if (desired_workers > total_count)
             desired_workers = total_count;
 
          LOGI("[Vulkan shader precompilation pool] requested_workers=%u available_cores=%u selected_workers=%u cache_mode=%s\n",
-               vulkan_shader_precompilation_workers, available_cores,
-               desired_workers,
-               vulkan_shader_precompilation_shared_cache
-                  ? "shared" : "private");
+               VulkanPrecompileMaxWorkers, available_cores,
+               desired_workers, "shared");
 
-         available_workers = desired_workers;
-         if (!vulkan_shader_precompilation_shared_cache)
-         {
-            VkPipelineCacheCreateInfo cache_info = {
-               VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
-            };
-            cache_result = vkGetPipelineCacheData(
-                  device_get_device(device), device_cache,
-                  &initial_cache_size, NULL);
-
-            if (cache_result == VK_SUCCESS && initial_cache_size)
-            {
-               initial_cache_data = malloc(initial_cache_size);
-               if (initial_cache_data)
-                  cache_result = vkGetPipelineCacheData(
-                        device_get_device(device), device_cache,
-                        &initial_cache_size, initial_cache_data);
-               else
-                  cache_result = VK_ERROR_OUT_OF_HOST_MEMORY;
-            }
-
-            if (cache_result == VK_SUCCESS)
-            {
-               unsigned cache_index;
-               cache_info.initialDataSize = initial_cache_size;
-               cache_info.pInitialData = initial_cache_data;
-               for (cache_index = 0;
-                    cache_index < desired_workers;
-                    cache_index++)
-               {
-                  cache_result = vkCreatePipelineCache(
-                        device_get_device(device), &cache_info, NULL,
-                        &private_cache[cache_index]);
-                  if (cache_result != VK_SUCCESS)
-                     break;
-                  private_cache_count++;
-               }
-            }
-            available_workers = private_cache_count;
-         }
-
-         if (available_workers >= 2 && device_cache != VK_NULL_HANDLE)
+         if (desired_workers >= 2)
          {
             queue.lock = slock_new();
             if (queue.lock)
@@ -15651,13 +15591,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                queue.graphics_jobs = jobs->count;
                queue.total_jobs = total_count;
                for (worker_index = 1;
-                    worker_index < available_workers;
+                    worker_index < desired_workers;
                     worker_index++)
                {
                   worker[worker_index].device = device;
-                  worker[worker_index].pipeline_cache =
-                     vulkan_shader_precompilation_shared_cache
-                        ? device_cache : private_cache[worker_index];
+                  worker[worker_index].pipeline_cache = device_cache;
                   worker[worker_index].queue = &queue;
                   worker[worker_index].index = worker_index;
                   threads[worker_index - 1] = sthread_create(
@@ -15672,27 +15610,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
          if (workers == 1)
          {
-            unsigned cache_index;
-            LOGI("[Vulkan shader precompilation] %s worker pool unavailable; using one worker\n",
-                  vulkan_shader_precompilation_shared_cache
-                     ? "shared" : "private");
+            LOGI("[Vulkan shader precompilation] shared worker pool unavailable; using one worker\n");
             if (queue.lock)
             {
                slock_free(queue.lock);
                queue.lock = NULL;
             }
-            for (cache_index = 0;
-                 cache_index < private_cache_count;
-                 cache_index++)
-            {
-               if (private_cache[cache_index] != VK_NULL_HANDLE)
-               {
-                  vkDestroyPipelineCache(device_get_device(device),
-                        private_cache[cache_index], NULL);
-                  private_cache[cache_index] = VK_NULL_HANDLE;
-               }
-            }
-            private_cache_count = 0;
          }
       }
 #endif
@@ -15703,39 +15626,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
       worker[0].device = device;
       worker[0].pipeline_cache = device_get_pipeline_cache(device);
-#if defined(ANDROID)
-      if (workers > 1 && !vulkan_shader_precompilation_shared_cache)
-         worker[0].pipeline_cache = private_cache[0];
-#endif
       worker[0].queue = &queue;
       vulkan_precompile_worker(&worker[0]);
       for (i = 1; i < workers; i++)
          sthread_join(threads[i - 1]);
 
-#if defined(ANDROID)
-      if (workers > 1 && !vulkan_shader_precompilation_shared_cache)
-      {
-         VkResult merge_result = vkMergePipelineCaches(
-               device_get_device(device), device_get_pipeline_cache(device),
-               workers, private_cache);
-         unsigned cache_index;
-         if (merge_result != VK_SUCCESS)
-         {
-            LOGE("[Vulkan shader precompilation] worker cache merge failed result=%d\n",
-                  (int)merge_result);
-            complete = false;
-         }
-         for (cache_index = 0;
-              cache_index < private_cache_count;
-              cache_index++)
-            if (private_cache[cache_index] != VK_NULL_HANDLE)
-               vkDestroyPipelineCache(device_get_device(device),
-                     private_cache[cache_index], NULL);
-      }
-#endif
       if (queue.lock)
          slock_free(queue.lock);
-      free(initial_cache_data);
       *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
       *worker_count = total_count ? workers : 0;
 
@@ -21429,24 +21326,6 @@ void rhi_vulkan_refresh_variables(void)
    vulkan_shader_precompilation = false;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       vulkan_shader_precompilation = !strcmp(var.value, "enabled");
-
-#if defined(ANDROID)
-   var.key = BEETLE_OPT(vulkan_shader_precompilation_workers);
-   vulkan_shader_precompilation_workers = 4;
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      unsigned requested_workers = (unsigned)strtoul(var.value, NULL, 0);
-      if (requested_workers == 4 || requested_workers == 6 ||
-          requested_workers == 8)
-         vulkan_shader_precompilation_workers = requested_workers;
-   }
-
-   var.key = BEETLE_OPT(vulkan_shader_precompilation_cache_mode);
-   vulkan_shader_precompilation_shared_cache = false;
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-      vulkan_shader_precompilation_shared_cache =
-         !strcmp(var.value, "shared");
-#endif
 
    var.key = BEETLE_OPT(dither_mode);
    dither_mode = DITHER_NATIVE;
