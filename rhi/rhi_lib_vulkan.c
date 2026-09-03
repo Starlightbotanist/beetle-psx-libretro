@@ -17436,7 +17436,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       free(path_wide);
       return replaced;
 #elif defined(__unix__) || defined(__APPLE__)
-      return rename(temp_path, path) == 0;
+      /* The temporary is created through filestream, whose hybrid VFS uses
+       * the frontend fallback when Android scoped storage rejects a local
+       * operation. Publish through the same abstraction. Ordinary local
+       * paths still resolve to POSIX rename(), while sandboxed paths no
+       * longer strand a valid temporary beside the native lock file. */
+      return filestream_rename(temp_path, path) == 0;
 #else
       (void)temp_path;
       (void)path;
@@ -17887,7 +17892,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       file = filestream_open(temp_path, RETRO_VFS_FILE_ACCESS_WRITE,
             RETRO_VFS_FILE_ACCESS_HINT_SEQUENTIAL_BULK);
       if (!file)
+      {
+         LOGE("[Vulkan pipeline cache] could not open temporary cache location=%s\n",
+               location);
          goto done;
+      }
       file_size = VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + payload_size;
       written = filestream_write(file, file_data, (int64_t)file_size);
       close_result = filestream_close(file);
@@ -17897,6 +17906,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
        * such a temporary, and never delete the previous good destination. */
       if (written == (int64_t)file_size && close_result == 0)
          saved = device_pipeline_cache_replace(temp_path, path);
+      if (written != (int64_t)file_size || close_result != 0)
+         LOGE("[Vulkan pipeline cache] temporary write failed location=%s written=%lld expected=%llu close=%d\n",
+               location, (long long)written,
+               (unsigned long long)file_size, close_result);
+      else if (!saved)
+         LOGE("[Vulkan pipeline cache] temporary publish failed location=%s\n",
+               location);
       if (!saved)
          filestream_delete(temp_path);
       else

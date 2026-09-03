@@ -92,6 +92,7 @@ static char retro_save_directory[4096];
 static retro_time_t mock_time = 1000000;
 static retro_time_t snapshot_delay;
 static unsigned snapshot_queries, write_opens;
+static unsigned vfs_replace_attempts;
 static bool fail_write, fail_close, fail_replace, fail_read;
 static VkResult import_error, merge_error;
 
@@ -188,8 +189,9 @@ static int filestream_close(RFILE *file)
 
 static int filestream_delete(const char *path) { return remove(path); }
 
-static int test_rename(const char *old_path, const char *new_path)
+static int filestream_rename(const char *old_path, const char *new_path)
 {
+   vfs_replace_attempts++;
    return fail_replace ? -1 : rename(old_path, new_path);
 }
 
@@ -261,12 +263,10 @@ static VkResult vkGetPipelineCacheData(void *device, VkPipelineCache cache,
 }
 
 /* Exercise production code, including native file locking and replacement. */
-#define rename test_rename
 #ifdef _WIN32
 #define MoveFileExW test_move_file_ex
 #endif
 #include "persistence_under_test.h"
-#undef rename
 #ifdef _WIN32
 #undef MoveFileExW
 #endif
@@ -331,6 +331,9 @@ static void test_selection_and_updates(const char *tmp)
    device_pipeline_cache_set_file_name(&writer);
    writer.pipeline_cache->entries = 1;
    assert(device_pipeline_cache_write(&writer, retro_base_directory, "system"));
+#ifndef _WIN32
+   assert(vfs_replace_attempts == 1);
+#endif
    writer.pipeline_cache->entries = 2;
    assert(device_pipeline_cache_write(&writer, retro_save_directory, "save"));
    device_pipeline_cache_load(&first);
@@ -676,6 +679,6 @@ int main(int argc, char **argv)
 #ifdef _WIN32
    test_windows_native_paths(argv[1]);
 #endif
-   puts("Vulkan cache persistence: selection, merging, locking, fallback, write/close/rename/read failures, unchanged-data suppression, bounded quarantine, and size bounds passed.");
+   puts("Vulkan cache persistence: selection, merging, locking, VFS publication, fallback, write/close/rename/read failures, unchanged-data suppression, bounded quarantine, and size bounds passed.");
    return 0;
 }
