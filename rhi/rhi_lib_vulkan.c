@@ -77,6 +77,7 @@ extern int   psx_hdr_multipass;
  * (16F) scaled framebuffer, which is allocated before HDR negotiation
  * completes. Non-zero = a 30-bit/HDR format was requested. */
 extern int   psx_color_format;
+extern int   filter_mode;
 extern char retro_base_directory[4096];
 
 /* VOLK_GENERATE_PROTOTYPES_H */
@@ -3423,6 +3424,18 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
    static struct VulkanPipelineDiagnosticState vulkan_pipeline_diagnostic;
    static bool vulkan_shader_precompilation;
    static bool super_sampling;
+   /* Core options needed while the renderer is being constructed. Keep these
+    * declarations above renderer_init: precompilation runs before the ordinary
+    * per-frame setters copy them into Renderer. */
+   static bool scaled_uv_offset;
+   static bool adaptive_smoothing;
+   static bool mdec_yuv;
+   /* Mirrors enum dither_mode, whose defining GPU header is included after
+    * the folded renderer implementation. Zero-initialization is
+    * DITHER_NATIVE; 2 is DITHER_OFF. */
+   static int dither_mode;
+#define RHI_DITHER_OFF 2
+   static bool show_vram;
 
    /* Deep copy of one graphics-pipeline description. During shader
     * precompilation the normal renderer still produces each state through its
@@ -6076,6 +6089,108 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
 
          BufferHandle quad;
    };
+
+   /* Beetle's Vulkan program manifest. This is deliberately derived from the
+    * Renderer program slots above, not from another emulator or from a game
+    * trace. Adding a Program pointer to Renderer makes the size assertion
+    * fail until the program is classified here; the runtime uniqueness check
+    * catches duplicated or omitted offsets. */
+#define RENDERER_PIPELINE_MANIFEST(X) \
+   X(CopyToVram, copy_to_vram, Compute) \
+   X(CopyToVramMasked, copy_to_vram_masked, Compute) \
+   X(UnscaledQuadBlitter, unscaled_quad_blitter, Quad) \
+   X(ScaledQuadBlitter, scaled_quad_blitter, Quad) \
+   X(UnscaledDitherQuadBlitter, unscaled_dither_quad_blitter, Quad) \
+   X(ScaledDitherQuadBlitter, scaled_dither_quad_blitter, Quad) \
+   X(Bpp24QuadBlitter, bpp24_quad_blitter, Quad) \
+   X(Bpp24YuvQuadBlitter, bpp24_yuv_quad_blitter, Quad) \
+   X(HdrScaledQuadBlitter, hdr_scaled_quad_blitter, Quad) \
+   X(HdrUnscaledQuadBlitter, hdr_unscaled_quad_blitter, Quad) \
+   X(HdrBpp24QuadBlitter, hdr_bpp24_quad_blitter, Quad) \
+   X(HdrBpp24YuvQuadBlitter, hdr_bpp24_yuv_quad_blitter, Quad) \
+   X(ResolveToScaled, resolve_to_scaled, Compute) \
+   X(ResolveToUnscaled, resolve_to_unscaled, Compute) \
+   X(MsaaResolveWeighted, msaa_resolve_weighted, Compute) \
+   X(MsaaResolveWeightedSdr, msaa_resolve_weighted_sdr, Compute) \
+   X(BlitVramScaled, blit_vram_scaled, Compute) \
+   X(BlitVramScaledMasked, blit_vram_scaled_masked, Compute) \
+   X(BlitVramCachedScaled, blit_vram_cached_scaled, Compute) \
+   X(BlitVramCachedScaledMasked, blit_vram_cached_scaled_masked, Compute) \
+   X(BlitVramMsaaCachedScaled, blit_vram_msaa_cached_scaled, Compute) \
+   X(BlitVramMsaaCachedScaledMasked, blit_vram_msaa_cached_scaled_masked, Compute) \
+   X(BlitVramUnscaled, blit_vram_unscaled, Compute) \
+   X(BlitVramUnscaledMasked, blit_vram_unscaled_masked, Compute) \
+   X(BlitVramCachedUnscaled, blit_vram_cached_unscaled, Compute) \
+   X(BlitVramCachedUnscaledMasked, blit_vram_cached_unscaled_masked, Compute) \
+   X(Flat, flat, Primitive) \
+   X(FlatFloor, flat_floor, Primitive) \
+   X(TexturedScaled, textured_scaled, Primitive) \
+   X(TexturedUnscaled, textured_unscaled, Primitive) \
+   X(FlatMasked, flat_masked, Primitive) \
+   X(TexturedMaskedScaled, textured_masked_scaled, Primitive) \
+   X(TexturedMaskedUnscaled, textured_masked_unscaled, Primitive) \
+   X(MipmapResolve, mipmap_resolve, Quad) \
+   X(MipmapDitherResolve, mipmap_dither_resolve, Quad) \
+   X(HdrMipmapResolve, hdr_mipmap_resolve, Quad) \
+   X(AnalogDownsample, analog_downsample, Quad) \
+   X(AnalogEncode, analog_encode, Quad) \
+   X(AnalogEncodePal, analog_encode_pal, Quad) \
+   X(AnalogComb, analog_comb, Quad) \
+   X(AnalogCombPal, analog_comb_pal, Quad) \
+   X(AnalogDemod, analog_demod, Quad) \
+   X(AnalogDemodPal, analog_demod_pal, Quad) \
+   X(AnalogRgb, analog_rgb, Quad) \
+   X(AnalogRgbPal, analog_rgb_pal, Quad) \
+   X(AnalogNotch, analog_notch, Compute) \
+   X(AnalogNotchPal, analog_notch_pal, Compute) \
+   X(AnalogResolve, analog_resolve, Quad) \
+   X(AnalogResolveHdr, analog_resolve_hdr, Quad) \
+   X(MipmapEnergyFirst, mipmap_energy_first, Quad) \
+   X(MipmapEnergy, mipmap_energy, Quad) \
+   X(MipmapEnergyBlur, mipmap_energy_blur, Quad)
+
+   enum RendererPipelineManifestRole
+   {
+      RendererPipelineManifestRole_Compute,
+      RendererPipelineManifestRole_Quad,
+      RendererPipelineManifestRole_Primitive
+   };
+
+   enum RendererPipelineManifestId
+   {
+#define RENDERER_PIPELINE_MANIFEST_ENUM(id, field, role) \
+      RendererPipelineManifestId_##id,
+      RENDERER_PIPELINE_MANIFEST(RENDERER_PIPELINE_MANIFEST_ENUM)
+#undef RENDERER_PIPELINE_MANIFEST_ENUM
+      RendererPipelineManifestId_Count
+   };
+
+   struct RendererPipelineManifestEntry
+   {
+      const char *name;
+      size_t offset;
+      enum RendererPipelineManifestRole role;
+   };
+
+   static const struct RendererPipelineManifestEntry
+      renderer_pipeline_manifest[RendererPipelineManifestId_Count] = {
+#define RENDERER_PIPELINE_MANIFEST_ENTRY(id, field, role) \
+      { #field, offsetof(Renderer, pipelines.field), \
+        RendererPipelineManifestRole_##role },
+         RENDERER_PIPELINE_MANIFEST(RENDERER_PIPELINE_MANIFEST_ENTRY)
+#undef RENDERER_PIPELINE_MANIFEST_ENTRY
+      };
+
+   RHI_STATIC_ASSERT(
+         sizeof(((Renderer *)0)->pipelines) ==
+            RendererPipelineManifestId_Count * sizeof(Program *),
+         "Renderer pipeline manifest does not cover every program slot.");
+
+   static Program *renderer_pipeline_manifest_program(Renderer *self,
+         enum RendererPipelineManifestId id)
+   {
+      return *(Program **)((char *)self + renderer_pipeline_manifest[id].offset);
+   }
 
    /* SaveState lifecycle free functions (SaveState is a plain struct). vram is
     * an OwnedU32Buf managed through *_init / *_move / deinit; tracker_state is
@@ -9791,6 +9906,7 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 static void renderer_precompile_textured_batch_variant(
       BufferVertexVec *vertices,
       PrimitiveInfoVec *scissors,
+      bool filtering,
       bool scaled_read,
       unsigned shift,
       bool offset_uv)
@@ -9803,10 +9919,120 @@ static void renderer_precompile_textured_batch_variant(
    vertex.z = 0.5f;
    vertex.w = 1.0f;
    info = primitive_info_make(PrimitiveInfoVec_size(scissors), -1,
-         hd_handle_make_none(), false, scaled_read, shift, offset_uv);
+         hd_handle_make_none(), filtering, scaled_read, shift, offset_uv);
    for (i = 0; i < 3; i++)
       BufferVertexVec_push(vertices, &vertex);
    PrimitiveInfoVec_push(scissors, &info);
+}
+
+static void renderer_precompile_semi_transparent_variant(Renderer *self,
+      SemiTransparentMode mode,
+      bool textured,
+      bool masked,
+      bool filtering,
+      bool scaled_read,
+      unsigned shift,
+      bool offset_uv)
+{
+   SemiTransparentState state;
+   BufferVertex vertex;
+   unsigned i;
+
+   memset(&state, 0, sizeof(state));
+   state.scissor_index = -1;
+   state.semi_transparent = mode;
+   state.textured = textured;
+   state.masked = masked;
+   state.filtering = filtering;
+   state.scaled_read = scaled_read;
+   state.shift = shift;
+   state.offset_uv = offset_uv;
+   SemiTransparentStateVec_push(
+         &self->queue.semi_transparent_state, &state);
+
+   memset(&vertex, 0, sizeof(vertex));
+   vertex.z = 0.5f;
+   vertex.w = 1.0f;
+   for (i = 0; i < 3; i++)
+      BufferVertexVec_push(&self->queue.semi_transparent, &vertex);
+}
+
+static unsigned renderer_precompile_textured_batch_manifest(
+      Renderer *self,
+      BufferVertexVec *vertices,
+      PrimitiveInfoVec *scissors)
+{
+   unsigned variants = 0;
+   unsigned shift;
+   unsigned offset_count = self->scaled_uv_offset ? 2u : 1u;
+   unsigned offset_uv;
+
+   /* A scaled framebuffer read can only be a rendered direct-16-bit texture.
+    * Palette shifts and filtering are therefore impossible on this branch. */
+   for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+   {
+      renderer_precompile_textured_batch_variant(vertices, scissors,
+            false, true, 0, offset_uv != 0);
+      variants++;
+   }
+
+   /* Unscaled textures cover direct-16, 8-bit and 4-bit source depths. Each
+    * can use nearest sampling (including filter-exclusion cases), or the one
+    * configured primitive filter. */
+   for (shift = 0; shift < 3; shift++)
+   {
+      for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+      {
+         renderer_precompile_textured_batch_variant(vertices, scissors,
+               false, false, shift, offset_uv != 0);
+         variants++;
+         if (self->primitive_filter_mode != FilterMode_NearestNeighbor)
+         {
+            renderer_precompile_textured_batch_variant(vertices, scissors,
+                  true, false, shift, offset_uv != 0);
+            variants++;
+         }
+      }
+   }
+   return variants;
+}
+
+static unsigned renderer_precompile_semi_transparent_manifest(Renderer *self,
+      SemiTransparentMode mode,
+      bool masked)
+{
+   unsigned variants = 0;
+   unsigned shift;
+   unsigned offset_count = self->scaled_uv_offset ? 2u : 1u;
+   unsigned offset_uv;
+
+   renderer_precompile_semi_transparent_variant(self, mode,
+         false, masked, false, false, 0, false);
+   variants++;
+
+   for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+   {
+      renderer_precompile_semi_transparent_variant(self, mode,
+            true, masked, false, true, 0, offset_uv != 0);
+      variants++;
+   }
+
+   for (shift = 0; shift < 3; shift++)
+   {
+      for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+      {
+         renderer_precompile_semi_transparent_variant(self, mode,
+               true, masked, false, false, shift, offset_uv != 0);
+         variants++;
+         if (self->primitive_filter_mode != FilterMode_NearestNeighbor)
+         {
+            renderer_precompile_semi_transparent_variant(self, mode,
+                  true, masked, true, false, shift, offset_uv != 0);
+            variants++;
+         }
+      }
+   }
+   return variants;
 }
 
 static void renderer_precompile_quad_pipeline(Renderer *self,
@@ -9879,11 +10105,342 @@ static void renderer_precompile_compute_pipeline(Renderer *self,
    commandbuffer_dispatch(cmd, 1, 1, 1);
 }
 
+static bool renderer_precompile_manifest_program_is_active(Renderer *self,
+      enum RendererPipelineManifestId id)
+{
+   bool analog = psx_video_cable != RHI_CABLE_NONE;
+   bool hdr_quad = psx_hdr_active && !analog;
+   bool ssaa = super_sampling && self->scaling != 1;
+   bool adaptive = adaptive_smoothing && self->scaling != 1 && !ssaa;
+   bool dither = dither_mode != RHI_DITHER_OFF && !psx_hdr_active;
+   bool regular_scaled = !ssaa && !adaptive;
+   bool wide = self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+
+   switch (id)
+   {
+      case RendererPipelineManifestId_CopyToVram:
+      case RendererPipelineManifestId_CopyToVramMasked:
+      case RendererPipelineManifestId_ResolveToScaled:
+      case RendererPipelineManifestId_ResolveToUnscaled:
+      case RendererPipelineManifestId_BlitVramScaled:
+      case RendererPipelineManifestId_BlitVramScaledMasked:
+      case RendererPipelineManifestId_BlitVramUnscaled:
+      case RendererPipelineManifestId_BlitVramUnscaledMasked:
+      case RendererPipelineManifestId_BlitVramCachedUnscaled:
+      case RendererPipelineManifestId_BlitVramCachedUnscaledMasked:
+      case RendererPipelineManifestId_Flat:
+      case RendererPipelineManifestId_TexturedScaled:
+      case RendererPipelineManifestId_TexturedUnscaled:
+      case RendererPipelineManifestId_FlatMasked:
+      case RendererPipelineManifestId_TexturedMaskedScaled:
+      case RendererPipelineManifestId_TexturedMaskedUnscaled:
+         return true;
+
+      case RendererPipelineManifestId_BlitVramCachedScaled:
+      case RendererPipelineManifestId_BlitVramCachedScaledMasked:
+         return self->msaa == 1;
+      case RendererPipelineManifestId_BlitVramMsaaCachedScaled:
+      case RendererPipelineManifestId_BlitVramMsaaCachedScaledMasked:
+         return self->msaa > 1;
+      case RendererPipelineManifestId_MsaaResolveWeighted:
+         return self->msaa > 1 && wide;
+      case RendererPipelineManifestId_MsaaResolveWeightedSdr:
+         return self->msaa > 1 && !wide;
+
+      case RendererPipelineManifestId_FlatFloor:
+         return wide && !psx_hdr_multipass;
+
+      case RendererPipelineManifestId_ScaledQuadBlitter:
+         return (!hdr_quad && regular_scaled && !dither) ||
+            (show_vram && !psx_hdr_active);
+      case RendererPipelineManifestId_UnscaledQuadBlitter:
+         return !hdr_quad && ssaa && !dither;
+      case RendererPipelineManifestId_ScaledDitherQuadBlitter:
+         return !hdr_quad && regular_scaled && dither;
+      case RendererPipelineManifestId_UnscaledDitherQuadBlitter:
+         return !hdr_quad && ssaa && dither;
+      case RendererPipelineManifestId_Bpp24QuadBlitter:
+         return !hdr_quad && !mdec_yuv;
+      case RendererPipelineManifestId_Bpp24YuvQuadBlitter:
+         return !hdr_quad && mdec_yuv;
+      case RendererPipelineManifestId_HdrScaledQuadBlitter:
+         return hdr_quad && regular_scaled;
+      case RendererPipelineManifestId_HdrUnscaledQuadBlitter:
+         return hdr_quad && ssaa;
+      case RendererPipelineManifestId_HdrBpp24QuadBlitter:
+         return hdr_quad && !mdec_yuv;
+      case RendererPipelineManifestId_HdrBpp24YuvQuadBlitter:
+         return hdr_quad && mdec_yuv;
+      case RendererPipelineManifestId_MipmapResolve:
+         return !hdr_quad && adaptive && !dither;
+      case RendererPipelineManifestId_MipmapDitherResolve:
+         return !hdr_quad && adaptive && dither;
+      case RendererPipelineManifestId_HdrMipmapResolve:
+         return hdr_quad && adaptive;
+
+      case RendererPipelineManifestId_MipmapEnergyFirst:
+         return adaptive && trailing_zeroes(self->scaling) >= 1;
+      case RendererPipelineManifestId_MipmapEnergy:
+         return adaptive && trailing_zeroes(self->scaling) >= 2;
+      case RendererPipelineManifestId_MipmapEnergyBlur:
+         return adaptive;
+
+      case RendererPipelineManifestId_AnalogDownsample:
+         return analog && self->scaling != 1 && !ssaa;
+      case RendererPipelineManifestId_AnalogRgb:
+      case RendererPipelineManifestId_AnalogRgbPal:
+         return psx_video_cable == RHI_CABLE_RGB;
+      case RendererPipelineManifestId_AnalogEncode:
+      case RendererPipelineManifestId_AnalogEncodePal:
+      case RendererPipelineManifestId_AnalogComb:
+      case RendererPipelineManifestId_AnalogCombPal:
+      case RendererPipelineManifestId_AnalogDemod:
+      case RendererPipelineManifestId_AnalogDemodPal:
+      case RendererPipelineManifestId_AnalogNotch:
+      case RendererPipelineManifestId_AnalogNotchPal:
+         return analog && psx_video_cable != RHI_CABLE_RGB;
+      case RendererPipelineManifestId_AnalogResolve:
+         return analog && !psx_hdr_active;
+      case RendererPipelineManifestId_AnalogResolveHdr:
+         return analog && psx_hdr_active;
+
+      default:
+         return false;
+   }
+}
+
+static bool renderer_precompile_manifest_validate(Renderer *self,
+      unsigned *active_programs,
+      unsigned *missing_programs)
+{
+   bool complete = true;
+   unsigned active = 0;
+   unsigned missing = 0;
+   unsigned i;
+
+   for (i = 0; i < RendererPipelineManifestId_Count; i++)
+   {
+      Program *program;
+      bool found = false;
+      unsigned j;
+
+      for (j = i + 1; j < RendererPipelineManifestId_Count; j++)
+      {
+         if (renderer_pipeline_manifest[i].offset ==
+               renderer_pipeline_manifest[j].offset)
+         {
+            LOGE("[Vulkan shader precompilation manifest] duplicate slots program=%s other=%s\n",
+                  renderer_pipeline_manifest[i].name,
+                  renderer_pipeline_manifest[j].name);
+            complete = false;
+         }
+      }
+
+      if (!renderer_precompile_manifest_program_is_active(self,
+            (enum RendererPipelineManifestId)i))
+         continue;
+
+      active++;
+      program = renderer_pipeline_manifest_program(self,
+            (enum RendererPipelineManifestId)i);
+      if (!program)
+      {
+         LOGE("[Vulkan shader precompilation manifest] active program is unavailable program=%s role=%u\n",
+               renderer_pipeline_manifest[i].name,
+               (unsigned)renderer_pipeline_manifest[i].role);
+         missing++;
+         complete = false;
+         continue;
+      }
+
+      for (j = 0; j < vulkan_graphics_precompile_jobs.count; j++)
+         if (vulkan_graphics_precompile_jobs.items[j].program == program)
+         {
+            found = true;
+            break;
+         }
+      if (!found)
+         for (j = 0; j < vulkan_compute_precompile_jobs.count; j++)
+            if (vulkan_compute_precompile_jobs.items[j].program == program)
+            {
+               found = true;
+               break;
+            }
+
+      if (!found)
+      {
+         LOGE("[Vulkan shader precompilation manifest] no captured recipe program=%s role=%u\n",
+               renderer_pipeline_manifest[i].name,
+               (unsigned)renderer_pipeline_manifest[i].role);
+         missing++;
+         complete = false;
+      }
+   }
+
+   *active_programs = active;
+   *missing_programs = missing;
+   return complete;
+}
+
+static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self)
+{
+   bool analog = psx_video_cable != RHI_CABLE_NONE;
+   bool hdr_quad = psx_hdr_active && !analog;
+   bool ssaa = super_sampling && self->scaling != 1;
+   bool adaptive = adaptive_smoothing && self->scaling != 1 && !ssaa;
+   bool dither = dither_mode != RHI_DITHER_OFF && !psx_hdr_active;
+   VkFormat hdr_format = VK_FORMAT_UNDEFINED;
+   VkFormat scanout_format;
+   Program *program;
+
+   if (psx_hdr_active)
+      hdr_format = renderer_hdr_scanout_format(self);
+   scanout_format = analog ? VK_FORMAT_R16G16B16A16_SFLOAT
+      : hdr_quad ? hdr_format
+      : dither ? VK_FORMAT_A1R5G5B5_UNORM_PACK16
+      : VK_FORMAT_R8G8B8A8_UNORM;
+
+   if (adaptive)
+      program = hdr_quad ? self->pipelines.hdr_mipmap_resolve
+         : dither ? self->pipelines.mipmap_dither_resolve
+         : self->pipelines.mipmap_resolve;
+   else if (ssaa)
+      program = hdr_quad ? self->pipelines.hdr_unscaled_quad_blitter
+         : dither ? self->pipelines.unscaled_dither_quad_blitter
+         : self->pipelines.unscaled_quad_blitter;
+   else
+      program = hdr_quad ? self->pipelines.hdr_scaled_quad_blitter
+         : dither ? self->pipelines.scaled_dither_quad_blitter
+         : self->pipelines.scaled_quad_blitter;
+   renderer_precompile_quad_pipeline(self, program, scanout_format);
+
+   program = hdr_quad
+      ? (mdec_yuv ? self->pipelines.hdr_bpp24_yuv_quad_blitter
+                  : self->pipelines.hdr_bpp24_quad_blitter)
+      : (mdec_yuv ? self->pipelines.bpp24_yuv_quad_blitter
+                  : self->pipelines.bpp24_quad_blitter);
+   renderer_precompile_quad_pipeline(self, program,
+         analog ? VK_FORMAT_R16G16B16A16_SFLOAT
+                : hdr_quad ? hdr_format : VK_FORMAT_R8G8B8A8_UNORM);
+
+   if (show_vram && !psx_hdr_active)
+      renderer_precompile_quad_pipeline(self,
+            self->pipelines.scaled_quad_blitter,
+            VK_FORMAT_A1R5G5B5_UNORM_PACK16);
+
+   if (adaptive)
+   {
+      if (trailing_zeroes(self->scaling) >= 1)
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.mipmap_energy_first,
+               self->scaled_fb_format);
+      if (trailing_zeroes(self->scaling) >= 2)
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.mipmap_energy,
+               self->scaled_fb_format);
+      renderer_precompile_quad_pipeline(self,
+            self->pipelines.mipmap_energy_blur, VK_FORMAT_R8_UNORM);
+   }
+
+   if (analog)
+   {
+      if (self->scaling != 1 && !ssaa)
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_downsample,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+      if (psx_video_cable == RHI_CABLE_RGB)
+      {
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_rgb,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_rgb_pal,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+      }
+      else
+      {
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_encode, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_encode_pal, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_comb, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_comb_pal, VK_FORMAT_R16G16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_demod,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+         renderer_precompile_quad_pipeline(self,
+               self->pipelines.analog_demod_pal,
+               VK_FORMAT_R16G16B16A16_SFLOAT);
+         renderer_precompile_compute_pipeline(self,
+               self->pipelines.analog_notch, FilterMode_NearestNeighbor);
+         renderer_precompile_compute_pipeline(self,
+               self->pipelines.analog_notch_pal,
+               FilterMode_NearestNeighbor);
+      }
+      renderer_precompile_quad_pipeline(self,
+            psx_hdr_active ? self->pipelines.analog_resolve_hdr
+                           : self->pipelines.analog_resolve,
+            psx_hdr_active ? hdr_format : VK_FORMAT_R8G8B8A8_UNORM);
+   }
+
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.resolve_to_scaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.resolve_to_unscaled, FilterMode_NearestNeighbor);
+   if (ssaa)
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.resolve_to_unscaled, 1u);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.copy_to_vram, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.copy_to_vram_masked, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_scaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_scaled_masked, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_unscaled, FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_unscaled_masked,
+         FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_unscaled,
+         FilterMode_NearestNeighbor);
+   renderer_precompile_compute_pipeline(self,
+         self->pipelines.blit_vram_cached_unscaled_masked,
+         FilterMode_NearestNeighbor);
+
+   if (self->msaa > 1)
+   {
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_msaa_cached_scaled,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_msaa_cached_scaled_masked,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
+               ? self->pipelines.msaa_resolve_weighted
+               : self->pipelines.msaa_resolve_weighted_sdr,
+            FilterMode_NearestNeighbor);
+   }
+   else
+   {
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_cached_scaled,
+            FilterMode_NearestNeighbor);
+      renderer_precompile_compute_pipeline(self,
+            self->pipelines.blit_vram_cached_scaled_masked,
+            FilterMode_NearestNeighbor);
+   }
+}
+
 static void renderer_precompile_current_configuration_pipelines(
       Renderer *self)
 {
    static const SemiTransparentMode modes[] = {
-      SemiTransparentMode_None,
       SemiTransparentMode_Average,
       SemiTransparentMode_Add,
       SemiTransparentMode_Sub,
@@ -9898,17 +10455,28 @@ static void renderer_precompile_current_configuration_pipelines(
    unsigned graphics_jobs = 0;
    unsigned compute_jobs = 0;
    unsigned workers = 0;
+   unsigned manifest_programs = 0;
+   unsigned manifest_missing = 0;
+   bool manifest_complete;
    bool complete;
 
    vulkan_precompile_jobs_begin();
    vulkan_pipeline_diagnostic.precompiling = true;
 
+   /* These core options are parsed before renderer creation, while their
+    * normal per-frame copies happen after it. Seed the renderer now so the
+    * current-configuration manifest cannot silently assume constructor
+    * defaults. */
+   self->scaled_uv_offset = scaled_uv_offset;
+   self->primitive_filter_mode = (FilterMode)filter_mode;
+
    /* A normal and an input-attachment-compatible render pass have distinct
-    * Vulkan compatibility keys. Exercise both, using the same queue and state
-    * setters as real draws so the resulting hashes cannot drift from runtime. */
+    * Vulkan compatibility keys. Ordinary opaque draws can occur in either,
+    * but masking and translucency always make the pass feedback-compatible.
+    * Generate only source-reachable combinations through the real queue and
+    * state setters so pipeline hashes cannot drift from runtime. */
    for (feedback = 0; feedback < 2; feedback++)
    {
-      unsigned textured;
       self->render_pass_is_feedback = feedback != 0;
       {
          BufferVertex vertex;
@@ -9925,228 +10493,45 @@ static void renderer_precompile_current_configuration_pipelines(
          variants++;
       }
 
-      /* Opaque textured primitives do not use the serialized blend queue, so
-       * the generic semi-transparent precompilation below never reaches their
-       * exact pipeline state. Scaled framebuffer reads select a distinct
-       * shader program; texture depth selects shift 0, 1, or 2; and scaled UV
-       * offset independently selects its specialization bit. Exercise all 12
-       * combinations against both compatible render passes. A feedback pass
-       * can contain ordinary opaque draws alongside the primitive that caused
-       * feedback, so both compatibility keys occur during gameplay. */
-      {
-         unsigned scaled_read;
-         for (scaled_read = 0; scaled_read < 2; scaled_read++)
-         {
-            unsigned shift;
-            for (shift = 0; shift < 3; shift++)
-            {
-               unsigned offset_uv;
-               for (offset_uv = 0; offset_uv < 2; offset_uv++)
-               {
-                  renderer_precompile_textured_batch_variant(
-                        &self->queue.opaque_textured,
-                        &self->queue.opaque_textured_scissor,
-                        scaled_read != 0, shift, offset_uv != 0);
-                  variants++;
+      variants += renderer_precompile_textured_batch_manifest(self,
+            &self->queue.opaque_textured,
+            &self->queue.opaque_textured_scissor);
 
-                  /* Textured semi-transparent primitives are first rendered
-                   * by the opaque-texture program with
-                   * TransMode_SemiTransOpaque, then by the ordered blend path.
-                   * They necessarily make this a feedback pass. */
-                  if (feedback)
-                  {
-                     renderer_precompile_textured_batch_variant(
-                           &self->queue.semi_transparent_opaque,
-                           &self->queue.semi_transparent_opaque_scissor,
-                           scaled_read != 0, shift, offset_uv != 0);
-                     variants++;
-                  }
-               }
-            }
-         }
-      }
-
-      for (textured = 0; textured < 2; textured++)
-      {
-         unsigned scaled_read;
-         for (scaled_read = 0; scaled_read < 2; scaled_read++)
-         {
-            unsigned mode;
-            for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
-            {
-               SemiTransparentState state;
-               BufferVertex vertex;
-               unsigned i;
-               memset(&state, 0, sizeof(state));
-               state.scissor_index = -1;
-               state.semi_transparent = modes[mode];
-               state.textured = textured != 0;
-               state.masked = feedback != 0;
-               state.scaled_read = scaled_read != 0;
-               SemiTransparentStateVec_push(&self->queue.semi_transparent_state, &state);
-
-               memset(&vertex, 0, sizeof(vertex));
-               vertex.z = 0.5f;
-               vertex.w = 1.0f;
-               for (i = 0; i < 3; i++)
-                  BufferVertexVec_push(&self->queue.semi_transparent, &vertex);
-               variants++;
-            }
-         }
-      }
-
-      /* A feedback-compatible pass also contains unmasked textured draws.
-       * The original feedback precompilation deliberately set masked=true,
-       * selecting the programmable-blend shaders for the four translucent
-       * modes. Real frames mix those with the ordinary textured shaders,
-       * whose scaled-read, shift, and UV-offset variants were consequently
-       * still first-created in gameplay (19-34 ms on Adreno 740). Precompile
-       * the complete 12-value shader/specialization set here; all other
-       * observed runtime pipelines are already below one 60 Hz frame. */
       if (feedback)
       {
          unsigned mode;
-         unsigned scaled_read;
-         /* A pass made feedback-compatible by one primitive can still contain
-          * ordinary untextured draws. They use the flat program and normal
-          * fixed-function blend states, but the compatible render pass is
-          * distinct from the non-feedback pass. Exercise those combinations
-          * explicitly; batching them only with masked draws selects the
-          * feedback program instead and misses the runtime pipelines. */
+
+         /* The first opaque pass for a translucent textured primitive uses
+          * TransMode_SemiTransOpaque. It shares the same correlated texture
+          * axes as ordinary opaque textured draws. */
+         variants += renderer_precompile_textured_batch_manifest(self,
+               &self->queue.semi_transparent_opaque,
+               &self->queue.semi_transparent_opaque_scissor);
+
+         /* Mask-test without translucency uses fixed-function destination
+          * alpha blending, but still requires a feedback-compatible pass. */
+         variants += renderer_precompile_semi_transparent_manifest(self,
+               SemiTransparentMode_None, true);
+
          for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
          {
-            SemiTransparentState state;
-            BufferVertex vertex;
-            unsigned i;
-            memset(&state, 0, sizeof(state));
-            state.scissor_index = -1;
-            state.semi_transparent = modes[mode];
-            SemiTransparentStateVec_push(
-                  &self->queue.semi_transparent_state, &state);
-
-            memset(&vertex, 0, sizeof(vertex));
-            vertex.z = 0.5f;
-            vertex.w = 1.0f;
-            for (i = 0; i < 3; i++)
-               BufferVertexVec_push(&self->queue.semi_transparent, &vertex);
-            variants++;
-         }
-
-         for (scaled_read = 0; scaled_read < 2; scaled_read++)
-         {
-            unsigned shift;
-            for (shift = 0; shift < 3; shift++)
-            {
-               unsigned offset_uv;
-               for (offset_uv = 0; offset_uv < 2; offset_uv++)
-               {
-                  unsigned mode;
-                  for (mode = 0;
-                       mode < sizeof(modes) / sizeof(modes[0]); mode++)
-                  {
-                     SemiTransparentState state;
-                     BufferVertex vertex;
-                     unsigned i;
-                     memset(&state, 0, sizeof(state));
-                     state.scissor_index = -1;
-                     state.semi_transparent = modes[mode];
-                     state.textured = true;
-                     state.scaled_read = scaled_read != 0;
-                     state.shift = shift;
-                     state.offset_uv = offset_uv != 0;
-                     SemiTransparentStateVec_push(
-                           &self->queue.semi_transparent_state, &state);
-
-                     memset(&vertex, 0, sizeof(vertex));
-                     vertex.z = 0.5f;
-                     vertex.w = 1.0f;
-                     for (i = 0; i < 3; i++)
-                        BufferVertexVec_push(
-                              &self->queue.semi_transparent, &vertex);
-                     variants++;
-                  }
-               }
-            }
+            variants += renderer_precompile_semi_transparent_manifest(self,
+                  modes[mode], false);
+            variants += renderer_precompile_semi_transparent_manifest(self,
+                  modes[mode], true);
          }
       }
 
       renderer_flush_render_pass(self, &rect);
    }
 
-   /* Normal gameplay can switch among 32-bit, PlayStation 15-bit dither and
-    * 24-bit/MDEC scanout without changing core options. Their quad pipelines
-    * use distinct compatible render passes and are outside the primitive
-    * render pass above. Capture them before the first frame. */
-   renderer_precompile_quad_pipeline(self,
-         self->pipelines.scaled_quad_blitter,
-         VK_FORMAT_R8G8B8A8_UNORM);
-   renderer_precompile_quad_pipeline(self,
-         self->pipelines.scaled_dither_quad_blitter,
-         VK_FORMAT_A1R5G5B5_UNORM_PACK16);
-   renderer_precompile_quad_pipeline(self,
-         self->pipelines.unscaled_dither_quad_blitter,
-         VK_FORMAT_A1R5G5B5_UNORM_PACK16);
-   renderer_precompile_quad_pipeline(self,
-         self->pipelines.bpp24_quad_blitter,
-         VK_FORMAT_R8G8B8A8_UNORM);
-   renderer_precompile_quad_pipeline(self,
-         self->pipelines.bpp24_yuv_quad_blitter,
-         VK_FORMAT_R8G8B8A8_UNORM);
-
-   /* Compute programs have one pipeline apiece for the active renderer
-    * configuration, except the downscale resolve whose nearest and linear
-    * filter modes are both reachable. Queue the renderer's ordinary VRAM,
-    * resolve and blit paths; unused specialization slots are masked by each
-    * program's reflected layout, and duplicate program/hash pairs collapse in
-    * the job queue. */
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.resolve_to_scaled, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.resolve_to_unscaled, FilterMode_NearestNeighbor);
-   if (super_sampling && self->scaling != 1)
-      renderer_precompile_compute_pipeline(self,
-            self->pipelines.resolve_to_unscaled, 1u);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.copy_to_vram, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.copy_to_vram_masked, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_scaled, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_scaled_masked, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_cached_scaled, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_cached_scaled_masked,
-         FilterMode_NearestNeighbor);
-   if (self->msaa > 1)
-   {
-      renderer_precompile_compute_pipeline(self,
-            self->pipelines.blit_vram_msaa_cached_scaled,
-            FilterMode_NearestNeighbor);
-      renderer_precompile_compute_pipeline(self,
-            self->pipelines.blit_vram_msaa_cached_scaled_masked,
-            FilterMode_NearestNeighbor);
-      renderer_precompile_compute_pipeline(self,
-            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
-               ? self->pipelines.msaa_resolve_weighted
-               : self->pipelines.msaa_resolve_weighted_sdr,
-            FilterMode_NearestNeighbor);
-   }
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_unscaled, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_unscaled_masked,
-         FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_cached_unscaled,
-         FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
-         self->pipelines.blit_vram_cached_unscaled_masked,
-         FilterMode_NearestNeighbor);
+   renderer_precompile_manifest_nonprimitive_pipelines(self);
+   manifest_complete = renderer_precompile_manifest_validate(self,
+         &manifest_programs, &manifest_missing);
 
    complete = vulkan_precompile_jobs_finish(self->device, &jobs,
          &graphics_jobs, &compute_jobs, &workers, &compile_elapsed_usec);
+   complete = complete && manifest_complete;
    vulkan_pipeline_diagnostic.precompiling = false;
 
    /* Android may terminate the process without a clean libretro teardown.
@@ -10164,8 +10549,9 @@ static void renderer_precompile_current_configuration_pipelines(
                driver_cache,
                &driver_cache_bytes, NULL)
          : VK_ERROR_INITIALIZATION_FAILED;
-      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u graphics_jobs=%u compute_jobs=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
-         variants, jobs, graphics_jobs, compute_jobs, workers,
+      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
+         variants, jobs, graphics_jobs, compute_jobs,
+         manifest_programs, manifest_missing, workers,
          complete ? 1u : 0u,
          (long long)compile_elapsed_usec,
          (long long)(cpu_features_get_time_usec() - start_usec),
@@ -15063,24 +15449,44 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       Device *device;
       VkPipelineCache pipeline_cache;
-      unsigned first;
-      unsigned stride;
+      struct VulkanPrecompileQueue *queue;
+      unsigned index;
+      unsigned jobs;
+      unsigned graphics_jobs;
+      unsigned compute_jobs;
+      retro_time_t pipeline_elapsed_usec;
+      retro_time_t wall_elapsed_usec;
+   };
+
+   struct VulkanPrecompileQueue
+   {
+      slock_t *lock;
+      unsigned next_job;
+      unsigned graphics_jobs;
+      unsigned total_jobs;
    };
 
    static void vulkan_precompile_worker(void *userdata)
    {
       struct VulkanPrecompileWorker *worker =
          (struct VulkanPrecompileWorker *)userdata;
-      unsigned graphics_count = vulkan_graphics_precompile_jobs.count;
-      unsigned total_count = graphics_count +
-         vulkan_compute_precompile_jobs.count;
-      unsigned i;
+      struct VulkanPrecompileQueue *queue = worker->queue;
+      retro_time_t wall_start_usec = cpu_features_get_time_usec();
 
-      for (i = worker->first;
-           i < total_count;
-           i += worker->stride)
+      for (;;)
       {
-         if (i < graphics_count)
+         unsigned i;
+         retro_time_t elapsed_usec;
+
+         if (queue->lock)
+            slock_lock(queue->lock);
+         i = queue->next_job++;
+         if (queue->lock)
+            slock_unlock(queue->lock);
+         if (i >= queue->total_jobs)
+            break;
+
+         if (i < queue->graphics_jobs)
          {
             struct VulkanGraphicsPrecompileJob *job =
                &vulkan_graphics_precompile_jobs.items[i];
@@ -15089,20 +15495,29 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   device_get_device(worker->device),
                   worker->pipeline_cache,
                   1, &job->pipe, NULL, &job->pipeline);
-            job->elapsed_usec = cpu_features_get_time_usec() - start_usec;
+            elapsed_usec = cpu_features_get_time_usec() - start_usec;
+            job->elapsed_usec = elapsed_usec;
+            worker->graphics_jobs++;
          }
          else
          {
             struct VulkanComputePrecompileJob *job =
-               &vulkan_compute_precompile_jobs.items[i - graphics_count];
+               &vulkan_compute_precompile_jobs.items[
+                  i - queue->graphics_jobs];
             retro_time_t start_usec = cpu_features_get_time_usec();
             job->result = vkCreateComputePipelines(
                   device_get_device(worker->device),
                   worker->pipeline_cache,
                   1, &job->pipe, NULL, &job->pipeline);
-            job->elapsed_usec = cpu_features_get_time_usec() - start_usec;
+            elapsed_usec = cpu_features_get_time_usec() - start_usec;
+            job->elapsed_usec = elapsed_usec;
+            worker->compute_jobs++;
          }
+         worker->jobs++;
+         worker->pipeline_elapsed_usec += elapsed_usec;
       }
+      worker->wall_elapsed_usec =
+         cpu_features_get_time_usec() - wall_start_usec;
    }
 
    static void vulkan_precompile_jobs_begin(void)
@@ -15124,18 +15539,24 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          &vulkan_graphics_precompile_jobs;
       struct VulkanComputePrecompileJobVec *compute_jobs =
          &vulkan_compute_precompile_jobs;
-      struct VulkanPrecompileWorker worker[2];
-      sthread_t *thread = NULL;
-      VkPipelineCache private_cache[2] = {
-         VK_NULL_HANDLE, VK_NULL_HANDLE
-      };
+      enum { VulkanPrecompileMaxWorkers = 4 };
+      struct VulkanPrecompileWorker worker[VulkanPrecompileMaxWorkers];
+      struct VulkanPrecompileQueue queue;
+      sthread_t *threads[VulkanPrecompileMaxWorkers - 1];
+      VkPipelineCache private_cache[VulkanPrecompileMaxWorkers];
       void *initial_cache_data = NULL;
       size_t initial_cache_size = 0;
       retro_time_t start_usec;
       bool complete;
       unsigned workers = 1;
+      unsigned private_cache_count = 0;
       unsigned total_count;
       unsigned i;
+
+      memset(worker, 0, sizeof(worker));
+      memset(&queue, 0, sizeof(queue));
+      memset(threads, 0, sizeof(threads));
+      memset(private_cache, 0, sizeof(private_cache));
 
       total_count = jobs->count + compute_jobs->count;
       *job_count = total_count;
@@ -15156,6 +15577,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #if defined(ANDROID)
       if (total_count > 1)
       {
+         unsigned desired_workers = cpu_features_get_core_amount();
          VkPipelineCache device_cache = device_get_pipeline_cache(device);
          VkResult cache_result = vkGetPipelineCacheData(
                device_get_device(device), device_cache,
@@ -15163,6 +15585,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          VkPipelineCacheCreateInfo cache_info = {
             VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
          };
+
+         if (desired_workers > VulkanPrecompileMaxWorkers)
+            desired_workers = VulkanPrecompileMaxWorkers;
+         if (desired_workers > total_count)
+            desired_workers = total_count;
 
          if (cache_result == VK_SUCCESS && initial_cache_size)
          {
@@ -15180,32 +15607,58 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             unsigned cache_index;
             cache_info.initialDataSize = initial_cache_size;
             cache_info.pInitialData = initial_cache_data;
-            for (cache_index = 0; cache_index < 2; cache_index++)
+            for (cache_index = 0;
+                 cache_index < desired_workers;
+                 cache_index++)
             {
                cache_result = vkCreatePipelineCache(
                      device_get_device(device), &cache_info, NULL,
                      &private_cache[cache_index]);
                if (cache_result != VK_SUCCESS)
                   break;
+               private_cache_count++;
             }
          }
 
-         if (cache_result == VK_SUCCESS)
+         if (private_cache_count >= 2)
          {
-            worker[1].device = device;
-            worker[1].pipeline_cache = private_cache[1];
-            worker[1].first = 1;
-            worker[1].stride = 2;
-            thread = sthread_create(vulkan_precompile_worker, &worker[1]);
-            if (thread)
-               workers = 2;
+            queue.lock = slock_new();
+            if (queue.lock)
+            {
+               unsigned worker_index;
+               queue.graphics_jobs = jobs->count;
+               queue.total_jobs = total_count;
+               for (worker_index = 1;
+                    worker_index < private_cache_count;
+                    worker_index++)
+               {
+                  worker[worker_index].device = device;
+                  worker[worker_index].pipeline_cache =
+                     private_cache[worker_index];
+                  worker[worker_index].queue = &queue;
+                  worker[worker_index].index = worker_index;
+                  threads[worker_index - 1] = sthread_create(
+                        vulkan_precompile_worker,
+                        &worker[worker_index]);
+                  if (!threads[worker_index - 1])
+                     break;
+                  workers++;
+               }
+            }
          }
 
-         if (workers != 2)
+         if (workers == 1)
          {
             unsigned cache_index;
-            LOGI("[Vulkan shader precompilation] private worker caches unavailable; using one worker\n");
-            for (cache_index = 0; cache_index < 2; cache_index++)
+            LOGI("[Vulkan shader precompilation] private worker pool unavailable; using one worker\n");
+            if (queue.lock)
+            {
+               slock_free(queue.lock);
+               queue.lock = NULL;
+            }
+            for (cache_index = 0;
+                 cache_index < private_cache_count;
+                 cache_index++)
             {
                if (private_cache[cache_index] != VK_NULL_HANDLE)
                {
@@ -15214,24 +15667,29 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   private_cache[cache_index] = VK_NULL_HANDLE;
                }
             }
+            private_cache_count = 0;
          }
       }
 #endif
+      if (!queue.total_jobs)
+      {
+         queue.graphics_jobs = jobs->count;
+         queue.total_jobs = total_count;
+      }
       worker[0].device = device;
-      worker[0].pipeline_cache = workers == 2
+      worker[0].pipeline_cache = workers > 1
          ? private_cache[0] : device_get_pipeline_cache(device);
-      worker[0].first = 0;
-      worker[0].stride = workers;
+      worker[0].queue = &queue;
       vulkan_precompile_worker(&worker[0]);
-      if (thread)
-         sthread_join(thread);
+      for (i = 1; i < workers; i++)
+         sthread_join(threads[i - 1]);
 
 #if defined(ANDROID)
-      if (workers == 2)
+      if (workers > 1)
       {
          VkResult merge_result = vkMergePipelineCaches(
                device_get_device(device), device_get_pipeline_cache(device),
-               2, private_cache);
+               workers, private_cache);
          unsigned cache_index;
          if (merge_result != VK_SUCCESS)
          {
@@ -15239,14 +15697,26 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   (int)merge_result);
             complete = false;
          }
-         for (cache_index = 0; cache_index < 2; cache_index++)
-            vkDestroyPipelineCache(device_get_device(device),
-                  private_cache[cache_index], NULL);
+         for (cache_index = 0;
+              cache_index < private_cache_count;
+              cache_index++)
+            if (private_cache[cache_index] != VK_NULL_HANDLE)
+               vkDestroyPipelineCache(device_get_device(device),
+                     private_cache[cache_index], NULL);
       }
 #endif
+      if (queue.lock)
+         slock_free(queue.lock);
       free(initial_cache_data);
       *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
       *worker_count = total_count ? workers : 0;
+
+      for (i = 0; i < workers; i++)
+         LOGI("[Vulkan shader precompilation worker] index=%u jobs=%u graphics_jobs=%u compute_jobs=%u pipeline_elapsed_us=%lld wall_elapsed_us=%lld\n",
+               worker[i].index, worker[i].jobs,
+               worker[i].graphics_jobs, worker[i].compute_jobs,
+               (long long)worker[i].pipeline_elapsed_usec,
+               (long long)worker[i].wall_elapsed_usec);
 
       for (i = 0; i < jobs->count; i++)
       {
@@ -20460,12 +20930,9 @@ static ScanoutHandleVec scanout_handles;
 static SaveState save_state;
 static bool inside_frame;
 static bool has_software_fb;
-static bool scaled_uv_offset;
 static int filter_exclude_sprites;
 static int filter_exclude_2d_polygons;
-static bool adaptive_smoothing;
 static unsigned msaa = 1;
-static bool mdec_yuv;
 /*
  * Queue for rhi_vulkan_* operations that arrive between the libretro
  * frontend's RETRO_ENVIRONMENT_SET_HW_RENDER acceptance and the
@@ -20478,7 +20945,6 @@ static bool mdec_yuv;
  * rhi/rhi_defer.h for which ops are deferred and which are dropped.
  */
 static rhi_defer_queue_t defer = { NULL, 0, 0 };
-static enum dither_mode dither_mode = DITHER_NATIVE;
 static bool dump_textures = false;
 static bool replace_textures = false;
 static bool track_textures = false;
@@ -20513,7 +20979,6 @@ static int last_scanline_pal;
 static bool frame_duping_enabled = false;
 static uint32_t prev_frame_width = 320;
 static uint32_t prev_frame_height = 240;
-static bool show_vram = false;
 
 static retro_video_refresh_t video_refresh_cb;
 
