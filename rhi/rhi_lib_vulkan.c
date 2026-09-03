@@ -156,6 +156,7 @@ extern PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 extern PFN_vkGetDeviceQueue vkGetDeviceQueue;
 extern PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
 extern PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
+extern PFN_vkMergePipelineCaches vkMergePipelineCaches;
 extern PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 extern PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 extern PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -304,6 +305,7 @@ static void volkGenLoadDevice(void* context,
    vkGetDeviceQueue = (PFN_vkGetDeviceQueue)load(context, "vkGetDeviceQueue");
    vkGetImageMemoryRequirements = (PFN_vkGetImageMemoryRequirements)load(context, "vkGetImageMemoryRequirements");
    vkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)load(context, "vkGetPipelineCacheData");
+   vkMergePipelineCaches = (PFN_vkMergePipelineCaches)load(context, "vkMergePipelineCaches");
    vkInvalidateMappedMemoryRanges = (PFN_vkInvalidateMappedMemoryRanges)load(context, "vkInvalidateMappedMemoryRanges");
    vkMapMemory = (PFN_vkMapMemory)load(context, "vkMapMemory");
    vkQueueSubmit = (PFN_vkQueueSubmit)load(context, "vkQueueSubmit");
@@ -411,6 +413,7 @@ PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 PFN_vkGetDeviceQueue vkGetDeviceQueue;
 PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
 PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
+PFN_vkMergePipelineCaches vkMergePipelineCaches;
 PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -445,6 +448,7 @@ PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR;
 /* VOLK_GENERATE_PROTOTYPES_C */
 
 #include <assert.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -865,48 +869,62 @@ static void object_pool_raw_init(struct ObjectPoolRaw *p, size_t element_size)
       p->element_size = element_size;
    }
 
-static void object_pool_raw_vac_push(struct ObjectPoolRaw *p, void *v)
-   {
-      if (p->vac_count == p->vac_cap)
-      {
-         int ncap   = p->vac_cap ? p->vac_cap * 2 : 64;
-         void **nv = (void **)realloc(p->vacants, (size_t)ncap * sizeof(void *));
-         if (!nv)
-            return;
-         p->vacants = nv;
-         p->vac_cap = ncap;
-      }
-      p->vacants[p->vac_count++] = v;
-   }
-
-static void object_pool_raw_mem_push(struct ObjectPoolRaw *p, void *v)
-   {
-      if (p->mem_count == p->mem_cap)
-      {
-         int ncap   = p->mem_cap ? p->mem_cap * 2 : 8;
-         void **nm = (void **)realloc(p->memory, (size_t)ncap * sizeof(void *));
-         if (!nm)
-            return;
-         p->memory  = nm;
-         p->mem_cap = ncap;
-      }
-      p->memory[p->mem_count++] = v;
-   }
-
    /* Return an uninitialised slot of element_size bytes (or NULL on OOM). The
     * caller placement-constructs into it. */
 static void *object_pool_raw_allocate(struct ObjectPoolRaw *p)
    {
       if (p->vac_count == 0)
       {
-         unsigned num_objects = 64u << (unsigned)p->mem_count;
-         char    *ptr         = (char *)malloc(num_objects * p->element_size);
+         unsigned num_objects;
+         unsigned total_objects;
+         char *ptr;
          unsigned i;
+
+         if ((unsigned)p->mem_count >= sizeof(unsigned) * CHAR_BIT - 6u)
+            return NULL;
+         num_objects = 64u << (unsigned)p->mem_count;
+         if (num_objects > ((unsigned)INT_MAX + 64u) / 2u ||
+             p->element_size == 0 ||
+             num_objects > (size_t)-1 / p->element_size)
+            return NULL;
+         total_objects = num_objects * 2u - 64u;
+
+         /* Reserve metadata before allocating a slab. The vacancy stack must
+          * hold every slot from every slab, so returning an object never needs
+          * an allocation and cannot lose a slot during memory pressure. */
+         if ((unsigned)p->vac_cap < total_objects)
+         {
+            void **vacants;
+            size_t vacancy_bytes = (size_t)total_objects * sizeof(void *);
+            if (vacancy_bytes / sizeof(void *) != total_objects)
+               return NULL;
+            vacants = (void **)realloc(p->vacants, vacancy_bytes);
+            if (!vacants)
+               return NULL;
+            p->vacants = vacants;
+            p->vac_cap = (int)total_objects;
+         }
+         if (p->mem_count == p->mem_cap)
+         {
+            int capacity;
+            void **memory;
+            if (p->mem_cap > INT_MAX / 2)
+               return NULL;
+            capacity = p->mem_cap ? p->mem_cap * 2 : 8;
+            memory = (void **)realloc(p->memory,
+                  (size_t)capacity * sizeof(void *));
+            if (!memory)
+               return NULL;
+            p->memory = memory;
+            p->mem_cap = capacity;
+         }
+
+         ptr = (char *)malloc((size_t)num_objects * p->element_size);
          if (!ptr)
             return NULL;
+         p->memory[p->mem_count++] = ptr;
          for (i = 0; i < num_objects; i++)
-            object_pool_raw_vac_push(p, ptr + (size_t)i * p->element_size);
-         object_pool_raw_mem_push(p, ptr);
+            p->vacants[p->vac_count++] = ptr + (size_t)i * p->element_size;
       }
       return p->vacants[--p->vac_count];
    }
@@ -914,7 +932,10 @@ static void *object_pool_raw_allocate(struct ObjectPoolRaw *p)
    /* Return a slot to the free list. The caller has already destroyed the object. */
 static void object_pool_raw_free(struct ObjectPoolRaw *p, void *ptr)
    {
-      object_pool_raw_vac_push(p, ptr);
+#ifdef VULKAN_DEBUG
+      assert(p->vac_count < p->vac_cap);
+#endif
+      p->vacants[p->vac_count++] = ptr;
    }
 
 static void object_pool_raw_clear(struct ObjectPoolRaw *p)
@@ -1038,127 +1059,127 @@ static bool hmholder_insert_inner(struct IntrusiveHashMapHolderC *h,
       return false;
    }
 
-static void hmholder_resize_null(struct IntrusiveHashMapHolderC *h, size_t n)
+static bool hmholder_grow(struct IntrusiveHashMapHolderC *h)
    {
-      size_t i;
-      if (n > h->cap)
+      size_t count = h->count ? h->count : HMHOLDER_InitialSize / 2;
+      unsigned load_count = h->count ? h->load_count : HMHOLDER_InitialLoadCount - 1;
+
+      for (;;)
       {
-         struct IntrusiveHashMapNode **ni = (struct IntrusiveHashMapNode **)realloc(h->items,
-               n * sizeof(struct IntrusiveHashMapNode *));
-         if (!ni)
-            return;
-         h->items = ni;
-         h->cap   = n;
-      }
-      for (i = 0; i < n; i++)
-         h->items[i] = NULL;
-      h->count = n;
-   }
+         struct IntrusiveHashMapHolderC grown;
+         struct IntrusiveListNode *node;
+         bool success = true;
 
-static void hmholder_grow(struct IntrusiveHashMapHolderC *h)
-   {
-      bool success;
-      do
-      {
-         {
-            size_t i, n = h->count;
-            for (i = 0; i < n; i++)
-               h->items[i] = NULL;
-         }
+         if (count > (size_t)-1 / 2 / sizeof(*h->items) ||
+             load_count == UINT_MAX)
+            return false;
+         count *= 2;
+         load_count++;
+         grown = *h;
+         grown.items = (struct IntrusiveHashMapNode **)calloc(count,
+               sizeof(*grown.items));
+         if (!grown.items)
+            return false;
+         grown.count = count;
+         grown.cap = count;
+         grown.load_count = load_count;
 
-         if (h->count == 0)
+         /* Rehash into separate storage. A failed allocation or a collision
+          * retry must leave the original buckets and list usable. */
+         for (node = ilist_begin(&h->list); node; node = node->next)
          {
-            hmholder_resize_null(h, HMHOLDER_InitialSize);
-            h->load_count = HMHOLDER_InitialLoadCount;
-         }
-         else
-         {
-            hmholder_resize_null(h, h->count * 2);
-            h->load_count++;
-         }
-
-         success = true;
-         {
-            struct IntrusiveListNode *n;
-            for (n = ilist_begin(&h->list); n; n = n->next)
+            if (!hmholder_insert_inner(&grown,
+                     (struct IntrusiveHashMapNode *)node))
             {
-               if (!hmholder_insert_inner(h, (struct IntrusiveHashMapNode *)n))
-               {
-                  success = false;
-                  break;
-               }
+               success = false;
+               break;
             }
          }
-      } while (!success);
+         if (success)
+         {
+            free(h->items);
+            h->items = grown.items;
+            h->count = grown.count;
+            h->cap = grown.cap;
+            h->load_count = grown.load_count;
+            return true;
+         }
+         free(grown.items);
+      }
    }
 
-static struct IntrusiveHashMapNode *hmholder_insert_yield(
-         struct IntrusiveHashMapHolderC *h, struct IntrusiveHashMapNode **value)
+static bool hmholder_insert_yield(struct IntrusiveHashMapHolderC *h,
+         struct IntrusiveHashMapNode **value,
+         struct IntrusiveHashMapNode **discarded)
    {
-      Hash hash_mask, hash, masked;
-      unsigned i;
-      if (h->count == 0)
-         hmholder_grow(h);
+      *discarded = NULL;
+      if (h->count == 0 && !hmholder_grow(h))
+         return false;
 
-      hash_mask = h->count - 1;
-      hash      = hmholder_get_hash(*value);
-      masked    = hash & hash_mask;
-
-      for (i = 0; i < h->load_count; i++)
+      for (;;)
       {
-         if (h->items[masked] && hmholder_get_hash(h->items[masked]) == hash)
-         {
-            struct IntrusiveHashMapNode *ret = *value;
-            *value = h->items[masked];
-            return ret;
-         }
-         else if (!h->items[masked])
-         {
-            h->items[masked] = *value;
-            ilist_insert_front(&h->list, &(*value)->list_node);
-            return NULL;
-         }
-         masked = (masked + 1) & hash_mask;
-      }
+         Hash hash_mask = h->count - 1;
+         Hash hash = hmholder_get_hash(*value);
+         Hash masked = hash & hash_mask;
+         unsigned i;
 
-      hmholder_grow(h);
-      return hmholder_insert_yield(h, value);
+         for (i = 0; i < h->load_count; i++)
+         {
+            if (h->items[masked] && hmholder_get_hash(h->items[masked]) == hash)
+            {
+               *discarded = *value;
+               *value = h->items[masked];
+               return true;
+            }
+            else if (!h->items[masked])
+            {
+               h->items[masked] = *value;
+               ilist_insert_front(&h->list, &(*value)->list_node);
+               return true;
+            }
+            masked = (masked + 1) & hash_mask;
+         }
+         if (!hmholder_grow(h))
+            return false;
+      }
    }
 
-static struct IntrusiveHashMapNode *hmholder_insert_replace(
-         struct IntrusiveHashMapHolderC *h, struct IntrusiveHashMapNode *value)
+static bool hmholder_insert_replace(struct IntrusiveHashMapHolderC *h,
+         struct IntrusiveHashMapNode *value,
+         struct IntrusiveHashMapNode **discarded)
    {
-      Hash hash_mask, hash, masked;
-      unsigned i;
-      if (h->count == 0)
-         hmholder_grow(h);
+      *discarded = NULL;
+      if (h->count == 0 && !hmholder_grow(h))
+         return false;
 
-      hash_mask = h->count - 1;
-      hash      = hmholder_get_hash(value);
-      masked    = hash & hash_mask;
-
-      for (i = 0; i < h->load_count; i++)
+      for (;;)
       {
-         if (h->items[masked] && hmholder_get_hash(h->items[masked]) == hash)
-         {
-            struct IntrusiveHashMapNode *tmp = h->items[masked];
-            h->items[masked] = value;
-            value = tmp;
-            ilist_erase(&h->list, &value->list_node);
-            ilist_insert_front(&h->list, &h->items[masked]->list_node);
-            return value;
-         }
-         else if (!h->items[masked])
-         {
-            h->items[masked] = value;
-            ilist_insert_front(&h->list, &value->list_node);
-            return NULL;
-         }
-         masked = (masked + 1) & hash_mask;
-      }
+         Hash hash_mask = h->count - 1;
+         Hash hash = hmholder_get_hash(value);
+         Hash masked = hash & hash_mask;
+         unsigned i;
 
-      hmholder_grow(h);
-      return hmholder_insert_replace(h, value);
+         for (i = 0; i < h->load_count; i++)
+         {
+            if (h->items[masked] && hmholder_get_hash(h->items[masked]) == hash)
+            {
+               *discarded = h->items[masked];
+               h->items[masked] = value;
+               ilist_erase(&h->list, &(*discarded)->list_node);
+               ilist_insert_front(&h->list, &value->list_node);
+               return true;
+            }
+            else if (!h->items[masked])
+            {
+               h->items[masked] = value;
+               ilist_insert_front(&h->list, &value->list_node);
+               return true;
+            }
+            masked = (masked + 1) & hash_mask;
+         }
+         if (!hmholder_grow(h))
+            return false;
+      }
    }
 
 static struct IntrusiveHashMapNode *hmholder_erase(
@@ -1263,10 +1284,17 @@ static void hmholder_deinit(struct IntrusiveHashMapHolderC *h)
       }                                                                           \
    static T *NAME##_insert_replace(struct NAME *m, Hash hash, T *value) \
       {                                                                           \
+         struct IntrusiveHashMapNode *discarded;                                  \
          T *to_delete;                                                           \
          ((struct IntrusiveHashMapNode *)value)->key = hash;                     \
-         to_delete = (T *)hmholder_insert_replace(&m->hashmap,                   \
-               (struct IntrusiveHashMapNode *)value);                          \
+         if (!hmholder_insert_replace(&m->hashmap,                              \
+                  (struct IntrusiveHashMapNode *)value, &discarded))            \
+         {                                                                       \
+            DESTROY_FN(value);                                                   \
+            object_pool_raw_free(&m->pool, value);                               \
+            return NULL;                                                         \
+         }                                                                       \
+         to_delete = (T *)discarded;                                              \
          if (to_delete)                                                          \
          {                                                                       \
             DESTROY_FN(to_delete);                                              \
@@ -1277,9 +1305,16 @@ static void hmholder_deinit(struct IntrusiveHashMapHolderC *h)
    static T *NAME##_insert_yield(struct NAME *m, Hash hash, T *value)   \
       {                                                                           \
          struct IntrusiveHashMapNode *node = (struct IntrusiveHashMapNode *)value; \
+         struct IntrusiveHashMapNode *discarded;                                  \
          T *to_delete;                                                           \
          node->key = hash;                                                       \
-         to_delete = (T *)hmholder_insert_yield(&m->hashmap, &node);             \
+         if (!hmholder_insert_yield(&m->hashmap, &node, &discarded))              \
+         {                                                                       \
+            DESTROY_FN(value);                                                   \
+            object_pool_raw_free(&m->pool, value);                               \
+            return NULL;                                                         \
+         }                                                                       \
+         to_delete = (T *)discarded;                                              \
          if (to_delete)                                                          \
          {                                                                       \
             DESTROY_FN(to_delete);                                              \
@@ -3405,9 +3440,8 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
    static bool vulkan_shader_precompilation;
    static bool vulkan_pipeline_precompiling;
    static bool super_sampling;
-   /* Core options needed while the renderer is being constructed. Keep these
-    * declarations above renderer_init: precompilation runs before the ordinary
-    * per-frame setters copy them into Renderer. */
+   /* Pipeline-selecting core options are sampled at the frame boundary, after
+    * live option adoption and HDR negotiation, before precompilation/drawing. */
    static bool scaled_uv_offset;
    static bool adaptive_smoothing;
    static bool mdec_yuv;
@@ -3418,9 +3452,63 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
 #define RHI_DITHER_OFF 2
    static bool show_vram;
 
-   /* Deep copy of one graphics-pipeline description. During shader
-    * precompilation the normal renderer still produces each state through its
-    * real draw path, but creation is deferred into these self-contained jobs.
+   /* Shared normalized identities, retained until publication so one captured
+    * variant cannot conceal a missing variant for the same shader program. */
+   struct VulkanPipelineRecipe
+   {
+      Program *program;
+      Hash hash;
+      bool graphics;
+   };
+   static struct
+   {
+      struct VulkanPipelineRecipe *items;
+      unsigned count, capacity;
+      bool failed;
+   } vulkan_precompile_recipes;
+
+   static void vulkan_precompile_expect_recipe(Program *program,
+         Hash hash, bool graphics)
+   {
+      struct VulkanPipelineRecipe *items;
+      unsigned i;
+      for (i = 0; i < vulkan_precompile_recipes.count; i++)
+         if (vulkan_precompile_recipes.items[i].program == program &&
+               vulkan_precompile_recipes.items[i].hash == hash &&
+               vulkan_precompile_recipes.items[i].graphics == graphics)
+            return;
+      if (vulkan_precompile_recipes.count == vulkan_precompile_recipes.capacity)
+      {
+         unsigned capacity = vulkan_precompile_recipes.capacity
+            ? vulkan_precompile_recipes.capacity * 2 : 128;
+         items = (struct VulkanPipelineRecipe *)realloc(
+               vulkan_precompile_recipes.items, capacity * sizeof(*items));
+         if (!items)
+         {
+            vulkan_precompile_recipes.failed = true;
+            return;
+         }
+         vulkan_precompile_recipes.items = items;
+         vulkan_precompile_recipes.capacity = capacity;
+      }
+      items = &vulkan_precompile_recipes.items[vulkan_precompile_recipes.count++];
+      items->program = program;
+      items->hash = hash;
+      items->graphics = graphics;
+   }
+
+   /* Only values which select pipeline state belong here. Display controls
+    * passed as uniforms/push constants do not require another precompile. */
+   struct VulkanPrecompileConfiguration
+   {
+      unsigned scaling, msaa, format, filter, cable, dither, eotf;
+      bool supersampling, adaptive, yuv, offset_uv, vram, hdr;
+      bool hot, precise, fog, multipass;
+   };
+
+   /* Deep copy of one graphics-pipeline description. During precompilation a
+    * CPU-only command-state object uses the runtime pipeline-state setters,
+    * and creation is deferred into these self-contained jobs.
     * No CommandBuffer or Program cache is accessed by worker threads; workers
     * only call vkCreateGraphicsPipelines, and the main thread publishes the
     * completed handles after joining them. */
@@ -5889,6 +5977,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          VkFormat scaled_fb_format;
          bool scaled_uv_offset;
          bool valid;
+         bool precompile_configuration_valid;
+         struct VulkanPrecompileConfiguration precompile_configuration;
          FilterMode primitive_filter_mode;
          FilterExclude sprite_filter_exclude;
          FilterExclude polygon_2d_filter_exclude;
@@ -6174,6 +6264,15 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_render_semi_transparent_primitives(Renderer *self);
    static void renderer_semi_transparent_set_state(Renderer *self,
          const SemiTransparentState *state);
+   static void renderer_semi_transparent_set_pipeline_state(Renderer *self,
+         CommandBuffer *cmd, const SemiTransparentState *state);
+   static void renderer_set_primitive_texture_pipeline(Renderer *self,
+         CommandBuffer *cmd, bool textured, bool filtering, bool scaled_read,
+         unsigned shift, bool offset_uv);
+   static bool renderer_semi_trans_batch_wants_sub_floor(const Renderer *self,
+         const SemiTransparentState *state);
+   static void renderer_set_sub_floor_pipeline_state(Renderer *self,
+         CommandBuffer *cmd);
    /* End the current render pass and transition the reusable scanout image from
       colour-attachment to shader-read-only, then record it as the last scanout.
       Shared tail of the scanout-to-texture paths. */
@@ -6201,6 +6300,11 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_flush_resolves(Renderer *self);
    static void renderer_precompile_current_configuration_pipelines(
          Renderer *self);
+   static void commandbuffer_init(CommandBuffer *self, Device *device,
+         VkCommandBuffer cmd, CommandBufferType type);
+   static void commandbuffer_fini(CommandBuffer *self);
+   static IntrusivePODWrapperPipeline *program_find_pipeline(
+         Program *self, Hash hash);
    static void vulkan_precompile_jobs_begin(void);
    static bool vulkan_precompile_jobs_finish(Device *device,
          unsigned *job_count, unsigned *graphics_job_count,
@@ -6218,6 +6322,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          const TextureWindow *window);
    static void renderer_reset_scissor_queue(Renderer *self);
    static void device_pipeline_cache_save(Device *self);
+   static void device_pipeline_cache_mark_dirty(Device *self);
+   static void device_pipeline_cache_checkpoint(Device *self, bool force);
    static void renderer_reset_queue(Renderer *self);
    static void renderer_ensure_command_buffer(Renderer *self)
    {
@@ -6239,9 +6345,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    }
 
    static void renderer_set_opaque_primitive_spec_constants(Renderer *self,
-         int trans_mode)
+         CommandBuffer *cmd, int trans_mode)
    {
-      CommandBuffer *cmd = cbh_get(&self->cmd);
       commandbuffer_set_specialization_constant(cmd, SpecConstIndex_TransMode, trans_mode);
       commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode, FilterMode_NearestNeighbor);
       commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAdd);
@@ -6257,24 +6362,55 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
             (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
    }
 
+   /* Pipeline layout is independent of vertex storage. Sharing these setters
+    * lets precompilation describe the same draw without allocating vertices. */
+   static void renderer_set_primitive_vertex_layout(CommandBuffer *cmd,
+         bool textured)
+   {
+      cmd->vbo.strides[0] = sizeof(BufferVertex);
+      cmd->vbo.input_rates[0] = VK_VERTEX_INPUT_RATE_VERTEX;
+      commandbuffer_set_dirty(cmd, COMMAND_BUFFER_DIRTY_STATIC_VERTEX_BIT);
+      commandbuffer_set_vertex_attrib(cmd, 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
+      commandbuffer_set_vertex_attrib(cmd, 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
+      if (textured)
+      {
+         commandbuffer_set_vertex_attrib(cmd, 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
+         commandbuffer_set_vertex_attrib(cmd, 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
+         commandbuffer_set_vertex_attrib(cmd, 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
+         commandbuffer_set_vertex_attrib(cmd, 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
+      }
+      commandbuffer_set_vertex_attrib(cmd, 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
+   }
+
+   static void renderer_set_opaque_primitive_pipeline_state(Renderer *self,
+         CommandBuffer *cmd, bool textured, int trans_mode)
+   {
+      commandbuffer_set_opaque_state(cmd);
+      commandbuffer_set_cull_mode(cmd, VK_CULL_MODE_NONE);
+      commandbuffer_set_depth_compare(cmd, VK_COMPARE_OP_LESS);
+      commandbuffer_set_primitive_topology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+      renderer_set_primitive_vertex_layout(cmd, textured);
+      renderer_set_opaque_primitive_spec_constants(self, cmd, trans_mode);
+   }
+
+   static void renderer_set_semi_transparent_pipeline_state(CommandBuffer *cmd)
+   {
+      commandbuffer_set_opaque_state(cmd);
+      commandbuffer_set_cull_mode(cmd, VK_CULL_MODE_NONE);
+      commandbuffer_set_depth_compare(cmd, VK_COMPARE_OP_LESS);
+      commandbuffer_set_depth_test(cmd, true, false);
+      commandbuffer_set_primitive_topology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+      renderer_set_primitive_vertex_layout(cmd, true);
+   }
+
    static void renderer_render_semi_transparent_opaque_texture_primitives(Renderer *self){
       BufferVertexVec *vertices = &self->queue.semi_transparent_opaque;
       PrimitiveInfoVec *scissors = &self->queue.semi_transparent_opaque_scissor;
       if (BufferVertexVec_empty(vertices))
          return;
 
-      commandbuffer_set_opaque_state(cbh_get(&self->cmd));
-      commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
-      commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
-      renderer_set_opaque_primitive_spec_constants(self, TransMode_SemiTransOpaque);
-      commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
+      renderer_set_opaque_primitive_pipeline_state(self, cbh_get(&self->cmd),
+            true, TransMode_SemiTransOpaque);
 
       renderer_dispatch(self, vertices, scissors, true);
    }
@@ -6285,18 +6421,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       if (BufferVertexVec_empty(vertices))
          return;
 
-      commandbuffer_set_opaque_state(cbh_get(&self->cmd));
-      commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
-      commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
-      renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
-      commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x)); /* Pad to support AMD */
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
+      renderer_set_opaque_primitive_pipeline_state(self, cbh_get(&self->cmd),
+            true, TransMode_Opaque);
 
       renderer_dispatch(self, vertices, scissors, true);
    }
@@ -6985,21 +7111,11 @@ static void renderer_init(Renderer *self,
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
-   if (vulkan_shader_precompilation)
-   {
-      /* Compile the complete primitive-pipeline set before the first emulated
-       * frame. This is intentionally blocking: the Android worker only
-       * parallelises the startup work and never overlaps compilation with
-       * gameplay. Other Vulkan platforms use the same deterministic set. */
-      renderer_precompile_current_configuration_pipelines(self);
-      {
-         VkClearValue clear_zero;
-         memset(&clear_zero, 0, sizeof(clear_zero));
-         commandbuffer_clear_image(cbh_get(&self->cmd),
-               ih_get(&self->scaled_framebuffer), &clear_zero);
-      }
-   }
-   else
+   vulkan_pipeline_precompiling = false;
+
+   /* HDR negotiation and live option adoption finish before prepare_frame.
+    * Precompile there, without touching framebuffer contents or draw queues. */
+   if (!vulkan_shader_precompilation)
       LOGI("[Vulkan shader precompilation] disabled by core option\n");
    renderer_flush(self);
    renderer_reset_scissor_queue(self);
@@ -7567,6 +7683,20 @@ static void renderer_mipmap_framebuffer(Renderer *self)
    } }
 }
 
+static void renderer_set_resolve_pipeline_state(Renderer *self,
+      CommandBuffer *cmd, unsigned filter)
+{
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Samples, self->msaa);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode, filter);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Scaling, self->scaling);
+   /* Nearest resolves do not use the transfer curve. Slot 7 is also MaskTest
+    * for primitive shaders, so it must never inherit a preceding draw. */
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_ResolveEotf,
+         filter ? psx_hdr_sdr_eotf : 0);
+   commandbuffer_set_specialization_constant_mask(cmd, ~0u);
+   commandbuffer_set_program(cmd, self->pipelines.resolve_to_unscaled);
+}
+
 static void renderer_ssaa_framebuffer(Renderer *self)
 {
    /* self->render_state.display_fb_rect = renderer_compute_vram_framebuffer_rect(self); */
@@ -7591,11 +7721,7 @@ static void renderer_ssaa_framebuffer(Renderer *self)
 
    renderer_ensure_command_buffer(self);
 
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Samples, self->msaa);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, 1);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_ResolveEotf, psx_hdr_sdr_eotf);
-   commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.resolve_to_unscaled);
+   renderer_set_resolve_pipeline_state(self, cbh_get(&self->cmd), 1);
    commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer_ssaa)));
    if (self->msaa > 1)
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
@@ -7744,6 +7870,15 @@ static DisplayRect renderer_compute_display_rect(Renderer *self)
    }
 }
 
+static Program *renderer_vram_scanout_program(Renderer *self, bool scaled)
+{
+   if (scaled)
+      return psx_hdr_active ? self->pipelines.hdr_scaled_quad_blitter
+                           : self->pipelines.scaled_quad_blitter;
+   return psx_hdr_active ? self->pipelines.hdr_unscaled_quad_blitter
+                        : self->pipelines.unscaled_quad_blitter;
+}
+
 static ImageHandle renderer_scanout_vram_to_texture(Renderer *self, bool scaled)
 {
    RenderPassInfo rp;
@@ -7830,14 +7965,13 @@ static ImageHandle renderer_scanout_vram_to_texture(Renderer *self, bool scaled)
    commandbuffer_begin_render_pass(cbh_get(&self->cmd), &rp, VK_SUBPASS_CONTENTS_INLINE);
    commandbuffer_set_quad_state(cbh_get(&self->cmd));
 
+   commandbuffer_set_program(cbh_get(&self->cmd), renderer_vram_scanout_program(self, scaled));
    if (scaled)
    {
-      commandbuffer_set_program(cbh_get(&self->cmd), psx_hdr_active ? self->pipelines.hdr_scaled_quad_blitter : self->pipelines.scaled_quad_blitter);
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_LinearClamp);
    }
    else
    {
-      commandbuffer_set_program(cbh_get(&self->cmd), psx_hdr_active ? self->pipelines.hdr_unscaled_quad_blitter : self->pipelines.unscaled_quad_blitter);
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_LinearClamp);
    }
 
@@ -8444,6 +8578,27 @@ static VkFormat renderer_hdr_scanout_format(Renderer *self)
    return self->hdr_scanout_format;
 }
 
+/* Shared program selection for runtime scanout and its precompile recipes.
+ * Resource bindings and push constants remain in the draw path. */
+static Program *renderer_scanout_program(Renderer *self, bool bpp24,
+      bool ssaa, bool adaptive, bool dither, bool yuv)
+{
+   bool hdr = psx_hdr_active && psx_video_cable == RHI_CABLE_NONE;
+   dither = dither && !psx_hdr_active;
+   if (bpp24)
+      return hdr
+         ? (yuv ? self->pipelines.hdr_bpp24_yuv_quad_blitter : self->pipelines.hdr_bpp24_quad_blitter)
+         : (yuv ? self->pipelines.bpp24_yuv_quad_blitter : self->pipelines.bpp24_quad_blitter);
+   if (ssaa)
+      return hdr ? self->pipelines.hdr_unscaled_quad_blitter
+         : dither ? self->pipelines.unscaled_dither_quad_blitter : self->pipelines.unscaled_quad_blitter;
+   if (adaptive && self->scaling != 1)
+      return hdr ? self->pipelines.hdr_mipmap_resolve
+         : dither ? self->pipelines.mipmap_dither_resolve : self->pipelines.mipmap_resolve;
+   return hdr ? self->pipelines.hdr_scaled_quad_blitter
+      : dither ? self->pipelines.scaled_dither_quad_blitter : self->pipelines.scaled_quad_blitter;
+}
+
 static ImageHandle renderer_scanout_to_texture(Renderer *self)
 {
    VkViewport old_vp;
@@ -8654,31 +8809,20 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
     * the cable trades the precision the user asked for against an artifact. So
     * HDR suppresses the dither with a cable exactly as it does without one. */
    dither = (self->render_state.scanout_mode == ScanoutMode_ABGR1555_Dither) && !psx_hdr_active;
+   commandbuffer_set_program(cbh_get(&self->cmd), renderer_scanout_program(self,
+         bpp24, ssaa, self->render_state.adaptive_smoothing, dither,
+         self->render_state.scanout_mdec_filter == ScanoutFilter_MDEC_YUV));
 
    if (bpp24)
    {
-      if (self->render_state.scanout_mdec_filter == ScanoutFilter_MDEC_YUV)
-         commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_bpp24_yuv_quad_blitter : self->pipelines.bpp24_yuv_quad_blitter);
-      else
-         commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_bpp24_quad_blitter : self->pipelines.bpp24_quad_blitter);
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestWrap);
    }
    else if (ssaa)
    {
-      if (dither)
-         commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.unscaled_dither_quad_blitter);
-      else
-         commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_unscaled_quad_blitter : self->pipelines.unscaled_quad_blitter);
-
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer_ssaa)), StockSampler_NearestWrap);
    }
    else if (!self->render_state.adaptive_smoothing || self->scaling == 1)
    {
-      if (dither)
-         commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.scaled_dither_quad_blitter);
-      else
-         commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_scaled_quad_blitter : self->pipelines.scaled_quad_blitter);
-
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_LinearWrap);
    }
    else
@@ -8689,11 +8833,6 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
        * already false under HDR (forced above), so the dither branch is SDR
        * only. */
       using_mipmap = true;
-      if (dither)
-         commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.mipmap_dither_resolve);
-      else
-         commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_mipmap_resolve : self->pipelines.mipmap_resolve);
-
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer)), StockSampler_TrilinearWrap);
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->bias_framebuffer)), StockSampler_LinearWrap);
    }
@@ -9006,10 +9145,7 @@ static void renderer_flush_resolves(Renderer *self)
       /* Always use nearest neighbor downscaling to avoid filter artifact (e.g.
        * unwanted black outlines in Vagrant Story) Supersampling will use a
        * separate pass for downsampling */
-      commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Samples, self->msaa);
-      commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, 0);
-      commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
-      commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.resolve_to_unscaled);
+      renderer_set_resolve_pipeline_state(self, cbh_get(&self->cmd), 0);
       commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)));
       if (self->msaa > 1)
          commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
@@ -9840,43 +9976,76 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    }
 }
 
-static void renderer_precompile_textured_batch_variant(
-      BufferVertexVec *vertices,
-      PrimitiveInfoVec *scissors,
-      bool filtering,
-      bool scaled_read,
-      unsigned shift,
-      bool offset_uv)
+/* These attachment descriptors contain metadata only. The render-pass cache
+ * copies formats, sample counts and subpass descriptions; it never retains
+ * the Image/ImageView pointers. No image, allocation or framebuffer is made. */
+static const RenderPass *renderer_precompile_render_pass(Renderer *self,
+      VkFormat color_format, bool primitives, bool feedback)
 {
-   BufferVertex vertex;
-   PrimitiveInfo info;
-   unsigned i;
+   Image color;
+   Image depth;
+   ImageView color_view;
+   ImageView depth_view;
+   RenderPassInfo pass;
+   RenderPassInfo_Subpass subpass;
 
-   memset(&vertex, 0, sizeof(vertex));
-   vertex.z = 0.5f;
-   vertex.w = 1.0f;
-   info = primitive_info_make(PrimitiveInfoVec_size(scissors), -1,
-         hd_handle_make_none(), filtering, scaled_read, shift, offset_uv);
-   for (i = 0; i < 3; i++)
-      BufferVertexVec_push(vertices, &vertex);
-   PrimitiveInfoVec_push(scissors, &info);
+   memset(&color, 0, sizeof(color));
+   memset(&depth, 0, sizeof(depth));
+   memset(&color_view, 0, sizeof(color_view));
+   memset(&depth_view, 0, sizeof(depth_view));
+   color.create_info = image_create_info_render_target(1, 1, color_format);
+   color.create_info.samples = (VkSampleCountFlagBits)(primitives ? self->msaa : 1);
+   color.layout_type = primitives ? Layout_General : Layout_Optimal;
+   color_view.info.image = &color;
+   color_view.info.format = color_format;
+
+   render_pass_info_defaults(&pass);
+   pass.color_attachments[0] = &color_view;
+   pass.num_color_attachments = 1;
+   pass.store_attachments = 1;
+   pass.clear_attachments = 1;
+   if (primitives)
+   {
+      depth.create_info = image_create_info_render_target(1, 1,
+            device_get_default_depth_format(self->device));
+      depth.create_info.samples = (VkSampleCountFlagBits)self->msaa;
+      depth.create_info.domain = ImageDomain_Transient;
+      depth.layout_type = Layout_Optimal;
+      depth_view.info.image = &depth;
+      depth_view.info.format = depth.create_info.format;
+      pass.depth_stencil = &depth_view;
+      pass.op_flags = RENDER_PASS_OP_CLEAR_DEPTH_STENCIL_BIT;
+      render_pass_info_subpass_defaults(&subpass);
+      subpass.num_color_attachments = 1;
+      subpass.color_attachments[0] = 0;
+      if (feedback)
+      {
+         subpass.num_input_attachments = 1;
+         subpass.input_attachments[0] = 0;
+      }
+      pass.num_subpasses = 1;
+      pass.subpasses = &subpass;
+   }
+   return device_request_render_pass(self->device, &pass, true);
+}
+
+static void renderer_precompile_opaque_variant(Renderer *self,
+      CommandBuffer *cmd, bool textured, int trans_mode, bool filtering,
+      bool scaled_read, unsigned shift, bool offset_uv)
+{
+   renderer_set_opaque_primitive_pipeline_state(self, cmd, textured, trans_mode);
+   renderer_set_primitive_texture_pipeline(self, cmd, textured, filtering,
+         scaled_read, shift, offset_uv);
+   commandbuffer_set_specialization_constant_mask(cmd, ~0u);
+   commandbuffer_draw(cmd, 3, 1, 0, 0);
 }
 
 static void renderer_precompile_semi_transparent_variant(Renderer *self,
-      SemiTransparentMode mode,
-      bool textured,
-      bool masked,
-      bool filtering,
-      bool scaled_read,
-      unsigned shift,
-      bool offset_uv)
+      CommandBuffer *cmd, SemiTransparentMode mode, bool textured, bool masked,
+      bool filtering, bool scaled_read, unsigned shift, bool offset_uv)
 {
    SemiTransparentState state;
-   BufferVertex vertex;
-   unsigned i;
-
    memset(&state, 0, sizeof(state));
-   state.scissor_index = -1;
    state.semi_transparent = mode;
    state.textured = textured;
    state.masked = masked;
@@ -9884,161 +10053,157 @@ static void renderer_precompile_semi_transparent_variant(Renderer *self,
    state.scaled_read = scaled_read;
    state.shift = shift;
    state.offset_uv = offset_uv;
-   SemiTransparentStateVec_push(
-         &self->queue.semi_transparent_state, &state);
 
-   memset(&vertex, 0, sizeof(vertex));
-   vertex.z = 0.5f;
-   vertex.w = 1.0f;
-   for (i = 0; i < 3; i++)
-      BufferVertexVec_push(&self->queue.semi_transparent, &vertex);
+   renderer_set_semi_transparent_pipeline_state(cmd);
+   renderer_semi_transparent_set_pipeline_state(self, cmd, &state);
+   commandbuffer_set_specialization_constant_mask(cmd, ~0u);
+   commandbuffer_draw(cmd, 3, 1, 0, 0);
+   if (renderer_semi_trans_batch_wants_sub_floor(self, &state))
+   {
+      renderer_set_sub_floor_pipeline_state(self, cmd);
+      commandbuffer_draw(cmd, 6, 1, 0, 0);
+   }
 }
 
-static unsigned renderer_precompile_textured_batch_manifest(
-      Renderer *self,
-      BufferVertexVec *vertices,
-      PrimitiveInfoVec *scissors)
+/* Texture source depth, filtering and scaled reads are correlated: rendered
+ * scaled textures are direct-16 and nearest-only. Both this traversal and the
+ * runtime use the same pipeline-state setters for each reachable tuple. */
+static unsigned renderer_precompile_texture_variants(Renderer *self,
+      CommandBuffer *cmd, int trans_mode, SemiTransparentMode semi_mode,
+      bool semi_transparent, bool masked)
 {
    unsigned variants = 0;
-   unsigned shift;
+   unsigned scaled_read;
    unsigned offset_count = self->scaled_uv_offset ? 2u : 1u;
-   unsigned offset_uv;
-
-   /* A scaled framebuffer read can only be a rendered direct-16-bit texture.
-    * Palette shifts and filtering are therefore impossible on this branch. */
-   for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+   for (scaled_read = 0; scaled_read < 2; scaled_read++)
    {
-      renderer_precompile_textured_batch_variant(vertices, scissors,
-            false, true, 0, offset_uv != 0);
-      variants++;
-   }
-
-   /* Unscaled textures cover direct-16, 8-bit and 4-bit source depths. Each
-    * can use nearest sampling (including filter-exclusion cases), or the one
-    * configured primitive filter. */
-   for (shift = 0; shift < 3; shift++)
-   {
-      for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+      unsigned shift;
+      unsigned shift_count = scaled_read ? 1u : 3u;
+      unsigned filter_count = !scaled_read &&
+         self->primitive_filter_mode != FilterMode_NearestNeighbor ? 2u : 1u;
+      for (shift = 0; shift < shift_count; shift++)
       {
-         renderer_precompile_textured_batch_variant(vertices, scissors,
-               false, false, shift, offset_uv != 0);
-         variants++;
-         if (self->primitive_filter_mode != FilterMode_NearestNeighbor)
+         unsigned filtering;
+         for (filtering = 0; filtering < filter_count; filtering++)
          {
-            renderer_precompile_textured_batch_variant(vertices, scissors,
-                  true, false, shift, offset_uv != 0);
-            variants++;
+            unsigned offset_uv;
+            for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+            {
+               if (semi_transparent)
+                  renderer_precompile_semi_transparent_variant(self, cmd,
+                        semi_mode, true, masked, filtering != 0,
+                        scaled_read != 0, shift, offset_uv != 0);
+               else
+                  renderer_precompile_opaque_variant(self, cmd, true,
+                        trans_mode, filtering != 0, scaled_read != 0,
+                        shift, offset_uv != 0);
+               variants++;
+            }
          }
       }
    }
    return variants;
 }
 
-static unsigned renderer_precompile_semi_transparent_manifest(Renderer *self,
-      SemiTransparentMode mode,
-      bool masked)
+static unsigned renderer_precompile_primitive_pipelines(Renderer *self,
+      CommandBuffer *cmd, bool feedback)
 {
-   unsigned variants = 0;
-   unsigned shift;
-   unsigned offset_count = self->scaled_uv_offset ? 2u : 1u;
-   unsigned offset_uv;
-
-   renderer_precompile_semi_transparent_variant(self, mode,
-         false, masked, false, false, 0, false);
-   variants++;
-
-   for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+   static const SemiTransparentMode modes[] = {
+      SemiTransparentMode_None, SemiTransparentMode_Average,
+      SemiTransparentMode_Add, SemiTransparentMode_Sub,
+      SemiTransparentMode_AddQuarter
+   };
+   unsigned variants = 1;
+   VK_ASSERT(vulkan_pipeline_precompiling && cmd->cmd == VK_NULL_HANDLE);
+   cmd->compatible_render_pass = renderer_precompile_render_pass(self,
+         self->scaled_fb_format, true, feedback);
+   if (!cmd->compatible_render_pass ||
+         render_pass_get_render_pass(cmd->compatible_render_pass) == VK_NULL_HANDLE)
    {
-      renderer_precompile_semi_transparent_variant(self, mode,
-            true, masked, false, true, 0, offset_uv != 0);
-      variants++;
+      vulkan_precompile_recipes.failed = true;
+      cmd->compatible_render_pass = NULL;
+      return 0;
    }
+   cmd->current_subpass = 0;
+   commandbuffer_begin_graphics(cmd);
 
-   for (shift = 0; shift < 3; shift++)
+   renderer_precompile_opaque_variant(self, cmd, false, TransMode_Opaque,
+         false, false, 0, false);
+   variants += renderer_precompile_texture_variants(self, cmd,
+         TransMode_Opaque, SemiTransparentMode_None, false, false);
+   if (feedback)
    {
-      for (offset_uv = 0; offset_uv < offset_count; offset_uv++)
+      unsigned mode;
+      variants += renderer_precompile_texture_variants(self, cmd,
+            TransMode_SemiTransOpaque, SemiTransparentMode_None, false, false);
+      for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
       {
-         renderer_precompile_semi_transparent_variant(self, mode,
-               true, masked, false, false, shift, offset_uv != 0);
-         variants++;
-         if (self->primitive_filter_mode != FilterMode_NearestNeighbor)
+         unsigned masked;
+         for (masked = modes[mode] == SemiTransparentMode_None ? 1u : 0u;
+               masked < 2; masked++)
          {
-            renderer_precompile_semi_transparent_variant(self, mode,
-                  true, masked, true, false, shift, offset_uv != 0);
+            renderer_precompile_semi_transparent_variant(self, cmd, modes[mode],
+                  false, masked != 0, false, false, 0, false);
             variants++;
+            variants += renderer_precompile_texture_variants(self, cmd,
+                  TransMode_Opaque, modes[mode], true, masked != 0);
          }
       }
    }
+   cmd->compatible_render_pass = NULL;
+   commandbuffer_begin_compute(cmd);
    return variants;
 }
 
 static void renderer_precompile_quad_pipeline(Renderer *self,
-      Program *program,
-      VkFormat format)
+      CommandBuffer *cmd, Program *program, VkFormat format)
 {
-   ImageCreateInfo image_info = image_create_info_render_target(1, 1, format);
-   ImageHandle image = ih_make(NULL);
-   RenderPassInfo pass;
-   CommandBuffer *cmd;
-
-   image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-   image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-   ih_move(&image, device_create_image(self->device, &image_info, NULL));
-
-   render_pass_info_defaults(&pass);
-   pass.color_attachments[0] = image_get_view(ih_get(&image));
-   pass.num_color_attachments = 1;
-   pass.clear_attachments = 1;
-   pass.store_attachments = 1;
-
-   /* Only the compatible render-pass key is part of the pipeline. Avoid
-    * recording a synthetic begin/end render pass into the live command
-    * buffer: that would keep this temporary image alive until submission. */
-   renderer_ensure_command_buffer(self);
-   cmd = cbh_get(&self->cmd);
-   VK_ASSERT(!cmd->compatible_render_pass);
-   VK_ASSERT(!cmd->actual_render_pass);
-   VK_ASSERT(!cmd->framebuffer);
-   cmd->compatible_render_pass =
-      device_request_render_pass(self->device, &pass, true);
+   if (!program)
+      return;
+   VK_ASSERT(vulkan_pipeline_precompiling && cmd->cmd == VK_NULL_HANDLE);
+   cmd->compatible_render_pass = renderer_precompile_render_pass(self,
+         format, false, false);
+   if (!cmd->compatible_render_pass ||
+         render_pass_get_render_pass(cmd->compatible_render_pass) == VK_NULL_HANDLE)
+   {
+      vulkan_precompile_recipes.failed = true;
+      cmd->compatible_render_pass = NULL;
+      return;
+   }
    cmd->current_subpass = 0;
    commandbuffer_begin_graphics(cmd);
    commandbuffer_set_quad_state(cmd);
    commandbuffer_set_program(cmd, program);
-   commandbuffer_set_vertex_binding(cmd, 0,
-         bh_get(&self->quad), 0, 8, VK_VERTEX_INPUT_RATE_VERTEX);
-   commandbuffer_set_vertex_attrib(cmd, 0, 0,
-         VK_FORMAT_R32G32_SFLOAT, 0);
-   commandbuffer_set_primitive_topology(cmd,
-         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+   cmd->vbo.strides[0] = 8;
+   cmd->vbo.input_rates[0] = VK_VERTEX_INPUT_RATE_VERTEX;
+   commandbuffer_set_vertex_attrib(cmd, 0, 0, VK_FORMAT_R32G32_SFLOAT, 0);
+   commandbuffer_set_primitive_topology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
    commandbuffer_draw(cmd, 4, 1, 0, 0);
    cmd->compatible_render_pass = NULL;
    commandbuffer_begin_compute(cmd);
-   ih_reset(&image);
 }
 
 static void renderer_precompile_compute_pipeline(Renderer *self,
-      Program *program,
-      unsigned filter_mode)
+      CommandBuffer *cmd, Program *program, unsigned filter)
 {
-   CommandBuffer *cmd;
-
    if (!program)
       return;
-
-   renderer_ensure_command_buffer(self);
-   cmd = cbh_get(&self->cmd);
-   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Samples,
-         self->msaa);
-   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode,
-         filter_mode);
-   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Scaling,
-         self->scaling);
-   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_ResolveEotf,
-         psx_hdr_sdr_eotf);
-   commandbuffer_set_specialization_constant_mask(cmd, ~0u);
-   commandbuffer_set_program(cmd, program);
+   VK_ASSERT(vulkan_pipeline_precompiling && cmd->cmd == VK_NULL_HANDLE);
+   if (program == self->pipelines.resolve_to_unscaled)
+      renderer_set_resolve_pipeline_state(self, cmd, filter);
+   else
+   {
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Samples,
+            self->msaa);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode,
+            filter);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Scaling,
+            self->scaling);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_ResolveEotf,
+            psx_hdr_sdr_eotf);
+      commandbuffer_set_specialization_constant_mask(cmd, ~0u);
+      commandbuffer_set_program(cmd, program);
+   }
    commandbuffer_dispatch(cmd, 1, 1, 1);
 }
 
@@ -10101,7 +10266,7 @@ static bool renderer_precompile_manifest_program_is_active(Renderer *self,
       case RendererPipelineManifestId_Bpp24YuvQuadBlitter:
          return !hdr_quad && mdec_yuv;
       case RendererPipelineManifestId_HdrScaledQuadBlitter:
-         return hdr_quad && regular_scaled;
+         return (hdr_quad && regular_scaled) || (show_vram && psx_hdr_active);
       case RendererPipelineManifestId_HdrUnscaledQuadBlitter:
          return hdr_quad && ssaa;
       case RendererPipelineManifestId_HdrBpp24QuadBlitter:
@@ -10144,6 +10309,52 @@ static bool renderer_precompile_manifest_program_is_active(Renderer *self,
       default:
          return false;
    }
+}
+
+static bool vulkan_precompile_validate_recipes(bool published)
+{
+   unsigned i;
+   bool complete = !vulkan_precompile_recipes.failed;
+   for (i = 0; i < vulkan_precompile_recipes.count; i++)
+   {
+      const struct VulkanPipelineRecipe *recipe = &vulkan_precompile_recipes.items[i];
+      IntrusivePODWrapperPipeline *entry =
+         program_find_pipeline(recipe->program, recipe->hash);
+      bool found = entry && entry->value != VK_NULL_HANDLE;
+      unsigned j;
+      if (!found && !published)
+      {
+         if (recipe->graphics)
+         {
+            for (j = 0; j < vulkan_graphics_precompile_jobs.count; j++)
+               if (vulkan_graphics_precompile_jobs.items[j].program == recipe->program &&
+                     vulkan_graphics_precompile_jobs.items[j].hash == recipe->hash)
+               {
+                  found = true;
+                  break;
+               }
+         }
+         else
+         {
+            for (j = 0; j < vulkan_compute_precompile_jobs.count; j++)
+               if (vulkan_compute_precompile_jobs.items[j].program == recipe->program &&
+                     vulkan_compute_precompile_jobs.items[j].hash == recipe->hash)
+               {
+                  found = true;
+                  break;
+               }
+         }
+      }
+      if (!found)
+      {
+         LOGE("[Vulkan shader precompilation] missing %s recipe program=%016llx pipeline=%016llx published=%u\n",
+               recipe->graphics ? "graphics" : "compute",
+               (unsigned long long)recipe->program->intrusive_node.key,
+               (unsigned long long)recipe->hash, published ? 1u : 0u);
+         complete = false;
+      }
+   }
+   return complete;
 }
 
 static bool renderer_precompile_manifest_validate(Renderer *self,
@@ -10190,20 +10401,12 @@ static bool renderer_precompile_manifest_validate(Renderer *self,
          continue;
       }
 
-      for (j = 0; j < vulkan_graphics_precompile_jobs.count; j++)
-         if (vulkan_graphics_precompile_jobs.items[j].program == program)
+      for (j = 0; j < vulkan_precompile_recipes.count; j++)
+         if (vulkan_precompile_recipes.items[j].program == program)
          {
             found = true;
             break;
          }
-      if (!found)
-         for (j = 0; j < vulkan_compute_precompile_jobs.count; j++)
-            if (vulkan_compute_precompile_jobs.items[j].program == program)
-            {
-               found = true;
-               break;
-            }
-
       if (!found)
       {
          LOGE("[Vulkan shader precompilation manifest] no captured recipe program=%s role=%u\n",
@@ -10219,7 +10422,8 @@ static bool renderer_precompile_manifest_validate(Renderer *self,
    return complete;
 }
 
-static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self)
+static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self,
+      CommandBuffer *cmd)
 {
    bool analog = psx_video_cable != RHI_CABLE_NONE;
    bool hdr_quad = psx_hdr_active && !analog;
@@ -10237,127 +10441,113 @@ static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self)
       : dither ? VK_FORMAT_A1R5G5B5_UNORM_PACK16
       : VK_FORMAT_R8G8B8A8_UNORM;
 
-   if (adaptive)
-      program = hdr_quad ? self->pipelines.hdr_mipmap_resolve
-         : dither ? self->pipelines.mipmap_dither_resolve
-         : self->pipelines.mipmap_resolve;
-   else if (ssaa)
-      program = hdr_quad ? self->pipelines.hdr_unscaled_quad_blitter
-         : dither ? self->pipelines.unscaled_dither_quad_blitter
-         : self->pipelines.unscaled_quad_blitter;
-   else
-      program = hdr_quad ? self->pipelines.hdr_scaled_quad_blitter
-         : dither ? self->pipelines.scaled_dither_quad_blitter
-         : self->pipelines.scaled_quad_blitter;
-   renderer_precompile_quad_pipeline(self, program, scanout_format);
+   program = renderer_scanout_program(self, false, ssaa, adaptive, dither, mdec_yuv);
+   renderer_precompile_quad_pipeline(self, cmd, program, scanout_format);
 
-   program = hdr_quad
-      ? (mdec_yuv ? self->pipelines.hdr_bpp24_yuv_quad_blitter
-                  : self->pipelines.hdr_bpp24_quad_blitter)
-      : (mdec_yuv ? self->pipelines.bpp24_yuv_quad_blitter
-                  : self->pipelines.bpp24_quad_blitter);
-   renderer_precompile_quad_pipeline(self, program,
+   program = renderer_scanout_program(self, true, ssaa, adaptive, false, mdec_yuv);
+   renderer_precompile_quad_pipeline(self, cmd, program,
          analog ? VK_FORMAT_R16G16B16A16_SFLOAT
                 : hdr_quad ? hdr_format : VK_FORMAT_R8G8B8A8_UNORM);
 
-   if (show_vram && !psx_hdr_active)
-      renderer_precompile_quad_pipeline(self,
-            self->pipelines.scaled_quad_blitter,
-            VK_FORMAT_A1R5G5B5_UNORM_PACK16);
+   /* Display VRAM bypasses ordinary scanout filtering and the analog chain. */
+   if (show_vram)
+      renderer_precompile_quad_pipeline(self, cmd,
+            renderer_vram_scanout_program(self, true),
+            psx_hdr_active ? hdr_format : VK_FORMAT_A1R5G5B5_UNORM_PACK16);
 
    if (adaptive)
    {
       if (trailing_zeroes(self->scaling) >= 1)
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.mipmap_energy_first,
                self->scaled_fb_format);
       if (trailing_zeroes(self->scaling) >= 2)
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.mipmap_energy,
                self->scaled_fb_format);
-      renderer_precompile_quad_pipeline(self,
+      renderer_precompile_quad_pipeline(self, cmd,
             self->pipelines.mipmap_energy_blur, VK_FORMAT_R8_UNORM);
    }
 
    if (analog)
    {
       if (self->scaling != 1 && !ssaa)
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_downsample,
                VK_FORMAT_R16G16B16A16_SFLOAT);
       if (psx_video_cable == RHI_CABLE_RGB)
       {
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_rgb,
                VK_FORMAT_R16G16B16A16_SFLOAT);
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_rgb_pal,
                VK_FORMAT_R16G16B16A16_SFLOAT);
       }
       else
       {
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_encode, VK_FORMAT_R16G16_SFLOAT);
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_encode_pal, VK_FORMAT_R16G16_SFLOAT);
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_comb, VK_FORMAT_R16G16_SFLOAT);
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_comb_pal, VK_FORMAT_R16G16_SFLOAT);
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_demod,
                VK_FORMAT_R16G16B16A16_SFLOAT);
-         renderer_precompile_quad_pipeline(self,
+         renderer_precompile_quad_pipeline(self, cmd,
                self->pipelines.analog_demod_pal,
                VK_FORMAT_R16G16B16A16_SFLOAT);
-         renderer_precompile_compute_pipeline(self,
+         renderer_precompile_compute_pipeline(self, cmd,
                self->pipelines.analog_notch, FilterMode_NearestNeighbor);
-         renderer_precompile_compute_pipeline(self,
+         renderer_precompile_compute_pipeline(self, cmd,
                self->pipelines.analog_notch_pal,
                FilterMode_NearestNeighbor);
       }
-      renderer_precompile_quad_pipeline(self,
+      renderer_precompile_quad_pipeline(self, cmd,
             psx_hdr_active ? self->pipelines.analog_resolve_hdr
                            : self->pipelines.analog_resolve,
             psx_hdr_active ? hdr_format : VK_FORMAT_R8G8B8A8_UNORM);
    }
 
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.resolve_to_scaled, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.resolve_to_unscaled, FilterMode_NearestNeighbor);
    if (ssaa)
-      renderer_precompile_compute_pipeline(self,
+      renderer_precompile_compute_pipeline(self, cmd,
             self->pipelines.resolve_to_unscaled, 1u);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.copy_to_vram, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.copy_to_vram_masked, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.blit_vram_scaled, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.blit_vram_scaled_masked, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.blit_vram_unscaled, FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.blit_vram_unscaled_masked,
          FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.blit_vram_cached_unscaled,
          FilterMode_NearestNeighbor);
-   renderer_precompile_compute_pipeline(self,
+   renderer_precompile_compute_pipeline(self, cmd,
          self->pipelines.blit_vram_cached_unscaled_masked,
          FilterMode_NearestNeighbor);
 
    if (self->msaa > 1)
    {
-      renderer_precompile_compute_pipeline(self,
+      renderer_precompile_compute_pipeline(self, cmd,
             self->pipelines.blit_vram_msaa_cached_scaled,
             FilterMode_NearestNeighbor);
-      renderer_precompile_compute_pipeline(self,
+      renderer_precompile_compute_pipeline(self, cmd,
             self->pipelines.blit_vram_msaa_cached_scaled_masked,
             FilterMode_NearestNeighbor);
-      renderer_precompile_compute_pipeline(self,
+      renderer_precompile_compute_pipeline(self, cmd,
             self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
                ? self->pipelines.msaa_resolve_weighted
                : self->pipelines.msaa_resolve_weighted_sdr,
@@ -10365,10 +10555,10 @@ static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self)
    }
    else
    {
-      renderer_precompile_compute_pipeline(self,
+      renderer_precompile_compute_pipeline(self, cmd,
             self->pipelines.blit_vram_cached_scaled,
             FilterMode_NearestNeighbor);
-      renderer_precompile_compute_pipeline(self,
+      renderer_precompile_compute_pipeline(self, cmd,
             self->pipelines.blit_vram_cached_scaled_masked,
             FilterMode_NearestNeighbor);
    }
@@ -10377,13 +10567,7 @@ static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self)
 static void renderer_precompile_current_configuration_pipelines(
       Renderer *self)
 {
-   static const SemiTransparentMode modes[] = {
-      SemiTransparentMode_Average,
-      SemiTransparentMode_Add,
-      SemiTransparentMode_Sub,
-      SemiTransparentMode_AddQuarter
-   };
-   TTRect rect = { 0, 0, 1, 1 };
+   CommandBuffer cmd;
    unsigned feedback;
    retro_time_t start_usec = cpu_features_get_time_usec();
    retro_time_t compile_elapsed_usec = 0;
@@ -10398,108 +10582,45 @@ static void renderer_precompile_current_configuration_pipelines(
    bool complete;
 
    vulkan_precompile_jobs_begin();
+   memset(&vulkan_precompile_recipes, 0, sizeof(vulkan_precompile_recipes));
+   commandbuffer_init(&cmd, self->device, VK_NULL_HANDLE, Type_Generic);
    vulkan_pipeline_precompiling = true;
 
-   /* These core options are parsed before renderer creation, while their
-    * normal per-frame copies happen after it. Seed the renderer now so the
-    * current-configuration manifest cannot silently assume constructor
-    * defaults. */
-   self->scaled_uv_offset = scaled_uv_offset;
-   self->primitive_filter_mode = (FilterMode)filter_mode;
-
-   /* A normal and an input-attachment-compatible render pass have distinct
-    * Vulkan compatibility keys. Ordinary opaque draws can occur in either,
-    * but masking and translucency always make the pass feedback-compatible.
-    * Generate only source-reachable combinations through the real queue and
-    * state setters so pipeline hashes cannot drift from runtime. */
+   /* CPU-only descriptions reuse the draw path's state setters and canonical
+    * identity. No synthetic vertices, command submissions or live queue edits.
+    * Ordinary draws occur in both pass types; masking/translucency require
+    * input-attachment compatibility. */
    for (feedback = 0; feedback < 2; feedback++)
-   {
-      self->render_pass_is_feedback = feedback != 0;
-      {
-         BufferVertex vertex;
-         PrimitiveInfo info;
-         unsigned i;
-         memset(&vertex, 0, sizeof(vertex));
-         vertex.z = 0.5f;
-         vertex.w = 1.0f;
-         for (i = 0; i < 3; i++)
-            BufferVertexVec_push(&self->queue.opaque, &vertex);
-         info = primitive_info_make(0, -1, hd_handle_make_none(),
-               false, false, 0, false);
-         PrimitiveInfoVec_push(&self->queue.opaque_scissor, &info);
-         variants++;
-      }
-
-      variants += renderer_precompile_textured_batch_manifest(self,
-            &self->queue.opaque_textured,
-            &self->queue.opaque_textured_scissor);
-
-      if (feedback)
-      {
-         unsigned mode;
-
-         /* The first opaque pass for a translucent textured primitive uses
-          * TransMode_SemiTransOpaque. It shares the same correlated texture
-          * axes as ordinary opaque textured draws. */
-         variants += renderer_precompile_textured_batch_manifest(self,
-               &self->queue.semi_transparent_opaque,
-               &self->queue.semi_transparent_opaque_scissor);
-
-         /* Mask-test without translucency uses fixed-function destination
-          * alpha blending, but still requires a feedback-compatible pass. */
-         variants += renderer_precompile_semi_transparent_manifest(self,
-               SemiTransparentMode_None, true);
-
-         for (mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++)
-         {
-            variants += renderer_precompile_semi_transparent_manifest(self,
-                  modes[mode], false);
-            variants += renderer_precompile_semi_transparent_manifest(self,
-                  modes[mode], true);
-         }
-      }
-
-      renderer_flush_render_pass(self, &rect);
-   }
-
-   renderer_precompile_manifest_nonprimitive_pipelines(self);
+      variants += renderer_precompile_primitive_pipelines(self, &cmd, feedback != 0);
+   renderer_precompile_manifest_nonprimitive_pipelines(self, &cmd);
    manifest_complete = renderer_precompile_manifest_validate(self,
          &manifest_programs, &manifest_missing);
+   if (!vulkan_precompile_validate_recipes(false))
+      manifest_complete = false;
 
    complete = vulkan_precompile_jobs_finish(self->device, &jobs,
          &graphics_jobs, &compute_jobs, &workers, &compile_elapsed_usec);
+   if (!vulkan_precompile_validate_recipes(true))
+      complete = false;
    complete = complete && manifest_complete;
    vulkan_pipeline_precompiling = false;
+   commandbuffer_fini(&cmd);
 
-   /* Android may terminate the process without a clean libretro teardown.
-    * Persist a successfully completed precompile immediately so that the
-    * expensive driver work survives even in that case. */
+   /* Android may terminate without teardown. Save successful new work now;
+    * an unchanged configuration/payload will not be rewritten. */
    if (complete)
       device_pipeline_cache_save(self->device);
 
-   {
-      size_t driver_cache_bytes = 0;
-      VkPipelineCache driver_cache = device_get_pipeline_cache(self->device);
-      VkResult cache_result = driver_cache != VK_NULL_HANDLE
-         ? vkGetPipelineCacheData(
-               device_get_device(self->device),
-               driver_cache,
-               &driver_cache_bytes, NULL)
-         : VK_ERROR_INITIALIZATION_FAILED;
-      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
-         variants, jobs, graphics_jobs, compute_jobs,
-         manifest_programs, manifest_missing, workers,
-         complete ? 1u : 0u,
-         (long long)compile_elapsed_usec,
-         (long long)(cpu_features_get_time_usec() - start_usec),
-         (int)cache_result,
-         (unsigned long long)driver_cache_bytes);
-   }
+   LOGI("[Vulkan shader precompilation] variants=%u recipes=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld\n",
+      variants, vulkan_precompile_recipes.count, jobs, graphics_jobs, compute_jobs,
+      manifest_programs, manifest_missing, workers,
+      complete ? 1u : 0u, (long long)compile_elapsed_usec,
+      (long long)(cpu_features_get_time_usec() - start_usec));
+   free(vulkan_precompile_recipes.items);
+   memset(&vulkan_precompile_recipes, 0, sizeof(vulkan_precompile_recipes));
 }
 
-static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
-      bool scaled_read,
-      bool textured)
+static void renderer_bind_primitive_texture(Renderer *self, bool scaled_read)
 {
    if (scaled_read)
    {
@@ -10510,16 +10631,28 @@ static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
    }
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
+}
+
+static void renderer_set_primitive_texture_pipeline(Renderer *self,
+      CommandBuffer *cmd, bool textured, bool filtering, bool scaled_read,
+      unsigned shift, bool offset_uv)
+{
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode,
+         textured && filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Shift,
+         textured ? shift : 0);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_OffsetUV,
+         textured && offset_uv ? 1 : 0);
    if (textured)
    {
       if (scaled_read)
-         commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.textured_scaled);
+         commandbuffer_set_program(cmd, self->pipelines.textured_scaled);
       else
-         commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.textured_unscaled);
+         commandbuffer_set_program(cmd, self->pipelines.textured_unscaled);
    }
    else
    {
-      commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.flat);
+      commandbuffer_set_program(cmd, self->pipelines.flat);
    }
 }
 
@@ -10590,13 +10723,9 @@ static void renderer_dispatch(Renderer *self,
 
    renderer_hd_texture_uniforms(self, hd_texture);
    commandbuffer_set_scissor(cbh_get(&self->cmd), scissor < 0 ? &self->queue.default_scissor : Rect2DVec_at(&self->queue.scissors, scissor));
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
-         textured && filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
-         textured ? shift : 0);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
-         textured && offset_uv ? 1 : 0);
-   renderer_dispatch_set_scaled_read_texture(self, scaled_read, textured);
+   renderer_set_primitive_texture_pipeline(self, cbh_get(&self->cmd),
+         textured, filtering, scaled_read, shift, offset_uv);
+   renderer_bind_primitive_texture(self, scaled_read);
    memcpy(vert, BufferVertexVec_data((struct BufferVertexVec *)vertices) + 3 * (*PrimitiveInfoVec_front(scissors)).triangle_index, 3 * sizeof(BufferVertex));
    vert += 3;
 
@@ -10619,25 +10748,13 @@ static void renderer_dispatch(Renderer *self,
             hd_texture = (*PrimitiveInfoVec_at(scissors, i)).hd_texture_index;
             renderer_hd_texture_uniforms(self, hd_texture);
          }
-         if ((*PrimitiveInfoVec_at(scissors, i)).filtering != filtering) {
-            filtering = (*PrimitiveInfoVec_at(scissors, i)).filtering;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
-                  textured && filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
-         }
-         if ((*PrimitiveInfoVec_at(scissors, i)).scaled_read != scaled_read) {
-            scaled_read = (*PrimitiveInfoVec_at(scissors, i)).scaled_read;
-            renderer_dispatch_set_scaled_read_texture(self, scaled_read, textured);
-         }
-         if ((*PrimitiveInfoVec_at(scissors, i)).shift != shift) {
-            shift = (*PrimitiveInfoVec_at(scissors, i)).shift;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
-                  textured ? shift : 0);
-         }
-         if ((*PrimitiveInfoVec_at(scissors, i)).offset_uv != offset_uv) {
-            offset_uv = (*PrimitiveInfoVec_at(scissors, i)).offset_uv;
-            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
-                  textured && offset_uv ? 1 : 0);
-         }
+         filtering = (*PrimitiveInfoVec_at(scissors, i)).filtering;
+         scaled_read = (*PrimitiveInfoVec_at(scissors, i)).scaled_read;
+         shift = (*PrimitiveInfoVec_at(scissors, i)).shift;
+         offset_uv = (*PrimitiveInfoVec_at(scissors, i)).offset_uv;
+         renderer_set_primitive_texture_pipeline(self, cbh_get(&self->cmd),
+               textured, filtering, scaled_read, shift, offset_uv);
+         renderer_bind_primitive_texture(self, scaled_read);
       }
       memcpy(vert, BufferVertexVec_data((struct BufferVertexVec *)vertices) + 3 * (*PrimitiveInfoVec_at(scissors, i)).triangle_index, 3 * sizeof(BufferVertex));
    }
@@ -10654,14 +10771,8 @@ static void renderer_render_opaque_primitives(Renderer *self){
    if (BufferVertexVec_empty(vertices))
       return;
 
-   commandbuffer_set_opaque_state(cbh_get(&self->cmd));
-   commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
-   commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
-   renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
-   commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+   renderer_set_opaque_primitive_pipeline_state(self, cbh_get(&self->cmd),
+         false, TransMode_Opaque);
 
    renderer_dispatch(self, vertices, scissors, false);
 }
@@ -10734,15 +10845,25 @@ static bool renderer_semi_trans_batch_wants_sub_floor(const Renderer *self,
 /* Draw the zero-floor quad over the current scissor. Restores the depth
  * state the semi-transparent loop established; program and blend state are
  * re-set by the next renderer_semi_transparent_set_state call. */
+static void renderer_set_sub_floor_pipeline_state(Renderer *self,
+      CommandBuffer *cmd)
+{
+   commandbuffer_set_program(cmd, self->pipelines.flat_floor);
+   commandbuffer_set_blend_enable(cmd, true);
+   commandbuffer_set_blend_op(cmd, VK_BLEND_OP_MAX, VK_BLEND_OP_MAX);
+   commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+                           VK_BLEND_FACTOR_ONE);
+   commandbuffer_set_depth_test(cmd, false, false);
+   commandbuffer_set_multisample_state(cmd, false, false, false);
+   /* The floor quad has no texture coordinates. Do not inherit this shared
+    * vertex specialization from the preceding textured subtractive batch. */
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_OffsetUV, 0);
+   commandbuffer_set_specialization_constant_mask(cmd, -1);
+}
+
 static void renderer_emit_sub_floor(Renderer *self, unsigned first_vertex)
 {
-   commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.flat_floor);
-   commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
-   commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_MAX, VK_BLEND_OP_MAX);
-   commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
-                          VK_BLEND_FACTOR_ONE);
-   commandbuffer_set_depth_test(cbh_get(&self->cmd), false, false);
-   commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
+   renderer_set_sub_floor_pipeline_state(self, cbh_get(&self->cmd));
    commandbuffer_draw(cbh_get(&self->cmd), 6, 1, first_vertex, 0);
    commandbuffer_set_depth_test(cbh_get(&self->cmd), true, false);
    commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
@@ -10757,18 +10878,7 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
 
    { unsigned last_draw_offset = 0;
 
-   commandbuffer_set_opaque_state(cbh_get(&self->cmd));
-   commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
-   commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
-   commandbuffer_set_depth_test(cbh_get(&self->cmd), true, false);
-   commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
+   renderer_set_semi_transparent_pipeline_state(cbh_get(&self->cmd));
 
    { bool append_floor = self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT &&
          !psx_hdr_multipass;
@@ -11391,49 +11501,34 @@ static void renderer_reset_queue(Renderer *self)
    }
 }
 
-static void renderer_semi_transparent_set_state(Renderer *self,
-      const SemiTransparentState *state){
-   if (state->scaled_read)
-   {
-      if (self->msaa > 1)
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-      else
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
-   }
-   else
-      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
-   renderer_hd_texture_uniforms(self, state->hd_texture_index);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode,
+static void renderer_semi_transparent_set_pipeline_state(Renderer *self,
+      CommandBuffer *cmd, const SemiTransparentState *state){
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FilterMode,
          state->textured && state->filtering ? self->primitive_filter_mode : FilterMode_NearestNeighbor);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Shift,
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Scaling, self->scaling);
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_Shift,
          state->textured ? state->shift : 0);
    /* The flat vertex variant retains the shared OFFSET_UV specialization
     * declaration even though its TEXTURED block is compiled out. Do not let
     * the preceding textured primitive split otherwise-identical flat
     * pipelines on a value which cannot affect their output. */
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_OffsetUV,
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_OffsetUV,
          state->textured && state->offset_uv ? 1 : 0);
    /* Off the 16F target the UNORM write clamps anyway, so hot would only
     * split pipelines for an identical result; force it off there. This is
     * also what makes primitive.frag's hot path SDR-safe by construction. */
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_HotSource,
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_HotSource,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_hdr_overbright_hot : 0);
    /* Same fp16-only rule as HotSource, same reason: off the wide target the
     * UNORM write clamps regardless, so a variant would be identical. */
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PreciseColor,
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PreciseColor,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_pgxp_color : 0);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PgxpFog,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
    /* Only the feedback programs declare this; the pipeline hash masks it out
     * everywhere else. 1 = check-mask (historical behaviour), 0 = the routed
     * non-masked subtractive case. */
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_MaskTest, state->masked ? 1 : 0);
-
-   if (state->scissor_index < 0)
-      commandbuffer_set_scissor(cbh_get(&self->cmd), &self->queue.default_scissor);
-   else
-      commandbuffer_set_scissor(cbh_get(&self->cmd), Rect2DVec_at(&self->queue.scissors, state->scissor_index));
+   commandbuffer_set_specialization_constant(cmd, SpecConstIndex_MaskTest, state->masked ? 1 : 0);
 
    { Program *textured = state->textured ? state->scaled_read ?
       self->pipelines.textured_scaled : self->pipelines.textured_unscaled : self->pipelines.flat;
@@ -11445,15 +11540,15 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    case SemiTransparentMode_None:
    {
       /* For opaque primitives which are just masked, we can make use of fixed function blending. */
-      commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
-      commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_TransMode, TransMode_Opaque);
+      commandbuffer_set_blend_enable(cmd, true);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_TransMode, TransMode_Opaque);
       /* primitive.frag now declares BLEND_MODE (hot-additive support) and the
        * flush loop marks every spec slot dirty, so set it deterministically on
        * the fixed-function branches too or stale values split pipelines. */
-      commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
-      commandbuffer_set_program(cbh_get(&self->cmd), textured);
-      commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-      commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAdd);
+      commandbuffer_set_program(cmd, textured);
+      commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+      commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
                              VK_BLEND_FACTOR_DST_ALPHA, VK_BLEND_FACTOR_DST_ALPHA);
       break;
    }
@@ -11461,28 +11556,26 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    {
       if (state->masked)
       {
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
-         commandbuffer_pixel_barrier(cbh_get(&self->cmd));
-         commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAdd);
+         commandbuffer_set_program(cmd, textured_masked);
+         commandbuffer_set_blend_enable(cmd, false);
          if (self->msaa > 1)
          {
             /* Need to blend per-sample. */
-            commandbuffer_set_multisample_state(cbh_get(&self->cmd), false, false, true);
+            commandbuffer_set_multisample_state(cmd, false, false, true);
          }
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_ONE);
       }
       else
       {
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_TransMode, TransMode_SemiTrans);
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured);
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_TransMode, TransMode_SemiTrans);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAdd);
+         commandbuffer_set_program(cmd, textured);
+         commandbuffer_set_blend_enable(cmd, true);
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_ZERO);
       }
       break;
@@ -11491,30 +11584,28 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    {
       if (state->masked)
       {
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAvg);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
-         commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
-         commandbuffer_pixel_barrier(cbh_get(&self->cmd));
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAvg);
+         commandbuffer_set_program(cmd, textured_masked);
+         commandbuffer_set_blend_enable(cmd, false);
          if (self->msaa > 1)
          {
             /* Need to blend per-sample. */
-            commandbuffer_set_multisample_state(cbh_get(&self->cmd), false, false, true);
+            commandbuffer_set_multisample_state(cmd, false, false, true);
          }
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_ONE);
       }
       else
       {
          static const float rgba[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_TransMode, TransMode_SemiTrans);
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAvg);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured);
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
-         commandbuffer_set_blend_constants(cbh_get(&self->cmd), rgba);
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_TransMode, TransMode_SemiTrans);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAvg);
+         commandbuffer_set_program(cmd, textured);
+         commandbuffer_set_blend_enable(cmd, true);
+         commandbuffer_set_blend_constants(cmd, rgba);
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_CONSTANT_ALPHA, VK_BLEND_FACTOR_ZERO);
       }
       break;
@@ -11528,28 +11619,26 @@ static void renderer_semi_transparent_set_state(Renderer *self,
        * check-mask discard off for the routed case. */
       if (renderer_semi_trans_needs_feedback(self, state))
       {
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendSub);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
-         commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
-         commandbuffer_pixel_barrier(cbh_get(&self->cmd));
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendSub);
+         commandbuffer_set_program(cmd, textured_masked);
+         commandbuffer_set_blend_enable(cmd, false);
          if (self->msaa > 1)
          {
             /* Need to blend per-sample. */
-            commandbuffer_set_multisample_state(cbh_get(&self->cmd), false, false, true);
+            commandbuffer_set_multisample_state(cmd, false, false, true);
          }
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_ONE);
       }
       else
       {
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_TransMode, TransMode_SemiTrans);
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendSub);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured);
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_TransMode, TransMode_SemiTrans);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendSub);
+         commandbuffer_set_program(cmd, textured);
+         commandbuffer_set_blend_enable(cmd, true);
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_ZERO);
       }
       break;
@@ -11558,35 +11647,50 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    {
       if (state->masked)
       {
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAddQuarter);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
-         commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
-         commandbuffer_pixel_barrier(cbh_get(&self->cmd));
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAddQuarter);
+         commandbuffer_set_program(cmd, textured_masked);
+         commandbuffer_set_blend_enable(cmd, false);
          if (self->msaa > 1)
          {
             /* Need to blend per-sample. */
-            commandbuffer_set_multisample_state(cbh_get(&self->cmd), false, false, true);
+            commandbuffer_set_multisample_state(cmd, false, false, true);
          }
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_ONE);
       }
       else
       {
          static const float rgba[4] = { 0.25f, 0.25f, 0.25f, 1.0f };
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_TransMode, TransMode_SemiTrans);
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAddQuarter);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured);
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
-         commandbuffer_set_blend_constants(cbh_get(&self->cmd), rgba);
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_TransMode, TransMode_SemiTrans);
+         commandbuffer_set_specialization_constant(cmd, SpecConstIndex_BlendMode, BlendMode_BlendAddQuarter);
+         commandbuffer_set_program(cmd, textured);
+         commandbuffer_set_blend_enable(cmd, true);
+         commandbuffer_set_blend_constants(cmd, rgba);
+         commandbuffer_set_blend_op(cmd, VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+         commandbuffer_set_blend_factors(cmd, VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
                                 VK_BLEND_FACTOR_ZERO);
       }
       break;
    }
    }
+   }
+}
+
+static void renderer_semi_transparent_set_state(Renderer *self,
+      const SemiTransparentState *state)
+{
+   CommandBuffer *cmd = cbh_get(&self->cmd);
+   renderer_bind_primitive_texture(self, state->scaled_read);
+   renderer_hd_texture_uniforms(self, state->hd_texture_index);
+   commandbuffer_set_scissor(cmd, state->scissor_index < 0
+         ? &self->queue.default_scissor
+         : Rect2DVec_at(&self->queue.scissors, state->scissor_index));
+   renderer_semi_transparent_set_pipeline_state(self, cmd, state);
+   if (renderer_semi_trans_needs_feedback(self, state))
+   {
+      commandbuffer_pixel_barrier(cmd);
+      commandbuffer_set_input_attachments(cmd, 0, 3);
    }
 }
 
@@ -13243,6 +13347,7 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
          size_t size)
    {
       RhiSpirvResourceLayout reflected;
+      VkResult module_res;
       RHI_STATIC_ASSERT(sizeof(reflected) == sizeof(self->layout),
             "reflection layout mirror size mismatch");
       self->device = device;
@@ -13266,8 +13371,8 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
       info.codeSize = size;
       info.pCode = data;
 
-      LOGI("Creating shader module.\n");
-      if (vkCreateShaderModule(device_get_device(device), &info, NULL, &self->module) != VK_SUCCESS)
+      module_res = vkCreateShaderModule(device_get_device(device), &info, NULL, &self->module);
+      if (module_res != VK_SUCCESS)
          LOGE("Failed to create shader module.\n");
 
       /* SPIR-V reflection is done in a separate C++ shim
@@ -13315,24 +13420,25 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
       device_bake_program(device, self);
    }
 
-   static VkPipeline program_get_pipeline(const struct Program *self, Hash hash)
+   static IntrusivePODWrapperPipeline *program_find_pipeline(
+         struct Program *self,
+         Hash hash)
    {
-      IntrusivePODWrapperPipeline *ret = vk_pipeline_map_find((struct vk_pipeline_map *)&self->pipelines, hash);
-      return ret ? ret->value : VK_NULL_HANDLE;
+      return vk_pipeline_map_find(&self->pipelines, hash);
    }
 
    static void device_pipeline_cache_mark_dirty(Device *self);
 
    static VkPipeline program_add_pipeline(struct Program *self,
-         Hash hash,
-         VkPipeline pipeline)
+          Hash hash,
+          VkPipeline pipeline)
    {
       IntrusivePODWrapperPipeline *entry;
 
       if (pipeline == VK_NULL_HANDLE)
          return VK_NULL_HANDLE;
 
-      entry = vk_pipeline_map_find(&self->pipelines, hash);
+      entry = program_find_pipeline(self, hash);
       if (entry != NULL)
       {
          if (entry->value != pipeline)
@@ -15050,7 +15156,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    static VkPipeline commandbuffer_build_compute_pipeline(struct CommandBuffer *self,
          Hash hash)
    {
-      VkPipeline compute_pipeline;
+      VkPipeline compute_pipeline = VK_NULL_HANDLE;
       VkResult res;
       const Shader *shader = program_get_shader(self->current_program, ShaderStage_Compute);
       VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
@@ -15098,7 +15204,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             device_get_pipeline_cache(self->device), 1, &info, NULL,
             &compute_pipeline);
       if (res != VK_SUCCESS)
+      {
          LOGE("Failed to create compute pipeline!\n");
+         if (compute_pipeline != VK_NULL_HANDLE)
+            vkDestroyPipeline(device_get_device(self->device),
+                  compute_pipeline, NULL);
+         return VK_NULL_HANDLE;
+      }
 
       return program_add_pipeline(self->current_program, hash, compute_pipeline);
       }
@@ -15403,8 +15515,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                &vulkan_graphics_precompile_jobs.items[i];
             job->result = vkCreateGraphicsPipelines(
                   device_get_device(worker->device),
-                  worker->pipeline_cache,
-                  1, &job->pipe, NULL, &job->pipeline);
+                   worker->pipeline_cache,
+                   1, &job->pipe, NULL, &job->pipeline);
          }
          else
          {
@@ -15413,8 +15525,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   i - queue->graphics_jobs];
             job->result = vkCreateComputePipelines(
                   device_get_device(worker->device),
-                  worker->pipeline_cache,
-                  1, &job->pipe, NULL, &job->pipeline);
+                   worker->pipeline_cache,
+                   1, &job->pipe, NULL, &job->pipeline);
          }
       }
    }
@@ -15540,7 +15652,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       for (i = 0; i < jobs->count; i++)
       {
          struct VulkanGraphicsPrecompileJob *job = &jobs->items[i];
-         IntrusivePODWrapperPipeline *entry;
          if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
          {
             LOGE("[Vulkan shader precompilation] graphics pipeline creation failed result=%d\n",
@@ -15552,23 +15663,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             continue;
          }
 
-         entry = program_find_pipeline(job->program, job->hash);
-         if (entry == NULL)
-         {
-            program_add_pipeline(job->program, job->hash, job->pipeline);
-            entry = program_find_pipeline(job->program, job->hash);
-         }
-         else
-            vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
-
-         if (entry == NULL)
+         if (program_add_pipeline(job->program, job->hash, job->pipeline) ==
+               VK_NULL_HANDLE)
             complete = false;
       }
 
       for (i = 0; i < compute_jobs->count; i++)
       {
          struct VulkanComputePrecompileJob *job = &compute_jobs->items[i];
-         IntrusivePODWrapperPipeline *entry;
          if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
          {
             LOGE("[Vulkan shader precompilation] compute pipeline creation failed result=%d\n",
@@ -15580,16 +15682,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             continue;
          }
 
-         entry = program_find_pipeline(job->program, job->hash);
-         if (entry == NULL)
-         {
-            program_add_pipeline(job->program, job->hash, job->pipeline);
-            entry = program_find_pipeline(job->program, job->hash);
-         }
-         else
-            vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
-
-         if (entry == NULL)
+         if (program_add_pipeline(job->program, job->hash, job->pipeline) ==
+               VK_NULL_HANDLE)
             complete = false;
       }
 
@@ -15604,7 +15698,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          Hash hash)
    {
       uint32_t attr_mask;
-      VkPipeline pipeline;
+      VkPipeline pipeline = VK_NULL_HANDLE;
       VkResult res;
       /* Viewport state */
       VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
@@ -15775,7 +15869,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       res = vkCreateGraphicsPipelines(device_get_device(self->device),
             device_get_pipeline_cache(self->device), 1, &pipe, NULL, &pipeline);
       if (res != VK_SUCCESS)
+      {
          LOGE("Failed to create graphics pipeline!\n");
+         if (pipeline != VK_NULL_HANDLE)
+            vkDestroyPipeline(device_get_device(self->device), pipeline, NULL);
+         return VK_NULL_HANDLE;
+      }
 
       return program_add_pipeline(self->current_program, hash, pipeline);
       }
@@ -15792,88 +15891,95 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
-   static void commandbuffer_flush_compute_pipeline(struct CommandBuffer *self)
+   /* Shared canonical identity for runtime and precompilation. Only shader-
+    * visible specialization slots and enabled fixed-function state are hashed.
+    * Dynamic bindings, buffer handles and inactive attributes are not recipes. */
+   static Hash commandbuffer_pipeline_recipe_hash(struct CommandBuffer *self,
+         bool graphics)
    {
-      Hash hash;
-      Hasher h; hasher_init(&h);
+      const CombinedResourceLayout *layout =
+         pipeline_layout_get_resource_layout(self->current_layout);
+      uint32_t spec_mask = layout->combined_spec_constant_mask &
+         self->static_state.state.spec_constant_mask;
+      uint32_t it, bit;
+      Hasher h;
+      hasher_init(&h);
       hasher_u64(&h, self->current_program->intrusive_node.key);
 
-      /* Spec constants. */
-      { const CombinedResourceLayout *layout = pipeline_layout_get_resource_layout(self->current_layout);
-      uint32_t combined_spec_constant = layout->combined_spec_constant_mask;
-      combined_spec_constant &= self->static_state.state.spec_constant_mask;
-      hasher_u32(&h, combined_spec_constant);
-      { uint32_t _feit, bit; FOR_EACH_BIT(combined_spec_constant, _feit, bit)
+      if (graphics)
       {
-         hasher_u32(&h, self->potential_static_state.spec_constants[bit]);
-      }
+         PipelineState state = self->static_state;
+         self->active_vbos = 0;
+         FOR_EACH_BIT(layout->attribute_mask, it, bit)
+         {
+            hasher_u32(&h, bit);
+            self->active_vbos |= 1u << self->attribs[bit].binding;
+            hasher_u32(&h, self->attribs[bit].binding);
+            hasher_u32(&h, self->attribs[bit].format);
+            hasher_u32(&h, self->attribs[bit].offset);
+         }
+         FOR_EACH_BIT(self->active_vbos, it, bit)
+         {
+            hasher_u32(&h, self->vbo.input_rates[bit]);
+            hasher_u32(&h, self->vbo.strides[bit]);
+         }
+         hasher_u64(&h, self->compatible_render_pass->intrusive_node.key);
+         hasher_u32(&h, self->current_subpass);
+
+         /* The effective mask is hashed below. The caller's unreflected mask
+          * and disabled depth/blend fields cannot change pipeline output. */
+         state.state.spec_constant_mask = 0;
+         if (!state.state.depth_test)
+         {
+            state.state.depth_write = 0;
+            state.state.depth_compare = 0;
+         }
+         if (!state.state.blend_enable)
+         {
+            state.state.src_color_blend = state.state.dst_color_blend = 0;
+            state.state.src_alpha_blend = state.state.dst_alpha_blend = 0;
+            state.state.color_blend_op = state.state.alpha_blend_op = 0;
+         }
+         hasher_data(&h, state.words, sizeof(state.words));
+
+         if (state.state.blend_enable &&
+               (COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)state.state.src_color_blend) ||
+                COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)state.state.src_alpha_blend) ||
+                COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)state.state.dst_color_blend) ||
+                COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)state.state.dst_alpha_blend)))
+            hasher_data(&h, (const uint32_t *)self->potential_static_state.blend_constants,
+                  sizeof(self->potential_static_state.blend_constants));
       }
 
-      hash = hasher_get(&h);
-      self->current_pipeline = program_get_pipeline(self->current_program, hash);
-      if (self->current_pipeline == VK_NULL_HANDLE)
-         self->current_pipeline = commandbuffer_build_compute_pipeline(self, hash);
-      }
+      hasher_u32(&h, spec_mask);
+      FOR_EACH_BIT(spec_mask, it, bit)
+         hasher_u32(&h, self->potential_static_state.spec_constants[bit]);
+      return hasher_get(&h);
+   }
+
+   static void commandbuffer_flush_compute_pipeline(struct CommandBuffer *self)
+   {
+      Hash hash = commandbuffer_pipeline_recipe_hash(self, false);
+      IntrusivePODWrapperPipeline *entry;
+      if (vulkan_pipeline_precompiling)
+         vulkan_precompile_expect_recipe(self->current_program, hash, false);
+      entry = program_find_pipeline(self->current_program, hash);
+      self->current_pipeline = entry ? entry->value :
+         commandbuffer_build_compute_pipeline(self, hash);
    }
 
    static void commandbuffer_flush_graphics_pipeline(struct CommandBuffer *self)
    {
-      uint32_t combined_spec_constant;
-      Hash hash;
-      Hasher h; hasher_init(&h);
-      self->active_vbos = 0;
-      { const CombinedResourceLayout *layout = pipeline_layout_get_resource_layout(self->current_layout);
-      { uint32_t _feit, bit; FOR_EACH_BIT(layout->attribute_mask, _feit, bit)
-      {
-         hasher_u32(&h, bit);
-         self->active_vbos |= 1u << self->attribs[bit].binding;
-         hasher_u32(&h, self->attribs[bit].binding);
-         hasher_u32(&h, self->attribs[bit].format);
-         hasher_u32(&h, self->attribs[bit].offset);
-      }
-      }
-
-      { uint32_t _feit, bit; FOR_EACH_BIT(self->active_vbos, _feit, bit)
-      {
-         hasher_u32(&h, self->vbo.input_rates[bit]);
-         hasher_u32(&h, self->vbo.strides[bit]);
-      }
-      }
-
-      hasher_u64(&h, self->compatible_render_pass->intrusive_node.key);
-      hasher_u32(&h, self->current_subpass);
-      hasher_u64(&h, self->current_program->intrusive_node.key);
-      hasher_data(&h, self->static_state.words, sizeof(self->static_state.words));
-
-      if (self->static_state.state.blend_enable)
-      {
-         bool b0 = COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)(self->static_state.state.src_color_blend));
-         bool b1 = COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)(self->static_state.state.src_alpha_blend));
-         bool b2 = COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)(self->static_state.state.dst_color_blend));
-         bool b3 = COMBINER_NEEDS_BLEND_CONSTANT((VkBlendFactor)(self->static_state.state.dst_alpha_blend));
-         if (b0 || b1 || b2 || b3)
-            hasher_data(&h, (uint32_t *)(self->potential_static_state.blend_constants),
-                  sizeof(self->potential_static_state.blend_constants));
-      }
-
-      /* Spec constants. */
-      combined_spec_constant = layout->combined_spec_constant_mask;
-      combined_spec_constant &= self->static_state.state.spec_constant_mask;
-      hasher_u32(&h, combined_spec_constant);
-      { uint32_t _feit, bit; FOR_EACH_BIT(combined_spec_constant, _feit, bit)
-      {
-         hasher_u32(&h, self->potential_static_state.spec_constants[bit]);
-      }
-      }
-
-      hash = hasher_get(&h);
-      self->current_pipeline = program_get_pipeline(self->current_program, hash);
-      if (self->current_pipeline == VK_NULL_HANDLE)
-         self->current_pipeline = commandbuffer_build_graphics_pipeline(self, hash);
-      }
+      Hash hash = commandbuffer_pipeline_recipe_hash(self, true);
+      IntrusivePODWrapperPipeline *entry;
+      if (vulkan_pipeline_precompiling)
+         vulkan_precompile_expect_recipe(self->current_program, hash, true);
+      entry = program_find_pipeline(self->current_program, hash);
+      self->current_pipeline = entry ? entry->value :
+         commandbuffer_build_graphics_pipeline(self, hash);
    }
 
-   static void commandbuffer_flush_compute_state(struct CommandBuffer *self)
+   static bool commandbuffer_flush_compute_state(struct CommandBuffer *self)
    {
       VK_ASSERT(self->current_layout);
       VK_ASSERT(self->current_program);
@@ -15882,8 +15988,15 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       {
          VkPipeline old_pipe = self->current_pipeline;
          commandbuffer_flush_compute_pipeline(self);
-         if (old_pipe != self->current_pipeline)
-            vkCmdBindPipeline(self->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, self->current_pipeline);
+         if (self->current_pipeline != VK_NULL_HANDLE &&
+             old_pipe != self->current_pipeline)
+             vkCmdBindPipeline(self->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, self->current_pipeline);
+      }
+
+      if (self->current_pipeline == VK_NULL_HANDLE)
+      {
+         commandbuffer_set_dirty(self, COMMAND_BUFFER_DIRTY_PIPELINE_BIT);
+         return false;
       }
 
       commandbuffer_flush_descriptor_sets(self);
@@ -15899,9 +16012,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   self->bindings.push_constant_data);
          }
       }
+      return true;
    }
 
-   static void commandbuffer_flush_render_state(struct CommandBuffer *self)
+   static bool commandbuffer_flush_render_state(struct CommandBuffer *self)
    {
       uint32_t update_vbo_mask;
       VK_ASSERT(self->current_layout);
@@ -15913,11 +16027,18 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       {
          VkPipeline old_pipe = self->current_pipeline;
          commandbuffer_flush_graphics_pipeline(self);
-         if (old_pipe != self->current_pipeline)
+         if (self->current_pipeline != VK_NULL_HANDLE &&
+             old_pipe != self->current_pipeline)
          {
             vkCmdBindPipeline(self->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, self->current_pipeline);
             commandbuffer_set_dirty(self, COMMAND_BUFFER_DYNAMIC_BITS);
          }
+      }
+
+      if (self->current_pipeline == VK_NULL_HANDLE)
+      {
+         commandbuffer_set_dirty(self, COMMAND_BUFFER_DIRTY_PIPELINE_BIT);
+         return false;
       }
 
       commandbuffer_flush_descriptor_sets(self);
@@ -15953,6 +16074,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
       }
       self->dirty_vbos &= ~update_vbo_mask;
+      return true;
    }
 
    static void commandbuffer_set_vertex_attrib(struct CommandBuffer *self,
@@ -15963,7 +16085,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VertexAttribState * attr;
       VK_ASSERT(attrib < VULKAN_NUM_VERTEX_ATTRIBS);
-      VK_ASSERT(self->framebuffer);
+      VK_ASSERT(self->compatible_render_pass);
 
       attr = &self->attribs[attrib];
 
@@ -16490,7 +16612,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          commandbuffer_flush_graphics_pipeline(self);
          return;
       }
-      commandbuffer_flush_render_state(self);
+      if (!commandbuffer_flush_render_state(self))
+         return;
       vkCmdDraw(self->cmd, vertex_count, instance_count, first_vertex, first_instance);
    }
 
@@ -16508,7 +16631,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          commandbuffer_flush_compute_pipeline(self);
          return;
       }
-      commandbuffer_flush_compute_state(self);
+      if (!commandbuffer_flush_compute_state(self))
+         return;
       vkCmdDispatch(self->cmd, groups_x, groups_y, groups_z);
    }
 
@@ -19496,6 +19620,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       { unsigned i; for (i = 0; i < info->num_color_attachments; i++) {
          VK_ASSERT(info->color_attachments[i]);
          formats[i] = imageview_get_format(info->color_attachments[i]);
+         hasher_u32(&h, image_get_create_info(imageview_get_image(info->color_attachments[i]))->samples);
          if (image_get_create_info(imageview_get_image(info->color_attachments[i]))->domain == ImageDomain_Transient)
             lazy |= 1u << i;
          if (image_get_layout_type(imageview_get_image(info->color_attachments[i])) == Layout_Optimal)
@@ -19537,6 +19662,8 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       hasher_data(&h, (const uint32_t *)(formats), info->num_color_attachments * sizeof(VkFormat));
       hasher_u32(&h, info->num_color_attachments);
       hasher_u32(&h, depth_stencil);
+      hasher_u32(&h, info->depth_stencil ?
+            image_get_create_info(imageview_get_image(info->depth_stencil))->samples : 0);
 
       /* Compatible render passes do not care about load/store, or image layouts. */
       if (!compatible)
@@ -21021,6 +21148,47 @@ void rhi_vulkan_apply_pending_geometry(void)
    }
 }
 
+static void renderer_precompile_if_configuration_changed(Renderer *self)
+{
+   struct VulkanPrecompileConfiguration config;
+
+   if (!vulkan_shader_precompilation)
+   {
+      self->precompile_configuration_valid = false;
+      return;
+   }
+
+   memset(&config, 0, sizeof(config));
+   config.scaling = self->scaling;
+   config.msaa = self->msaa;
+   config.format = self->scaled_fb_format;
+   config.filter = self->primitive_filter_mode;
+   config.cable = psx_video_cable;
+   config.dither = dither_mode;
+   config.eotf = psx_hdr_sdr_eotf;
+   config.supersampling = super_sampling;
+   config.adaptive = adaptive_smoothing;
+   config.yuv = mdec_yuv;
+   config.offset_uv = self->scaled_uv_offset;
+   config.vram = show_vram;
+   config.hdr = psx_hdr_active;
+   config.hot = psx_hdr_overbright_hot != 0;
+   config.precise = psx_pgxp_color != 0;
+   config.fog = psx_pgxp_fog != 0;
+   config.multipass = psx_hdr_multipass != 0;
+
+   if (self->precompile_configuration_valid &&
+         memcmp(&config, &self->precompile_configuration, sizeof(config)) == 0)
+      return;
+
+   /* Existing exact identities are reused; only the newly reachable delta is
+    * queued. Remember even a failed attempt so OOM/driver failure cannot cause
+    * a blocking retry every frame. Changing options or reloading retries it. */
+   renderer_precompile_current_configuration_pipelines(self);
+   self->precompile_configuration = config;
+   self->precompile_configuration_valid = true;
+}
+
 void rhi_vulkan_prepare_frame(void)
 {
    if (device == NULL)
@@ -21054,6 +21222,8 @@ void rhi_vulkan_prepare_frame(void)
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
    renderer->sprite_filter_exclude = (FilterExclude)(filter_exclude_sprites);
    renderer->polygon_2d_filter_exclude = (FilterExclude)(filter_exclude_2d_polygons);
+   renderer_precompile_if_configuration_changed(renderer);
+   device_pipeline_cache_checkpoint(device, false);
 }
 
 static ScanoutMode get_scanout_mode(bool bpp24)

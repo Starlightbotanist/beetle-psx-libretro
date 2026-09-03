@@ -6300,6 +6300,7 @@ static bool retro_set_system_av_info(void)
 void retro_run(void)
 {
    bool updated = false;
+   bool prepare_after_variables;
    static int32_t rects[MEDNAFEN_CORE_GEOMETRY_MAX_H];
    EmulateSpecStruct spec = {0};
    EmulateSpecStruct *espec;
@@ -6339,12 +6340,12 @@ void retro_run(void)
          psx_hdr_expand_gamut = (int)gamut;
    }
 
-   /* Apply any geometry change deferred from a previous frame's
-    * check_variables before beginning this frame, so the frontend's
-    * synchronous video-driver reinit runs between frames. */
    rhi_intf_apply_pending_geometry();
-
-   rhi_intf_prepare_frame();
+   prepare_after_variables = rhi_intf_is_type() == RHI_VULKAN;
+   /* GL must normalize frontend-inherited state before option refresh can
+    * upload textures. Preserve its existing prepare-before-refresh order. */
+   if (!prepare_after_variables)
+      rhi_intf_prepare_frame();
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
    {
@@ -6471,6 +6472,15 @@ void retro_run(void)
       // Update gun crosshair color
       FrontIO_SetCrosshairsColor(PSX_FIO, 0, setting_crosshair_color_p1);
       FrontIO_SetCrosshairsColor(PSX_FIO, 1, setting_crosshair_color_p2);
+   }
+
+   /* Adopt options and apply any resulting geometry change before beginning
+    * the frame. Vulkan precompilation must see the new configuration before
+    * its first draw, and frontend video-driver reinit must run between frames. */
+   if (prepare_after_variables)
+   {
+      rhi_intf_apply_pending_geometry();
+      rhi_intf_prepare_frame();
    }
 
    /* We only start counting after the first frame we encounter. This
