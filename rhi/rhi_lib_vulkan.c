@@ -79,6 +79,7 @@ extern int   psx_hdr_multipass;
 extern int   psx_color_format;
 extern int   filter_mode;
 extern char retro_base_directory[4096];
+extern char retro_save_directory[4096];
 
 /* VOLK_GENERATE_PROTOTYPES_H */
 #if defined(VK_VERSION_1_0)
@@ -965,8 +966,6 @@ static void object_pool_raw_deinit(struct ObjectPoolRaw *p)
    {
       struct IntrusiveHashMapNode node; /* must stay first (offset 0) */
       VkPipeline value;
-      bool diagnostic_precompiled;
-      bool diagnostic_first_gameplay_use_logged;
    };
 
    struct IntrusivePODWrapperPtr
@@ -1328,8 +1327,6 @@ static IntrusivePODWrapperPipeline *vk_pipeline_map_emplace_yield(
          return NULL;
       t = (IntrusivePODWrapperPipeline *)slot;
       t->value = value;
-      t->diagnostic_precompiled = false;
-      t->diagnostic_first_gameplay_use_logged = false;
       return vk_pipeline_map_insert_yield(m, hash, t);
    }
 
@@ -3406,19 +3403,7 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       struct vk_pipeline_map pipelines;
    };
 
-   struct VulkanPipelineDiagnosticState
-   {
-      bool precompiling;
-      bool gameplay_active;
-      uint64_t renderer_generation;
-      uint64_t gameplay_frame;
-      uint64_t first_use_order;
-      retro_time_t gameplay_start_usec;
-      unsigned scaling;
-      unsigned msaa;
-   };
-
-   static struct VulkanPipelineDiagnosticState vulkan_pipeline_diagnostic;
+   static bool vulkan_pipeline_precompiling;
    static bool vulkan_shader_precompilation;
    static bool super_sampling;
    /* Core options needed while the renderer is being constructed. Keep these
@@ -3469,13 +3454,6 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
          [VULKAN_NUM_SPEC_CONSTANTS];
       VkPipeline pipeline;
       VkResult result;
-      retro_time_t elapsed_usec;
-      Hash program_key;
-      Hash render_pass_key;
-      unsigned subpass;
-      uint32_t state_words[4];
-      uint32_t spec_mask;
-      uint32_t spec_constants[VULKAN_NUM_SPEC_CONSTANTS];
    };
 
    struct VulkanGraphicsPrecompileJobVec
@@ -3501,10 +3479,6 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       uint32_t specialization_data[VULKAN_NUM_SPEC_CONSTANTS];
       VkPipeline pipeline;
       VkResult result;
-      retro_time_t elapsed_usec;
-      Hash program_key;
-      uint32_t spec_mask;
-      uint32_t spec_constants[VULKAN_NUM_SPEC_CONSTANTS];
    };
 
    struct VulkanComputePrecompileJobVec
@@ -3517,40 +3491,6 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
 
    static struct VulkanComputePrecompileJobVec
       vulkan_compute_precompile_jobs;
-
-   static void vulkan_pipeline_diagnostic_reset(unsigned scaling,
-         unsigned msaa)
-   {
-      vulkan_pipeline_diagnostic.precompiling = false;
-      vulkan_pipeline_diagnostic.gameplay_active = false;
-      vulkan_pipeline_diagnostic.renderer_generation++;
-      vulkan_pipeline_diagnostic.gameplay_frame = 0;
-      vulkan_pipeline_diagnostic.first_use_order = 0;
-      vulkan_pipeline_diagnostic.gameplay_start_usec = 0;
-      vulkan_pipeline_diagnostic.scaling = scaling;
-      vulkan_pipeline_diagnostic.msaa = msaa;
-      LOGI("[Vulkan pipeline first use] generation=%llu renderer_ready scaling=%u msaa=%u\n",
-            (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
-            scaling, msaa);
-   }
-
-   static void vulkan_pipeline_diagnostic_begin_frame(void)
-   {
-      if (!vulkan_pipeline_diagnostic.gameplay_active)
-      {
-         vulkan_pipeline_diagnostic.gameplay_active = true;
-         vulkan_pipeline_diagnostic.gameplay_frame = 0;
-         vulkan_pipeline_diagnostic.first_use_order = 0;
-         vulkan_pipeline_diagnostic.gameplay_start_usec =
-            cpu_features_get_time_usec();
-         LOGI("[Vulkan pipeline first use] generation=%llu gameplay_start scaling=%u msaa=%u\n",
-               (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
-               vulkan_pipeline_diagnostic.scaling,
-               vulkan_pipeline_diagnostic.msaa);
-      }
-      else
-         vulkan_pipeline_diagnostic.gameplay_frame++;
-   }
 
 static void program_set_shader(struct Program *self,
       ShaderStage stage,
@@ -7043,7 +6983,7 @@ static void renderer_init(Renderer *self,
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
 
-   vulkan_pipeline_diagnostic_reset(self->scaling, self->msaa);
+   vulkan_pipeline_precompiling = false;
 
    if (vulkan_shader_precompilation)
    {
@@ -10458,7 +10398,7 @@ static void renderer_precompile_current_configuration_pipelines(
    bool complete;
 
    vulkan_precompile_jobs_begin();
-   vulkan_pipeline_diagnostic.precompiling = true;
+   vulkan_pipeline_precompiling = true;
 
    /* These core options are parsed before renderer creation, while their
     * normal per-frame copies happen after it. Seed the renderer now so the
@@ -10529,7 +10469,7 @@ static void renderer_precompile_current_configuration_pipelines(
    complete = vulkan_precompile_jobs_finish(self->device, &jobs,
          &graphics_jobs, &compute_jobs, &workers, &compile_elapsed_usec);
    complete = complete && manifest_complete;
-   vulkan_pipeline_diagnostic.precompiling = false;
+   vulkan_pipeline_precompiling = false;
 
    /* Android may terminate the process without a clean libretro teardown.
     * Persist a successfully completed precompile immediately so that the
@@ -10537,24 +10477,12 @@ static void renderer_precompile_current_configuration_pipelines(
    if (complete)
       device_pipeline_cache_save(self->device);
 
-   {
-      size_t driver_cache_bytes = 0;
-      VkPipelineCache driver_cache = device_get_pipeline_cache(self->device);
-      VkResult cache_result = driver_cache != VK_NULL_HANDLE
-         ? vkGetPipelineCacheData(
-               device_get_device(self->device),
-               driver_cache,
-               &driver_cache_bytes, NULL)
-         : VK_ERROR_INITIALIZATION_FAILED;
-      LOGI("[Vulkan shader precompilation] variants=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld driver_cache_result=%d driver_cache_bytes=%llu\n",
-         variants, jobs, graphics_jobs, compute_jobs,
-         manifest_programs, manifest_missing, workers,
-         complete ? 1u : 0u,
-         (long long)compile_elapsed_usec,
-         (long long)(cpu_features_get_time_usec() - start_usec),
-         (int)cache_result,
-         (unsigned long long)driver_cache_bytes);
-   }
+   LOGI("[Vulkan shader precompilation] variants=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld\n",
+      variants, jobs, graphics_jobs, compute_jobs,
+      manifest_programs, manifest_missing, workers,
+      complete ? 1u : 0u,
+      (long long)compile_elapsed_usec,
+      (long long)(cpu_features_get_time_usec() - start_usec));
 }
 
 static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
@@ -13303,9 +13231,6 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
          size_t size)
    {
       RhiSpirvResourceLayout reflected;
-      retro_time_t start_usec;
-      retro_time_t module_usec;
-      retro_time_t reflect_usec;
       VkResult module_res;
       RHI_STATIC_ASSERT(sizeof(reflected) == sizeof(self->layout),
             "reflection layout mirror size mismatch");
@@ -13330,12 +13255,7 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
       info.codeSize = size;
       info.pCode = data;
 
-      start_usec = cpu_features_get_time_usec();
       module_res = vkCreateShaderModule(device_get_device(device), &info, NULL, &self->module);
-      module_usec = cpu_features_get_time_usec() - start_usec;
-      LOGI("[Vulkan pipeline diagnostic] shader_module hash=%016llx bytes=%llu result=%d elapsed_us=%lld\n",
-            (unsigned long long)hash, (unsigned long long)size,
-            (int)module_res, (long long)module_usec);
       if (module_res != VK_SUCCESS)
          LOGE("Failed to create shader module.\n");
 
@@ -13343,13 +13263,7 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
        * (rhi_spirv_reflect.cpp) so this translation unit does not depend on
        * SPIRV-Cross. The shim writes a POD layout whose fields mirror
        * ResourceLayout; copy it across. */
-      start_usec = cpu_features_get_time_usec();
       rhi_spirv_reflect(data, size / sizeof(uint32_t), &reflected);
-      reflect_usec = cpu_features_get_time_usec() - start_usec;
-      LOGI("[Vulkan pipeline diagnostic] spirv_reflect hash=%016llx words=%llu elapsed_us=%lld\n",
-            (unsigned long long)hash,
-            (unsigned long long)(size / sizeof(uint32_t)),
-            (long long)reflect_usec);
       memcpy(&self->layout, &reflected, sizeof(self->layout));
       }
    }
@@ -15104,8 +15018,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VkPipeline compute_pipeline;
       VkResult res;
-      retro_time_t start_usec;
-      retro_time_t elapsed_usec;
       const Shader *shader = program_get_shader(self->current_program, ShaderStage_Compute);
       VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
       info.layout = pipeline_layout_get_layout(program_get_pipeline_layout(self->current_program));
@@ -15142,19 +15054,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
       }
 
-      if (vulkan_pipeline_diagnostic.precompiling)
+      if (vulkan_pipeline_precompiling)
       {
          vulkan_precompile_queue_compute_pipeline(self, hash, &info);
          return VK_NULL_HANDLE;
       }
 
-      start_usec = cpu_features_get_time_usec();
       res = vkCreateComputePipelines(device_get_device(self->device),
             device_get_pipeline_cache(self->device), 1, &info, NULL, &compute_pipeline);
-      elapsed_usec = cpu_features_get_time_usec() - start_usec;
-      LOGI("[Vulkan pipeline diagnostic] compute_pipeline cache=miss program=%016llx pipeline=%016llx result=%d elapsed_us=%lld\n",
-            (unsigned long long)self->current_program->intrusive_node.key,
-            (unsigned long long)hash, (int)res, (long long)elapsed_usec);
       if (res != VK_SUCCESS)
          LOGE("Failed to create compute pipeline!\n");
 
@@ -15335,18 +15242,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       job->pipeline = VK_NULL_HANDLE;
       job->result = VK_NOT_READY;
-      job->program_key = self->current_program->intrusive_node.key;
-      job->render_pass_key = self->compatible_render_pass->intrusive_node.key;
-      job->subpass = self->current_subpass;
-      memcpy(job->state_words, self->static_state.words,
-            sizeof(job->state_words));
-      job->spec_mask =
-         pipeline_layout_get_resource_layout(self->current_layout)->
-            combined_spec_constant_mask &
-         self->static_state.state.spec_constant_mask;
-      memcpy(job->spec_constants,
-            self->potential_static_state.spec_constants,
-            sizeof(job->spec_constants));
       return true;
    }
 
@@ -15431,14 +15326,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       job->pipeline = VK_NULL_HANDLE;
       job->result = VK_NOT_READY;
-      job->program_key = self->current_program->intrusive_node.key;
-      job->spec_mask =
-         pipeline_layout_get_resource_layout(self->current_layout)->
-            combined_spec_constant_mask &
-         self->static_state.state.spec_constant_mask;
-      memcpy(job->spec_constants,
-            self->potential_static_state.spec_constants,
-            sizeof(job->spec_constants));
       return true;
    }
 
@@ -15447,12 +15334,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       Device *device;
       VkPipelineCache pipeline_cache;
       struct VulkanPrecompileQueue *queue;
-      unsigned index;
-      unsigned jobs;
-      unsigned graphics_jobs;
-      unsigned compute_jobs;
-      retro_time_t pipeline_elapsed_usec;
-      retro_time_t wall_elapsed_usec;
    };
 
    struct VulkanPrecompileQueue
@@ -15468,12 +15349,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       struct VulkanPrecompileWorker *worker =
          (struct VulkanPrecompileWorker *)userdata;
       struct VulkanPrecompileQueue *queue = worker->queue;
-      retro_time_t wall_start_usec = cpu_features_get_time_usec();
 
       for (;;)
       {
          unsigned i;
-         retro_time_t elapsed_usec;
 
          if (queue->lock)
             slock_lock(queue->lock);
@@ -15487,34 +15366,22 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          {
             struct VulkanGraphicsPrecompileJob *job =
                &vulkan_graphics_precompile_jobs.items[i];
-            retro_time_t start_usec = cpu_features_get_time_usec();
             job->result = vkCreateGraphicsPipelines(
                   device_get_device(worker->device),
                   worker->pipeline_cache,
                   1, &job->pipe, NULL, &job->pipeline);
-            elapsed_usec = cpu_features_get_time_usec() - start_usec;
-            job->elapsed_usec = elapsed_usec;
-            worker->graphics_jobs++;
          }
          else
          {
             struct VulkanComputePrecompileJob *job =
                &vulkan_compute_precompile_jobs.items[
                   i - queue->graphics_jobs];
-            retro_time_t start_usec = cpu_features_get_time_usec();
             job->result = vkCreateComputePipelines(
                   device_get_device(worker->device),
                   worker->pipeline_cache,
                   1, &job->pipe, NULL, &job->pipeline);
-            elapsed_usec = cpu_features_get_time_usec() - start_usec;
-            job->elapsed_usec = elapsed_usec;
-            worker->compute_jobs++;
          }
-         worker->jobs++;
-         worker->pipeline_elapsed_usec += elapsed_usec;
       }
-      worker->wall_elapsed_usec =
-         cpu_features_get_time_usec() - wall_start_usec;
    }
 
    static void vulkan_precompile_jobs_begin(void)
@@ -15597,7 +15464,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   worker[worker_index].device = device;
                   worker[worker_index].pipeline_cache = device_cache;
                   worker[worker_index].queue = &queue;
-                  worker[worker_index].index = worker_index;
                   threads[worker_index - 1] = sthread_create(
                         vulkan_precompile_worker,
                         &worker[worker_index]);
@@ -15636,31 +15502,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
       *worker_count = total_count ? workers : 0;
 
-      for (i = 0; i < workers; i++)
-         LOGI("[Vulkan shader precompilation worker] index=%u jobs=%u graphics_jobs=%u compute_jobs=%u pipeline_elapsed_us=%lld wall_elapsed_us=%lld\n",
-               worker[i].index, worker[i].jobs,
-               worker[i].graphics_jobs, worker[i].compute_jobs,
-               (long long)worker[i].pipeline_elapsed_usec,
-               (long long)worker[i].wall_elapsed_usec);
-
       for (i = 0; i < jobs->count; i++)
       {
          struct VulkanGraphicsPrecompileJob *job = &jobs->items[i];
          IntrusivePODWrapperPipeline *entry;
-         LOGI("[Vulkan pipeline diagnostic] graphics_pipeline cache=miss program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u stages=%u result=%d elapsed_us=%lld state=%08x:%08x:%08x:%08x spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-               (unsigned long long)job->program_key,
-               (unsigned long long)job->hash,
-               (unsigned long long)job->render_pass_key,
-               job->subpass, job->pipe.stageCount, (int)job->result,
-               (long long)job->elapsed_usec,
-               job->state_words[0], job->state_words[1],
-               job->state_words[2], job->state_words[3],
-               job->spec_mask,
-               job->spec_constants[0], job->spec_constants[1],
-               job->spec_constants[2], job->spec_constants[3],
-               job->spec_constants[4], job->spec_constants[5],
-               job->spec_constants[6], job->spec_constants[7],
-               job->spec_constants[8], job->spec_constants[9]);
 
          if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
          {
@@ -15682,9 +15527,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          else
             vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
 
-         if (entry != NULL)
-            entry->diagnostic_precompiled = true;
-         else
+         if (entry == NULL)
             complete = false;
       }
 
@@ -15692,17 +15535,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       {
          struct VulkanComputePrecompileJob *job = &compute_jobs->items[i];
          IntrusivePODWrapperPipeline *entry;
-         LOGI("[Vulkan pipeline diagnostic] compute_pipeline cache=miss program=%016llx pipeline=%016llx result=%d elapsed_us=%lld spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-               (unsigned long long)job->program_key,
-               (unsigned long long)job->hash,
-               (int)job->result,
-               (long long)job->elapsed_usec,
-               job->spec_mask,
-               job->spec_constants[0], job->spec_constants[1],
-               job->spec_constants[2], job->spec_constants[3],
-               job->spec_constants[4], job->spec_constants[5],
-               job->spec_constants[6], job->spec_constants[7],
-               job->spec_constants[8], job->spec_constants[9]);
 
          if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
          {
@@ -15724,9 +15556,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          else
             vkDestroyPipeline(device_get_device(device), job->pipeline, NULL);
 
-         if (entry != NULL)
-            entry->diagnostic_precompiled = true;
-         else
+         if (entry == NULL)
             complete = false;
       }
 
@@ -15743,8 +15573,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       uint32_t attr_mask;
       VkPipeline pipeline;
       VkResult res;
-      retro_time_t start_usec;
-      retro_time_t elapsed_usec;
       /* Viewport state */
       VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
       vp.viewportCount = 1;
@@ -15905,31 +15733,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       pipe.pStages = stages;
       pipe.stageCount = num_stages;
 
-      if (vulkan_pipeline_diagnostic.precompiling)
+      if (vulkan_pipeline_precompiling)
       {
          vulkan_precompile_queue_graphics_pipeline(self, hash, &pipe);
          return VK_NULL_HANDLE;
       }
 
-      start_usec = cpu_features_get_time_usec();
       res = vkCreateGraphicsPipelines(device_get_device(self->device),
             device_get_pipeline_cache(self->device), 1, &pipe, NULL, &pipeline);
-      elapsed_usec = cpu_features_get_time_usec() - start_usec;
-      LOGI("[Vulkan pipeline diagnostic] graphics_pipeline cache=miss program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u stages=%u result=%d elapsed_us=%lld state=%08x:%08x:%08x:%08x spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-            (unsigned long long)self->current_program->intrusive_node.key,
-            (unsigned long long)hash,
-            (unsigned long long)self->compatible_render_pass->intrusive_node.key,
-            self->current_subpass, num_stages, (int)res,
-            (long long)elapsed_usec,
-            self->static_state.words[0], self->static_state.words[1],
-            self->static_state.words[2], self->static_state.words[3],
-            pipeline_layout_get_resource_layout(self->current_layout)->combined_spec_constant_mask &
-               self->static_state.state.spec_constant_mask,
-            self->potential_static_state.spec_constants[0], self->potential_static_state.spec_constants[1],
-            self->potential_static_state.spec_constants[2], self->potential_static_state.spec_constants[3],
-            self->potential_static_state.spec_constants[4], self->potential_static_state.spec_constants[5],
-            self->potential_static_state.spec_constants[6], self->potential_static_state.spec_constants[7],
-            self->potential_static_state.spec_constants[8], self->potential_static_state.spec_constants[9]);
       if (res != VK_SUCCESS)
          LOGE("Failed to create graphics pipeline!\n");
 
@@ -15948,109 +15759,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
-   static uint32_t commandbuffer_get_pipeline_spec_mask(
-         const struct CommandBuffer *self)
-   {
-      const CombinedResourceLayout *layout =
-         pipeline_layout_get_resource_layout(self->current_layout);
-      return layout->combined_spec_constant_mask &
-         self->static_state.state.spec_constant_mask;
-   }
-
-   static void commandbuffer_log_compute_pipeline_first_use(
-         struct CommandBuffer *self,
-         Hash hash,
-         IntrusivePODWrapperPipeline *entry,
-         bool created_at_first_use)
-   {
-      retro_time_t now_usec;
-      uint32_t spec_mask;
-
-      if (!vulkan_pipeline_diagnostic.gameplay_active ||
-            entry == NULL ||
-            entry->diagnostic_first_gameplay_use_logged)
-         return;
-
-      entry->diagnostic_first_gameplay_use_logged = true;
-      now_usec = cpu_features_get_time_usec();
-      spec_mask = commandbuffer_get_pipeline_spec_mask(self);
-      vulkan_pipeline_diagnostic.first_use_order++;
-      LOGI("[Vulkan pipeline first use] type=compute generation=%llu order=%llu frame=%llu gameplay_elapsed_us=%lld scaling=%u msaa=%u precompiled=%u created_at_first_use=%u program=%016llx pipeline=%016llx spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-            (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
-            (unsigned long long)vulkan_pipeline_diagnostic.first_use_order,
-            (unsigned long long)vulkan_pipeline_diagnostic.gameplay_frame,
-            (long long)(now_usec -
-               vulkan_pipeline_diagnostic.gameplay_start_usec),
-            vulkan_pipeline_diagnostic.scaling,
-            vulkan_pipeline_diagnostic.msaa,
-            entry->diagnostic_precompiled ? 1u : 0u,
-            created_at_first_use ? 1u : 0u,
-            (unsigned long long)self->current_program->intrusive_node.key,
-            (unsigned long long)hash,
-            spec_mask,
-            self->potential_static_state.spec_constants[0],
-            self->potential_static_state.spec_constants[1],
-            self->potential_static_state.spec_constants[2],
-            self->potential_static_state.spec_constants[3],
-            self->potential_static_state.spec_constants[4],
-            self->potential_static_state.spec_constants[5],
-            self->potential_static_state.spec_constants[6],
-            self->potential_static_state.spec_constants[7],
-            self->potential_static_state.spec_constants[8],
-            self->potential_static_state.spec_constants[9]);
-   }
-
-   static void commandbuffer_log_graphics_pipeline_first_use(
-         struct CommandBuffer *self,
-         Hash hash,
-         IntrusivePODWrapperPipeline *entry,
-         bool created_at_first_use)
-   {
-      retro_time_t now_usec;
-      uint32_t spec_mask;
-
-      if (!vulkan_pipeline_diagnostic.gameplay_active ||
-            entry == NULL ||
-            entry->diagnostic_first_gameplay_use_logged)
-         return;
-
-      entry->diagnostic_first_gameplay_use_logged = true;
-      now_usec = cpu_features_get_time_usec();
-      spec_mask = commandbuffer_get_pipeline_spec_mask(self);
-      vulkan_pipeline_diagnostic.first_use_order++;
-      LOGI("[Vulkan pipeline first use] type=graphics generation=%llu order=%llu frame=%llu gameplay_elapsed_us=%lld scaling=%u msaa=%u precompiled=%u created_at_first_use=%u program=%016llx pipeline=%016llx render_pass=%016llx subpass=%u state=%08x:%08x:%08x:%08x spec_mask=%03x spec=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-            (unsigned long long)vulkan_pipeline_diagnostic.renderer_generation,
-            (unsigned long long)vulkan_pipeline_diagnostic.first_use_order,
-            (unsigned long long)vulkan_pipeline_diagnostic.gameplay_frame,
-            (long long)(now_usec -
-               vulkan_pipeline_diagnostic.gameplay_start_usec),
-            vulkan_pipeline_diagnostic.scaling,
-            vulkan_pipeline_diagnostic.msaa,
-            entry->diagnostic_precompiled ? 1u : 0u,
-            created_at_first_use ? 1u : 0u,
-            (unsigned long long)self->current_program->intrusive_node.key,
-            (unsigned long long)hash,
-            (unsigned long long)self->compatible_render_pass->intrusive_node.key,
-            self->current_subpass,
-            self->static_state.words[0], self->static_state.words[1],
-            self->static_state.words[2], self->static_state.words[3],
-            spec_mask,
-            self->potential_static_state.spec_constants[0],
-            self->potential_static_state.spec_constants[1],
-            self->potential_static_state.spec_constants[2],
-            self->potential_static_state.spec_constants[3],
-            self->potential_static_state.spec_constants[4],
-            self->potential_static_state.spec_constants[5],
-            self->potential_static_state.spec_constants[6],
-            self->potential_static_state.spec_constants[7],
-            self->potential_static_state.spec_constants[8],
-            self->potential_static_state.spec_constants[9]);
-   }
-
    static void commandbuffer_flush_compute_pipeline(struct CommandBuffer *self)
    {
       IntrusivePODWrapperPipeline *entry;
-      bool created_at_first_use = false;
       Hash hash;
       Hasher h; hasher_init(&h);
       hasher_u64(&h, self->current_program->intrusive_node.key);
@@ -16071,26 +15782,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       if (entry != NULL)
          self->current_pipeline = entry->value;
       else
-      {
          self->current_pipeline = commandbuffer_build_compute_pipeline(self, hash);
-         entry = program_find_pipeline(self->current_program, hash);
-         created_at_first_use =
-            vulkan_pipeline_diagnostic.gameplay_active &&
-            !vulkan_pipeline_diagnostic.precompiling;
-      }
-
-      if (vulkan_pipeline_diagnostic.precompiling && entry != NULL)
-         entry->diagnostic_precompiled = true;
-      else
-         commandbuffer_log_compute_pipeline_first_use(self, hash, entry,
-               created_at_first_use);
       }
    }
 
    static void commandbuffer_flush_graphics_pipeline(struct CommandBuffer *self)
    {
       IntrusivePODWrapperPipeline *entry;
-      bool created_at_first_use = false;
       uint32_t combined_spec_constant;
       Hash hash;
       Hasher h; hasher_init(&h);
@@ -16144,19 +15842,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       if (entry != NULL)
          self->current_pipeline = entry->value;
       else
-      {
          self->current_pipeline = commandbuffer_build_graphics_pipeline(self, hash);
-         entry = program_find_pipeline(self->current_program, hash);
-         created_at_first_use =
-            vulkan_pipeline_diagnostic.gameplay_active &&
-            !vulkan_pipeline_diagnostic.precompiling;
-      }
-
-      if (vulkan_pipeline_diagnostic.precompiling && entry != NULL)
-         entry->diagnostic_precompiled = true;
-      else
-         commandbuffer_log_graphics_pipeline_first_use(self, hash, entry,
-               created_at_first_use);
       }
    }
 
@@ -16769,7 +16455,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(!self->is_compute);
-      if (vulkan_pipeline_diagnostic.precompiling)
+      if (vulkan_pipeline_precompiling)
       {
          /* Synthetic precompile draws only need to produce the exact runtime
           * pipeline description. Queue that description without binding a
@@ -16788,7 +16474,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(self->is_compute);
-      if (vulkan_pipeline_diagnostic.precompiling)
+      if (vulkan_pipeline_precompiling)
       {
          /* As with synthetic draws, capture the exact runtime pipeline but do
           * not bind descriptors or record a dispatch into the live buffer. */
@@ -17365,8 +17051,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    }
 
 #define VULKAN_PIPELINE_CACHE_DIR_NAME "Beetle PSX HW"
-#define VULKAN_PIPELINE_CACHE_FILE_NAME "vulkan_pipeline_cache_v1.bin"
+#define VULKAN_PIPELINE_CACHE_FILE_NAME "vulkan_pipeline_cache.bin"
 #define VULKAN_PIPELINE_CACHE_FILE_MAGIC "BPSXVKC1"
+/* This version is stored in every cache file. Increment it only when a hard
+ * incompatibility makes the wrapper format unreadable; Vulkan's own payload
+ * header separately handles GPU and driver compatibility. */
 #define VULKAN_PIPELINE_CACHE_FILE_VERSION 1u
 #define VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE 24u
 #define VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE (16u * 1024u * 1024u)
@@ -17399,22 +17088,20 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    }
 
    static bool device_pipeline_cache_build_path(char *path,
-         size_t path_size, bool create_dir)
+         size_t path_size, const char *root, const char *file_name,
+         const char *location, bool create_dir)
    {
-      const char *root = retro_base_directory;
       char cache_dir[PATH_MAX_LENGTH];
       size_t needed;
 
       if (!root || root[0] == '\0')
-      {
-         LOGI("[Vulkan pipeline cache] persistence disabled: no writable system directory\n");
          return false;
-      }
 
       needed = strlen(root) + 1 + strlen(VULKAN_PIPELINE_CACHE_DIR_NAME) + 1;
       if (needed > sizeof(cache_dir))
       {
-         LOGE("[Vulkan pipeline cache] persistence disabled: directory path is too long\n");
+         LOGE("[Vulkan pipeline cache] %s directory path is too long\n",
+               location);
          return false;
       }
       fill_pathname_join_special(cache_dir, root,
@@ -17422,20 +17109,38 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       if (create_dir && !path_mkdir(cache_dir))
       {
-         LOGE("[Vulkan pipeline cache] could not create cache directory: %s\n",
-               cache_dir);
+         LOGE("[Vulkan pipeline cache] could not create %s cache directory: %s\n",
+               location, cache_dir);
          return false;
       }
 
-      needed = strlen(cache_dir) + 1 + strlen(VULKAN_PIPELINE_CACHE_FILE_NAME) + 1;
+      needed = strlen(cache_dir) + 1 + strlen(file_name) + 1;
       if (needed > path_size)
       {
-         LOGE("[Vulkan pipeline cache] persistence disabled: file path is too long\n");
+         LOGE("[Vulkan pipeline cache] %s file path is too long\n",
+               location);
          return false;
       }
       fill_pathname_join_special(path, cache_dir,
-            VULKAN_PIPELINE_CACHE_FILE_NAME, path_size);
+            file_name, path_size);
       return true;
+   }
+
+   static bool device_pipeline_cache_directories_differ(void)
+   {
+      return retro_save_directory[0] != '\0' &&
+         strcmp(retro_base_directory, retro_save_directory) != 0;
+   }
+
+   static void device_pipeline_cache_discard(const char *path,
+         const char *reason)
+   {
+      if (filestream_delete(path) == 0)
+         LOGI("[Vulkan pipeline cache] deleted %s cache: %s\n",
+               reason, path);
+      else
+         LOGE("[Vulkan pipeline cache] could not delete %s cache: %s\n",
+               reason, path);
    }
 
    static bool device_pipeline_cache_data_compatible(const Device *self,
@@ -17455,7 +17160,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                VK_UUID_SIZE) == 0;
    }
 
-   static void *device_pipeline_cache_load(Device *self, size_t *data_size)
+   static void *device_pipeline_cache_load_path(Device *self,
+         size_t *data_size, const char *root, const char *file_name,
+         const char *location)
    {
       char path[PATH_MAX_LENGTH];
       RFILE *file;
@@ -17467,26 +17174,24 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       uint32_t payload_size;
       uint32_t payload_crc;
 
-      *data_size = 0;
-      if (!device_pipeline_cache_build_path(path, sizeof(path), false))
+      if (!device_pipeline_cache_build_path(path, sizeof(path), root,
+            file_name, location, false))
          return NULL;
 
       file = filestream_open(path, RETRO_VFS_FILE_ACCESS_READ,
             RETRO_VFS_FILE_ACCESS_HINT_NONE);
       if (!file)
-      {
-         LOGI("[Vulkan pipeline cache] cold start; no cache at %s\n", path);
          return NULL;
-      }
 
       file_size = filestream_get_size(file);
       if (file_size < (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + 32u) ||
           file_size > (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE +
              VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE))
       {
-         LOGI("[Vulkan pipeline cache] ignored invalid cache size=%lld path=%s\n",
+         LOGI("[Vulkan pipeline cache] invalid cache size=%lld path=%s\n",
                (long long)file_size, path);
          filestream_close(file);
+         device_pipeline_cache_discard(path, "invalid");
          return NULL;
       }
 
@@ -17503,34 +17208,51 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       filestream_close(file);
       if (bytes_read != file_size)
       {
-         LOGI("[Vulkan pipeline cache] ignored short read=%lld expected=%lld path=%s\n",
+         LOGI("[Vulkan pipeline cache] short read=%lld expected=%lld path=%s\n",
                (long long)bytes_read, (long long)file_size, path);
          free(file_data);
+         device_pipeline_cache_discard(path, "unreadable");
          return NULL;
       }
 
       file_version = pipeline_cache_read_u32_le(file_data + 8);
       payload_size = pipeline_cache_read_u32_le(file_data + 12);
       payload_crc = pipeline_cache_read_u32_le(file_data + 16);
-      if (memcmp(file_data, VULKAN_PIPELINE_CACHE_FILE_MAGIC, 8) != 0 ||
-          file_version != VULKAN_PIPELINE_CACHE_FILE_VERSION ||
-          payload_size != (uint32_t)(file_size -
+      if (memcmp(file_data, VULKAN_PIPELINE_CACHE_FILE_MAGIC, 8) != 0)
+      {
+         LOGI("[Vulkan pipeline cache] unknown cache signature path=%s\n",
+               path);
+         free(file_data);
+         device_pipeline_cache_discard(path, "unknown");
+         return NULL;
+      }
+      if (file_version != VULKAN_PIPELINE_CACHE_FILE_VERSION)
+      {
+         LOGI("[Vulkan pipeline cache] incompatible file version=%u expected=%u path=%s\n",
+               file_version, VULKAN_PIPELINE_CACHE_FILE_VERSION, path);
+         free(file_data);
+         device_pipeline_cache_discard(path, "incompatible-version");
+         return NULL;
+      }
+      if (payload_size != (uint32_t)(file_size -
              VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE) ||
           encoding_crc32(0, file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE,
              payload_size) != payload_crc)
       {
-         LOGI("[Vulkan pipeline cache] ignored corrupt or unknown cache path=%s\n",
+         LOGI("[Vulkan pipeline cache] corrupt cache payload path=%s\n",
                path);
          free(file_data);
+         device_pipeline_cache_discard(path, "corrupt");
          return NULL;
       }
 
       if (!device_pipeline_cache_data_compatible(self,
             file_data + VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE, payload_size))
       {
-         LOGI("[Vulkan pipeline cache] ignored incompatible GPU/driver cache path=%s\n",
+         LOGI("[Vulkan pipeline cache] incompatible GPU/driver cache path=%s\n",
                path);
          free(file_data);
+         device_pipeline_cache_discard(path, "incompatible-driver");
          return NULL;
       }
 
@@ -17546,33 +17268,93 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             payload_size);
       free(file_data);
       *data_size = payload_size;
-      LOGI("[Vulkan pipeline cache] loaded bytes=%u path=%s\n",
-            payload_size, path);
+      LOGI("[Vulkan pipeline cache] loaded version=%u bytes=%u location=%s path=%s\n",
+            file_version, payload_size, location, path);
       return payload;
    }
 
-   static void device_pipeline_cache_save(Device *self)
+   static void *device_pipeline_cache_load(Device *self, size_t *data_size)
+   {
+      void *data;
+
+      *data_size = 0;
+      data = device_pipeline_cache_load_path(self, data_size,
+            retro_base_directory, VULKAN_PIPELINE_CACHE_FILE_NAME, "system");
+      if (data)
+         return data;
+
+      if (device_pipeline_cache_directories_differ())
+      {
+         data = device_pipeline_cache_load_path(self, data_size,
+               retro_save_directory, VULKAN_PIPELINE_CACHE_FILE_NAME, "save");
+         if (data)
+            return data;
+      }
+
+      LOGI("[Vulkan pipeline cache] cold start; no compatible cache found\n");
+      return NULL;
+   }
+
+   static bool device_pipeline_cache_write(const void *file_data,
+         size_t file_size, size_t payload_size, const char *root,
+         const char *location)
    {
       char path[PATH_MAX_LENGTH];
       char temp_path[PATH_MAX_LENGTH];
-      size_t data_size = 0;
-      size_t actual_size;
-      uint8_t *file_data;
-      VkResult result;
       int temp_length;
 
-      if (self->device == VK_NULL_HANDLE ||
-          self->pipeline_cache == VK_NULL_HANDLE)
-         return;
-      if (!device_pipeline_cache_build_path(path, sizeof(path), true))
-         return;
+      if (!device_pipeline_cache_build_path(path, sizeof(path), root,
+            VULKAN_PIPELINE_CACHE_FILE_NAME, location, true))
+         return false;
 
       temp_length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
       if (temp_length < 0 || (size_t)temp_length >= sizeof(temp_path))
       {
-         LOGE("[Vulkan pipeline cache] could not construct temporary path\n");
-         return;
+         LOGE("[Vulkan pipeline cache] could not construct %s temporary path\n",
+               location);
+         return false;
       }
+
+      if (!filestream_write_file(temp_path, file_data, (int64_t)file_size))
+      {
+         LOGE("[Vulkan pipeline cache] could not write %s temporary cache: %s\n",
+               location, temp_path);
+         filestream_delete(temp_path);
+         return false;
+      }
+
+      /* POSIX rename replaces atomically. The Windows C runtime does not
+       * replace an existing destination, so fall back to removing the old,
+       * non-critical cache and retrying the same-directory rename. */
+      if (filestream_rename(temp_path, path) != 0)
+      {
+         if (!filestream_exists(path) || filestream_delete(path) != 0 ||
+             filestream_rename(temp_path, path) != 0)
+         {
+            LOGE("[Vulkan pipeline cache] could not replace %s cache: %s\n",
+                  location, path);
+            filestream_delete(temp_path);
+            return false;
+         }
+      }
+
+      LOGI("[Vulkan pipeline cache] saved version=%u bytes=%llu location=%s path=%s\n",
+            VULKAN_PIPELINE_CACHE_FILE_VERSION,
+            (unsigned long long)payload_size, location, path);
+      return true;
+   }
+
+   static void device_pipeline_cache_save(Device *self)
+   {
+      size_t data_size = 0;
+      size_t actual_size;
+      uint8_t *file_data;
+      VkResult result;
+      bool saved;
+
+      if (self->device == VK_NULL_HANDLE ||
+          self->pipeline_cache == VK_NULL_HANDLE)
+         return;
 
       result = vkGetPipelineCacheData(self->device, self->pipeline_cache,
             &data_size, NULL);
@@ -17617,32 +17399,24 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                actual_size));
       pipeline_cache_write_u32_le(file_data + 20, 0);
 
-      if (!filestream_write_file(temp_path, file_data,
-            (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + actual_size)))
+      saved = device_pipeline_cache_write(file_data,
+            VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + actual_size, actual_size,
+            retro_base_directory, "system");
+      if (!saved && device_pipeline_cache_directories_differ())
       {
-         LOGE("[Vulkan pipeline cache] could not write temporary cache: %s\n",
-               temp_path);
-         filestream_delete(temp_path);
-         free(file_data);
-         return;
+         LOGI("[Vulkan pipeline cache] system location unavailable; trying save directory\n");
+         saved = device_pipeline_cache_write(file_data,
+               VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + actual_size,
+               actual_size, retro_save_directory, "save");
       }
       free(file_data);
 
-      /* POSIX rename replaces atomically. The Windows C runtime does not
-       * replace an existing destination, so fall back to removing the old,
-       * non-critical cache and retrying the same-directory rename. */
-      if (filestream_rename(temp_path, path) != 0)
+      if (!saved)
       {
-         if (!filestream_exists(path) || filestream_delete(path) != 0 ||
-             filestream_rename(temp_path, path) != 0)
-         {
-            LOGE("[Vulkan pipeline cache] replace failed: %s\n", path);
-            filestream_delete(temp_path);
-            return;
-         }
+         LOGE("[Vulkan pipeline cache] persistence disabled: no writable system or save directory\n");
+         return;
       }
-      LOGI("[Vulkan pipeline cache] saved bytes=%llu path=%s\n",
-            (unsigned long long)actual_size, path);
+
    }
 
    static void device_init(Device *self)
@@ -18000,7 +17774,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       /* Every pipeline create receives one shared driver cache. Seed it from
        * validated persistent data on every platform; a bad driver blob is
-       * never fatal, since creation is retried with an empty cache. */
+       * never fatal, since creation is retried with an empty cache.
+       *
+       * Keep flags at zero deliberately. Without
+       * VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT, Vulkan internally
+       * synchronizes simultaneous cache modification, so Android precompile
+       * workers may safely share this handle. */
       {
          VkPipelineCacheCreateInfo cache_info = {
             VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
@@ -21635,8 +21414,6 @@ void rhi_vulkan_prepare_frame(void)
     * don't dereference it. */
    if (renderer == NULL)
       return;
-
-   vulkan_pipeline_diagnostic_begin_frame();
 
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
