@@ -331,7 +331,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       BEETLE_OPT(vulkan_shader_precompilation),
       "Vulkan Shader Precompilation",
       NULL,
-      "Precompile the complete set of commonly used Vulkan graphics pipelines before gameplay begins. This prevents first-use shader compilation stalls at the cost of a longer initial startup. The persistent driver cache makes later starts substantially faster. Restart required.",
+      "Precompile the Vulkan graphics pipelines anticipated for the current configuration. This prevents first-use shader compilation stalls at the cost of a longer initial startup. The persistent driver cache makes later starts substantially faster.",
       NULL,
       "video",
       {
