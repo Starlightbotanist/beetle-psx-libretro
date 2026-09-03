@@ -35,19 +35,19 @@
 #define RETRO_VFS_FILE_ACCESS_HINT_NONE 0
 #define RETRO_VFS_FILE_ACCESS_HINT_SEQUENTIAL_BULK 0
 #define RHI_STATIC_ASSERT(value, name) typedef char name[(value) ? 1 : -1]
-static char checkpoint_log[512], checkpoint_attempt_log[512];
+static char save_log[512], save_attempt_log[512];
 static void test_log(const char *format, ...)
 {
    char *target = NULL;
    va_list args;
-   if (strstr(format, "checkpoint force="))
-      target = checkpoint_log;
-   else if (strstr(format, "checkpoint-attempt"))
-      target = checkpoint_attempt_log;
+   if (strstr(format, "pipeline cache] save dirty="))
+      target = save_log;
+   else if (strstr(format, "save-attempt"))
+      target = save_attempt_log;
    if (!target)
       return;
    va_start(args, format);
-   vsnprintf(target, sizeof(checkpoint_log), format, args);
+   vsnprintf(target, sizeof(save_log), format, args);
    va_end(args);
 }
 #define LOGI(...) test_log(__VA_ARGS__)
@@ -78,7 +78,6 @@ typedef struct Device
    char pipeline_cache_file_name[96];
    unsigned pipeline_cache_dirty_count;
    unsigned pipeline_cache_temp_serial;
-   retro_time_t pipeline_cache_last_checkpoint;
    bool pipeline_cache_storage_warned;
    struct
    {
@@ -287,7 +286,6 @@ static Device make_device(void)
    device.pipeline_cache->vendor_id = device.gpu_props.vendorID;
    device.pipeline_cache->device_id = device.gpu_props.deviceID;
    memcpy(device.pipeline_cache->uuid, device.gpu_props.pipelineCacheUUID, VK_UUID_SIZE);
-   device.pipeline_cache_last_checkpoint = mock_time;
    device_pipeline_cache_set_file_name(&device);
    return device;
 }
@@ -348,7 +346,7 @@ static void test_selection_and_updates(const char *tmp)
    free(second.pipeline_cache);
 }
 
-static void test_faults_and_debounce(const char *tmp)
+static void test_faults_and_unchanged_data(const char *tmp)
 {
    Device device = make_device();
    unsigned old_queries, old_writes;
@@ -372,14 +370,6 @@ static void test_faults_and_debounce(const char *tmp)
    fail_close = false;
    assert(device.pipeline_cache_dirty_count == 1);
    assert(disk_entries(&device, retro_base_directory) == 1);
-   old_queries = snapshot_queries;
-   mock_time++;
-   device_pipeline_cache_checkpoint(&device, false);
-   assert(snapshot_queries == old_queries);
-   device.pipeline_cache_dirty_count = 64;
-   mock_time += 5 * 1000000;
-   device_pipeline_cache_checkpoint(&device, false);
-   assert(snapshot_queries == old_queries); /* Busy boot does not accelerate I/O. */
    fail_write = true;
    device_pipeline_cache_save(&device);
    fail_write = false;
@@ -396,8 +386,7 @@ static void test_faults_and_debounce(const char *tmp)
    device_pipeline_cache_save(&device);
    merge_error = 0;
    assert(disk_entries(&device, retro_base_directory) == 1);
-   mock_time += VULKAN_PIPELINE_CACHE_CHECKPOINT_USEC;
-   device_pipeline_cache_checkpoint(&device, false);
+   device_pipeline_cache_save(&device);
    assert(device.pipeline_cache_dirty_count == 0);
    assert(disk_entries(&device, retro_base_directory) == 3);
    free(device.pipeline_cache);
@@ -458,7 +447,7 @@ static void test_lock_and_fallback(const char *tmp)
 static void test_validation_and_quarantine(const char *tmp)
 {
    Device device = make_device(), reader = make_device();
-   char path[PATH_MAX_LENGTH];
+   char path[PATH_MAX_LENGTH], rejected_path[PATH_MAX_LENGTH];
    FILE *file;
    size_t size;
    bool failed;
@@ -490,7 +479,28 @@ static void test_validation_and_quarantine(const char *tmp)
    import_error = -3;
    device_pipeline_cache_load(&reader);
    assert(!path_is_valid(path)); /* Rejection under lock moves it aside. */
+   assert(snprintf(rejected_path, sizeof(rejected_path), "%s.rejected", path) > 0);
+   assert(path_is_valid(rejected_path));
+
+   /* A later rejection atomically replaces the one stable quarantine instead
+    * of creating an unbounded series of uniquely named siblings. */
    import_error = 0;
+   device.pipeline_cache->entries = 9;
+   assert(device_pipeline_cache_write(&device, retro_base_directory, "system"));
+   import_error = -3;
+   device_pipeline_cache_load(&reader);
+   assert(!path_is_valid(path) && path_is_valid(rejected_path));
+   import_error = 0;
+   {
+      char rejected_name[128];
+      snprintf(rejected_name, sizeof(rejected_name), "%s.rejected",
+            device.pipeline_cache_file_name);
+      data = device_pipeline_cache_load_path(&device, &size,
+            retro_base_directory, rejected_name, "test", &failed);
+      assert(data && !failed && size == sizeof(struct FakeCache));
+      assert(((struct FakeCache *)data)->entries == 9);
+      free(data);
+   }
    free(device.pipeline_cache);
    free(reader.pipeline_cache);
 }
@@ -566,7 +576,7 @@ static void test_large_cache(const char *tmp)
 }
 
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
-static void test_checkpoint_timing(const char *tmp)
+static void test_save_timing(const char *tmp)
 {
    Device device = make_device();
    new_roots(tmp, 6);
@@ -574,14 +584,12 @@ static void test_checkpoint_timing(const char *tmp)
    snapshot_delay = 9000; /* Two driver queries cross the 16.67 ms budget. */
    device_pipeline_cache_mark_dirty(&device);
    device_pipeline_cache_save(&device);
-   assert(strstr(checkpoint_log, "elapsed_usec=18000"));
-   assert(strstr(checkpoint_log, "exceeds_60hz=1"));
-   assert(strstr(checkpoint_attempt_log, "result=written"));
-   assert(strstr(checkpoint_attempt_log, "bytes=40"));
+   assert(strstr(save_log, "elapsed_usec=18000"));
+   assert(strstr(save_attempt_log, "result=written"));
+   assert(strstr(save_attempt_log, "bytes=40"));
    device_pipeline_cache_mark_dirty(&device);
    device_pipeline_cache_save(&device);
-   assert(strstr(checkpoint_attempt_log, "result=unchanged"));
-   assert(strstr(checkpoint_log, "exceeds_60hz=1"));
+   assert(strstr(save_attempt_log, "result=unchanged"));
    snapshot_delay = 0;
    free(device.pipeline_cache);
 }
@@ -657,17 +665,17 @@ int main(int argc, char **argv)
    }
    assert(argc == 2);
    test_selection_and_updates(argv[1]);
-   test_faults_and_debounce(argv[1]);
+   test_faults_and_unchanged_data(argv[1]);
    test_lock_and_fallback(argv[1]);
    test_validation_and_quarantine(argv[1]);
    test_device_header();
    test_large_cache(argv[1]);
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
-   test_checkpoint_timing(argv[1]);
+   test_save_timing(argv[1]);
 #endif
 #ifdef _WIN32
    test_windows_native_paths(argv[1]);
 #endif
-   puts("Vulkan cache persistence: selection, merging, locking, fallback, write/close/rename/read failures, debounce, validation, quarantine, and size bounds passed.");
+   puts("Vulkan cache persistence: selection, merging, locking, fallback, write/close/rename/read failures, unchanged-data suppression, bounded quarantine, and size bounds passed.");
    return 0;
 }

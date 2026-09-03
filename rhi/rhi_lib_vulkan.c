@@ -4895,7 +4895,6 @@ static void cbh_move(struct CommandBufferHandle *dst,
          char pipeline_cache_file_name[96];
          unsigned pipeline_cache_dirty_count;
          unsigned pipeline_cache_temp_serial;
-         retro_time_t pipeline_cache_last_checkpoint;
          bool pipeline_cache_storage_warned;
 
          uint64_t cookie;
@@ -6334,7 +6333,6 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_reset_scissor_queue(Renderer *self);
    static void device_pipeline_cache_save(Device *self);
    static void device_pipeline_cache_mark_dirty(Device *self);
-   static void device_pipeline_cache_checkpoint(Device *self, bool force);
    static void renderer_reset_queue(Renderer *self);
    static void renderer_ensure_command_buffer(Renderer *self)
    {
@@ -15609,7 +15607,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       *compute_job_count = compute_jobs->count;
       *worker_count = 0;
       *compile_elapsed_usec = 0;
-      complete = total_count != 0 && !jobs->capture_failed &&
+      /* Zero jobs is a successful warm result when every expected identity is
+       * already present. Exact recipe validation below distinguishes that from
+       * an incomplete capture. */
+      complete = !jobs->capture_failed &&
          !compute_jobs->capture_failed;
 
       for (i = 0; i < jobs->count; i++)
@@ -17324,7 +17325,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #define VULKAN_PIPELINE_CACHE_FILE_VERSION 1u
 #define VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE 24u
 #define VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE (256u * 1024u * 1024u)
-#define VULKAN_PIPELINE_CACHE_CHECKPOINT_USEC (30 * 1000000)
 
 #if defined(_WIN32)
 #include <encodings/utf.h>
@@ -17364,8 +17364,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
    /* A persistent lock inode/handle is essential: unlinking a lock file would
     * let a waiting process and a new process lock different objects. Locks are
-    * nonblocking and released by the OS after a crash; busy writers retry at
-    * the next checkpoint rather than blocking the emulation thread. */
+    * nonblocking and released by the OS after a crash; a busy writer leaves
+    * the cache dirty for the next safe save rather than blocking. */
    static bool device_pipeline_cache_lock(const char *path,
          struct RhiPipelineCacheLock *lock)
    {
@@ -17672,15 +17672,17 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return length >= 0 && (size_t)length < out_size;
    }
 
-   /* Called only with this file's native lock held. A rejected driver blob
-    * is moved aside, not deleted; the wrapper version remains independent of
-    * shader/core revisions and no filename-version migration is necessary. */
-   static void device_pipeline_cache_quarantine(Device *self, const char *path)
+   /* Called only with this file's native lock held. Keep exactly the newest
+    * driver-rejected blob at a stable sibling path. Atomic replacement bounds
+    * quarantine storage to one file per GPU/location while retaining useful
+    * evidence for diagnosis. If replacement fails, the primary stays intact. */
+   static void device_pipeline_cache_quarantine(const char *path)
    {
       char rejected_path[PATH_MAX_LENGTH];
-      if (device_pipeline_cache_unique_path(self, rejected_path,
-               sizeof(rejected_path), path, "rejected") &&
-          device_pipeline_cache_replace(path, rejected_path))
+      int length = snprintf(rejected_path, sizeof(rejected_path),
+            "%s.rejected", path);
+      if (length >= 0 && (size_t)length < sizeof(rejected_path) &&
+            device_pipeline_cache_replace(path, rejected_path))
          LOGI("[Vulkan pipeline cache] quarantined driver-rejected data\n");
    }
 
@@ -17741,7 +17743,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             LOGI("[Vulkan pipeline cache] seeded bytes=%llu location=%s\n",
                   (unsigned long long)size, location);
          else if (rejected && locked)
-            device_pipeline_cache_quarantine(self, path);
+            device_pipeline_cache_quarantine(path);
          free(data);
       }
       if (locked)
@@ -17843,7 +17845,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
           !device_pipeline_cache_lock(path, &lock))
       {
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
-         LOGI("[Vulkan pipeline cache] checkpoint-attempt location=%s result=deferred bytes=0 elapsed_usec=%lld\n",
+         LOGI("[Vulkan pipeline cache] save-attempt location=%s result=deferred bytes=0 elapsed_usec=%lld\n",
                location, (long long)(cpu_features_get_time_usec() - start_usec));
 #endif
          return false;
@@ -17861,7 +17863,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       {
          if (!rejected)
             goto done;
-         device_pipeline_cache_quarantine(self, path);
+         device_pipeline_cache_quarantine(path);
          free(old_data);
          old_data = NULL;
       }
@@ -17905,7 +17907,7 @@ done:
       free(old_data);
       device_pipeline_cache_unlock(&lock);
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
-      LOGI("[Vulkan pipeline cache] checkpoint-attempt location=%s result=%s bytes=%llu elapsed_usec=%lld\n",
+      LOGI("[Vulkan pipeline cache] save-attempt location=%s result=%s bytes=%llu elapsed_usec=%lld\n",
             location, unchanged ? "unchanged" : (saved ? "written" : "failed"),
             (unsigned long long)payload_size,
             (long long)(cpu_features_get_time_usec() - start_usec));
@@ -17913,7 +17915,7 @@ done:
       return saved;
    }
 
-   /* Publication and checkpoints run on the render thread after worker joins.
+   /* Publication and persistence saves run on the render thread after worker joins.
     * Do not mark from compiler workers: successful publication, not a duplicate
     * or failed driver creation, is the unit of newly useful cached work. */
    static void device_pipeline_cache_mark_dirty(Device *self)
@@ -17922,38 +17924,28 @@ done:
          self->pipeline_cache_dirty_count++;
    }
 
-   static void device_pipeline_cache_checkpoint(Device *self, bool force)
+   static void device_pipeline_cache_save(Device *self)
    {
-      retro_time_t now;
-      retro_time_t elapsed;
       bool saved;
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
+      retro_time_t start_usec;
       unsigned dirty_count;
 #endif
       if (self->device == VK_NULL_HANDLE ||
           self->pipeline_cache == VK_NULL_HANDLE ||
           self->pipeline_cache_dirty_count == 0)
          return;
-      now = cpu_features_get_time_usec();
-      elapsed = now - self->pipeline_cache_last_checkpoint;
-      /* More newly published pipelines do not make synchronous disk/driver
-       * work cheaper. Do not accelerate this debounce during early gameplay. */
-      if (!force && elapsed < VULKAN_PIPELINE_CACHE_CHECKPOINT_USEC)
-         return;
-      /* Advance on failures too, so a full/read-only disk or another writer
-       * causes a delayed retry, never a serialization attempt every frame. */
-      self->pipeline_cache_last_checkpoint = now;
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
+      start_usec = cpu_features_get_time_usec();
       dirty_count = self->pipeline_cache_dirty_count;
 #endif
       saved = device_pipeline_cache_write(self, retro_base_directory, "system");
       if (!saved && device_pipeline_cache_directories_differ())
          saved = device_pipeline_cache_write(self, retro_save_directory, "save");
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
-      elapsed = cpu_features_get_time_usec() - now;
-      LOGI("[Vulkan pipeline cache] checkpoint force=%u dirty=%u result=%s elapsed_usec=%lld exceeds_60hz=%u\n",
-            (unsigned)force, dirty_count, saved ? "saved" : "deferred",
-            (long long)elapsed, (unsigned)(elapsed > 16667));
+      LOGI("[Vulkan pipeline cache] save dirty=%u result=%s elapsed_usec=%lld\n",
+            dirty_count, saved ? "saved" : "deferred",
+            (long long)(cpu_features_get_time_usec() - start_usec));
 #endif
       if (saved)
       {
@@ -17962,14 +17954,9 @@ done:
       }
       else if (!self->pipeline_cache_storage_warned)
       {
-         LOGI("[Vulkan pipeline cache] checkpoint deferred: no available locked, atomically replaceable system/save path; retaining dirty state\n");
+         LOGI("[Vulkan pipeline cache] save deferred: no available locked, atomically replaceable system/save path; retaining dirty state\n");
          self->pipeline_cache_storage_warned = true;
       }
-   }
-
-   static void device_pipeline_cache_save(Device *self)
-   {
-      device_pipeline_cache_checkpoint(self, true);
    }
 
    static void device_init(Device *self)
@@ -18325,7 +18312,6 @@ done:
       self->mem_props = *context_get_mem_props(context);
       self->gpu_props = *context_get_gpu_props(context);
       device_pipeline_cache_set_file_name(self);
-      self->pipeline_cache_last_checkpoint = cpu_features_get_time_usec();
 
       /* Every pipeline create receives one shared driver cache. Seed it from
        * validated persistent data on every platform. Create the destination
@@ -21987,23 +21973,26 @@ void rhi_vulkan_prepare_frame(void)
       return;
    }
 
+   /* Defensive: a live device without a renderer cannot begin or finalize a
+    * frame. Clear any stale flag before returning so finalize_frame cannot
+    * mistake this path for a successfully prepared frame. */
+   if (renderer == NULL)
+   {
+      inside_frame = false;
+      return;
+   }
+
    inside_frame = true;
    device_flush_frame_nolock(device);
    vulkan->wait_sync_index(vulkan->handle);
    ensure_sync_index_resources();
    device_next_frame_context(device);
 
-   /* Defensive: if the renderer is somehow absent while the device is live,
-    * don't dereference it. */
-   if (renderer == NULL)
-      return;
-
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
    renderer->sprite_filter_exclude = (FilterExclude)(filter_exclude_sprites);
    renderer->polygon_2d_filter_exclude = (FilterExclude)(filter_exclude_2d_polygons);
    renderer_precompile_if_configuration_changed(renderer);
-   device_pipeline_cache_checkpoint(device, false);
 }
 
 static ScanoutMode get_scanout_mode(bool bpp24)

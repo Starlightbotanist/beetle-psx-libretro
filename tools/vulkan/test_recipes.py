@@ -121,6 +121,24 @@ def main():
         assert refresh < run.index("if (prepare_after_variables)") < run.rindex("rhi_intf_prepare_frame()")
     else:
         assert refresh < run.index("rhi_intf_prepare_frame()")
+
+    # A defensive renderer-null return must not leave a frame active, and no
+    # driver-cache serialization or file I/O belongs in the per-frame path.
+    prepare = definition(source, "rhi_vulkan_prepare_frame")
+    assert prepare.index("if (renderer == NULL)") < prepare.index("inside_frame = true")
+    assert "device_pipeline_cache_save" not in prepare
+    assert "device_pipeline_cache_checkpoint" not in prepare
+
+    # An empty job queue is the expected warm-cache case. Capture and exact
+    # recipe validation, not a nonzero job count, decide completeness.
+    finish = definition(source, "vulkan_precompile_jobs_finish")
+    completion = finish[:finish.index("for (i = 0; i < jobs->count; i++)")]
+    assert "total_count != 0" not in completion
+
+    option_text = (root / "libretro_core_options.h").read_text(encoding="utf-8")
+    option_start = option_text.index("BEETLE_OPT(vulkan_shader_precompilation)")
+    option_end = option_text.index("\n   },", option_start)
+    assert "Restart required" not in option_text[option_start:option_end]
     with tempfile.TemporaryDirectory(prefix="beetle-vulkan-recipes-") as tmp:
         work = Path(tmp)
         for name, text in (("types", type_text), ("hash", hash_text),

@@ -31,20 +31,21 @@ python3 tools/vulkan_cache/test_persistence.py --windows --diagnostics
   handle ownership, and cleanup.
 - Persistence: both-location merge, stale concurrent writers, process locks,
   corrupt/incompatible files, allocation and I/O failures, checked close,
-  atomic replacement, debounce, and unchanged-data suppression.
+  atomic replacement, bounded rejection quarantine, and unchanged-data
+  suppression.
 
 These are logical/failure-path tests, not a substitute for real-driver execution.
 After renderer changes, run a core with Vulkan validation and representative
 gameplay, including live option changes. Android remains authoritative for
-compilation and checkpoint costs against the 16.67 ms frame budget. iOS/tvOS
+compilation and persistence-save costs. iOS/tvOS
 need their own device testing.
 
 ## Development diagnostics
 
 Build with `EXTRA_FLAGS=-DBEETLE_VULKAN_PIPELINE_DIAGNOSTICS` (or the equivalent
 compiler define). This enables first-use identity/escape logs, actual worker
-counts and timing, and checkpoint timing including a 60 Hz budget warning.
-Normal builds omit those diagnostic fields and per-job/per-use clocks/logs.
+counts and timing, and persistence-save timing. Normal builds omit those
+diagnostic fields and per-job/per-use clocks/logs.
 
 The precompile traversal is derived from Beetle's renderer state branches.
 Runtime and capture share state setters, program selectors, and normalized
@@ -60,8 +61,9 @@ the current destination before replacement. Native Windows/POSIX paths support
 safe writes; VFS-only paths remain readable but cannot be written safely without
 locking/atomic-replace support, so the core tries the other directory.
 
-Dirty cache checkpoints are synchronous and at least 30 seconds apart during
-gameplay. Successful precompilation and clean teardown also request a save.
-The interval limits frequency, not latency: measure on target hardware before
-claiming that checkpointing is stutter-free. Existing unkeyed test-era files
-are left untouched and are not migrated.
+No cache serialization or filesystem write is initiated from the per-frame
+gameplay path. Successful precompilation saves immediately at the existing
+configuration-change boundary, and clean Vulkan teardown saves runtime-learned
+pipelines. Each cache location retains at most one driver-rejected payload at
+the stable `.rejected` sibling path. Existing unkeyed test-era files are left
+untouched and are not migrated.
