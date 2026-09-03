@@ -15442,20 +15442,15 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       struct VulkanPrecompileWorker worker[VulkanPrecompileMaxWorkers];
       struct VulkanPrecompileQueue queue;
       sthread_t *threads[VulkanPrecompileMaxWorkers - 1];
-      VkPipelineCache private_cache[VulkanPrecompileMaxWorkers];
-      void *initial_cache_data = NULL;
-      size_t initial_cache_size = 0;
       retro_time_t start_usec;
       bool complete;
       unsigned workers = 1;
-      unsigned private_cache_count = 0;
       unsigned total_count;
       unsigned i;
 
       memset(worker, 0, sizeof(worker));
       memset(&queue, 0, sizeof(queue));
       memset(threads, 0, sizeof(threads));
-      memset(private_cache, 0, sizeof(private_cache));
 
       total_count = jobs->count + compute_jobs->count;
       *job_count = total_count;
@@ -15476,50 +15471,20 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #if defined(ANDROID)
       if (total_count > 1)
       {
-         unsigned desired_workers = cpu_features_get_core_amount();
+         unsigned available_cores = cpu_features_get_core_amount();
+         unsigned desired_workers = available_cores;
          VkPipelineCache device_cache = device_get_pipeline_cache(device);
-         VkResult cache_result = vkGetPipelineCacheData(
-               device_get_device(device), device_cache,
-               &initial_cache_size, NULL);
-         VkPipelineCacheCreateInfo cache_info = {
-            VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
-         };
 
          if (desired_workers > VulkanPrecompileMaxWorkers)
             desired_workers = VulkanPrecompileMaxWorkers;
          if (desired_workers > total_count)
             desired_workers = total_count;
 
-         if (cache_result == VK_SUCCESS && initial_cache_size)
-         {
-            initial_cache_data = malloc(initial_cache_size);
-            if (initial_cache_data)
-               cache_result = vkGetPipelineCacheData(
-                     device_get_device(device), device_cache,
-                     &initial_cache_size, initial_cache_data);
-            else
-               cache_result = VK_ERROR_OUT_OF_HOST_MEMORY;
-         }
+         LOGI("[Vulkan shader precompilation pool] requested_workers=%u available_cores=%u selected_workers=%u cache_mode=%s\n",
+               VulkanPrecompileMaxWorkers, available_cores,
+               desired_workers, "shared");
 
-         if (cache_result == VK_SUCCESS)
-         {
-            unsigned cache_index;
-            cache_info.initialDataSize = initial_cache_size;
-            cache_info.pInitialData = initial_cache_data;
-            for (cache_index = 0;
-                 cache_index < desired_workers;
-                 cache_index++)
-            {
-               cache_result = vkCreatePipelineCache(
-                     device_get_device(device), &cache_info, NULL,
-                     &private_cache[cache_index]);
-               if (cache_result != VK_SUCCESS)
-                  break;
-               private_cache_count++;
-            }
-         }
-
-         if (private_cache_count >= 2)
+         if (desired_workers >= 2)
          {
             queue.lock = slock_new();
             if (queue.lock)
@@ -15528,12 +15493,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                queue.graphics_jobs = jobs->count;
                queue.total_jobs = total_count;
                for (worker_index = 1;
-                    worker_index < private_cache_count;
+                    worker_index < desired_workers;
                     worker_index++)
                {
                   worker[worker_index].device = device;
-                  worker[worker_index].pipeline_cache =
-                     private_cache[worker_index];
+                  worker[worker_index].pipeline_cache = device_cache;
                   worker[worker_index].queue = &queue;
                   threads[worker_index - 1] = sthread_create(
                         vulkan_precompile_worker,
@@ -15547,25 +15511,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
          if (workers == 1)
          {
-            unsigned cache_index;
-            LOGI("[Vulkan shader precompilation] private worker pool unavailable; using one worker\n");
+            LOGI("[Vulkan shader precompilation] shared worker pool unavailable; using one worker\n");
             if (queue.lock)
             {
                slock_free(queue.lock);
                queue.lock = NULL;
             }
-            for (cache_index = 0;
-                 cache_index < private_cache_count;
-                 cache_index++)
-            {
-               if (private_cache[cache_index] != VK_NULL_HANDLE)
-               {
-                  vkDestroyPipelineCache(device_get_device(device),
-                        private_cache[cache_index], NULL);
-                  private_cache[cache_index] = VK_NULL_HANDLE;
-               }
-            }
-            private_cache_count = 0;
          }
       }
 #endif
@@ -15575,37 +15526,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          queue.total_jobs = total_count;
       }
       worker[0].device = device;
-      worker[0].pipeline_cache = workers > 1
-         ? private_cache[0] : device_get_pipeline_cache(device);
+      worker[0].pipeline_cache = device_get_pipeline_cache(device);
       worker[0].queue = &queue;
       vulkan_precompile_worker(&worker[0]);
       for (i = 1; i < workers; i++)
          sthread_join(threads[i - 1]);
 
-#if defined(ANDROID)
-      if (workers > 1)
-      {
-         VkResult merge_result = vkMergePipelineCaches(
-               device_get_device(device), device_get_pipeline_cache(device),
-               workers, private_cache);
-         unsigned cache_index;
-         if (merge_result != VK_SUCCESS)
-         {
-            LOGE("[Vulkan shader precompilation] worker cache merge failed result=%d\n",
-                  (int)merge_result);
-            complete = false;
-         }
-         for (cache_index = 0;
-              cache_index < private_cache_count;
-              cache_index++)
-            if (private_cache[cache_index] != VK_NULL_HANDLE)
-               vkDestroyPipelineCache(device_get_device(device),
-                     private_cache[cache_index], NULL);
-      }
-#endif
       if (queue.lock)
          slock_free(queue.lock);
-      free(initial_cache_data);
       *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
       *worker_count = total_count ? workers : 0;
 
