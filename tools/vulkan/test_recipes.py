@@ -57,7 +57,14 @@ def main():
     source = (root / "rhi/rhi_lib_vulkan.c").read_text(encoding="utf-8")
     types = [
         ("struct", "State"), ("union", "PipelineState"),
+        ("enum", "ShaderStage"),
         ("struct", "VulkanPipelineRecipe"),
+        ("struct", "VulkanPipelineRecipeVec"),
+        ("struct", "VulkanGraphicsPrecompileJob"),
+        ("struct", "VulkanGraphicsPrecompileJobVec"),
+        ("struct", "VulkanComputePrecompileJob"),
+        ("struct", "VulkanComputePrecompileJobVec"),
+        ("struct", "VulkanPrecompileContext"),
         ("struct", "PotentialState"), ("struct", "VulkanPrecompileConfiguration"),
         ("struct", "TextureWindow"), ("enum", "SemiTransparentMode"),
         ("enum", "FilterMode"), ("enum", "TransMode"), ("enum", "BlendMode"),
@@ -135,6 +142,14 @@ def main():
     finish = definition(source, "vulkan_precompile_jobs_finish")
     completion = finish[:finish.index("for (i = 0; i < jobs->count; i++)")]
     assert "total_count != 0" not in completion
+
+    # Every attempt owns its capture vectors. The Device pointer is only a
+    # scoped bridge for the existing command-buffer path, never global state.
+    precompile = definition(
+        source, "renderer_precompile_current_configuration_pipelines")
+    assert "static bool vulkan_pipeline_precompiling" not in source
+    assert "self->device->precompile_context = &context" in precompile
+    assert "self->device->precompile_context = NULL" in precompile
 
     option_text = (root / "libretro_core_options.h").read_text(encoding="utf-8")
     option_start = option_text.index("BEETLE_OPT(vulkan_shader_precompilation)")

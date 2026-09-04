@@ -62,17 +62,15 @@ def main():
     parser.add_argument("--diagnostics", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    source = (root / "rhi/rhi_lib_vulkan.c").read_text(encoding="utf-8")
+    source = (root / "rhi/rhi_vulkan_cache.inc").read_text(encoding="utf-8")
     filestream_source = (root / "libretro-common/streams/file_stream.c").read_text(
         encoding="utf-8")
-    start = source.index('#define VULKAN_PIPELINE_CACHE_DIR_NAME ')
-    end = source.index('   static void device_init(Device *self)', start)
     # Windows interop needs the executable and test data on the mounted drive.
     with tempfile.TemporaryDirectory(prefix="beetle-vulkan-cache-test-",
                                      dir=root if args.windows else None) as tmp:
         work = Path(tmp)
         (work / "persistence_under_test.h").write_text(
-            source[start:end], encoding="utf-8")
+            source, encoding="utf-8")
         (work / "atomic_write_under_test.h").write_text(
             function_definition(filestream_source,
                                 "bool filestream_write_file_atomic("),

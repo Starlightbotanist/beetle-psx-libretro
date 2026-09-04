@@ -1,6 +1,8 @@
 # Vulkan pipeline regression tests
 
-These tests extract the implementation under test from `rhi/rhi_lib_vulkan.c`.
+Recipe and allocation tests extract their implementation from
+`rhi/rhi_lib_vulkan.c`. Persistence tests compile the focused
+`rhi/rhi_vulkan_cache.inc` implementation and the shared atomic-write helper.
 The C fixtures supply deterministic Vulkan/allocator/file-system doubles, not
 copies of production algorithms. They need no game data or graphics device.
 
@@ -26,13 +28,14 @@ python3 tools/vulkan_cache/test_persistence.py --windows --diagnostics
 
 - Recipes: effective shader constants, fixed/vertex/pass identity, shared
   primitive/scanout selection, HDR Display VRAM, configuration transitions,
-  and exact expected/queued/published recipe validation.
+  per-attempt context isolation, and exact expected/queued/published recipe
+  validation.
 - Allocation: transactional pool/map growth, failed publication, duplicate
   handle ownership, and cleanup.
 - Persistence: both-location merge, stale concurrent writers, process locks,
   corrupt/incompatible files, allocation and I/O failures, checked close,
-  atomic replacement, bounded rejection quarantine, and unchanged-data
-  suppression.
+  stable-temporary cleanup, atomic replacement which preserves the prior file
+  on failure, bounded rejection quarantine, and unchanged-data suppression.
 
 These are logical/failure-path tests, not a substitute for real-driver execution.
 After renderer changes, run a core with Vulkan validation and representative

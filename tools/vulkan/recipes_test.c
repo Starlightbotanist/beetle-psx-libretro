@@ -55,6 +55,7 @@ typedef struct Image Image;
 typedef struct ImageView ImageView;
 typedef struct RenderPassInfo RenderPassInfo;
 typedef struct RenderPassInfo_Subpass RenderPassInfo_Subpass;
+struct VulkanPrecompileContext;
 #include "types_under_test.h"
 
 typedef struct CombinedResourceLayout
@@ -82,6 +83,7 @@ typedef struct Device
    bool precompile_plan_attempted;
    bool precompile_plan_complete;
    unsigned precompile_runtime_escapes;
+   struct VulkanPrecompileContext *precompile_context;
 } Device;
 typedef struct VertexAttribState
 {
@@ -123,19 +125,12 @@ typedef struct Renderer
    } pipelines;
 } Renderer;
 
-static bool vulkan_pipeline_precompiling = true;
 static bool vulkan_shader_precompilation = true;
 static bool super_sampling, adaptive_smoothing, mdec_yuv, show_vram, psx_hdr_active;
 static int psx_video_cable, dither_mode, psx_hdr_sdr_eotf;
 static int psx_hdr_overbright_hot, psx_pgxp_color, psx_pgxp_fog, psx_hdr_multipass;
 static unsigned precompile_attempts;
 static unsigned precompile_failures_remaining;
-static struct
-{
-   struct VulkanPipelineRecipe *items;
-   unsigned count, capacity;
-   bool failed;
-} vulkan_precompile_recipes;
 static VkRenderPass render_pass_get_render_pass(const RenderPass *pass)
 { return (VkRenderPass)(uintptr_t)1; }
 
@@ -197,7 +192,7 @@ static void record_recipe(CommandBuffer *cmd, bool graphics)
    Hash hash;
    unsigned i;
    assert(cmd->cmd == VK_NULL_HANDLE);
-   assert(vulkan_pipeline_precompiling);
+   assert(cmd->device->precompile_context);
    hash = commandbuffer_pipeline_recipe_hash(cmd, graphics);
    recorded_calls++;
    for (i = 0; i < recorded_count; i++)
@@ -229,11 +224,9 @@ static VkFormat renderer_hdr_scanout_format(Renderer *self)
 #include "capture_under_test.h"
 
 typedef struct IntrusivePODWrapperPipeline { VkPipeline value; } IntrusivePODWrapperPipeline;
-typedef struct TestJob { Program *program; Hash hash; } TestJob;
-static TestJob graphics_jobs[4], compute_jobs[4];
-static struct { TestJob *items; unsigned count; }
-   vulkan_graphics_precompile_jobs = { graphics_jobs, 0 },
-   vulkan_compute_precompile_jobs = { compute_jobs, 0 };
+static struct VulkanGraphicsPrecompileJob graphics_jobs[4];
+static struct VulkanComputePrecompileJob compute_jobs[4];
+static struct VulkanPrecompileContext precompile_context;
 static struct
 {
    Program *program;
@@ -257,8 +250,11 @@ static void setup_renderer(Renderer *renderer)
 {
    unsigned i = 0;
    memset(renderer, 0, sizeof(*renderer));
+   memset(&test_device, 0, sizeof(test_device));
+   memset(&precompile_context, 0, sizeof(precompile_context));
    memset(programs, 0, sizeof(programs));
    renderer->device = &test_device;
+   test_device.precompile_context = &precompile_context;
    renderer->scaling = 4;
    renderer->msaa = 1;
    renderer->scaled_fb_format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -704,23 +700,26 @@ static void test_exact_recipe_validation(void)
    setup_renderer(&renderer);
    graphics = renderer.pipelines.flat;
    compute = renderer.pipelines.resolve_to_unscaled;
-   vulkan_precompile_expect_recipe(graphics, 11, true);
-   vulkan_precompile_expect_recipe(graphics, 11, true);
-   vulkan_precompile_expect_recipe(compute, 22, false);
-   assert(vulkan_precompile_recipes.count == 2);
-   assert(!vulkan_precompile_validate_recipes(false));
+   vulkan_precompile_expect_recipe(&precompile_context, graphics, 11, true);
+   vulkan_precompile_expect_recipe(&precompile_context, graphics, 11, true);
+   vulkan_precompile_expect_recipe(&precompile_context, compute, 22, false);
+   assert(precompile_context.recipes.count == 2);
+   assert(!vulkan_precompile_validate_recipes(&precompile_context, false));
    graphics_jobs[0].program = graphics;
    graphics_jobs[0].hash = 11;
    compute_jobs[0].program = compute;
    compute_jobs[0].hash = 22;
-   vulkan_graphics_precompile_jobs.count = vulkan_compute_precompile_jobs.count = 1;
-   assert(vulkan_precompile_validate_recipes(false));
-   assert(!vulkan_precompile_validate_recipes(true));
+   precompile_context.graphics_jobs.items = graphics_jobs;
+   precompile_context.compute_jobs.items = compute_jobs;
+   precompile_context.graphics_jobs.count =
+      precompile_context.compute_jobs.count = 1;
+   assert(vulkan_precompile_validate_recipes(&precompile_context, false));
+   assert(!vulkan_precompile_validate_recipes(&precompile_context, true));
    graphics_jobs[0].hash = 12;
-   assert(!vulkan_precompile_validate_recipes(false));
+   assert(!vulkan_precompile_validate_recipes(&precompile_context, false));
    graphics_jobs[0].hash = 11;
    graphics_jobs[0].program = compute;
-   assert(!vulkan_precompile_validate_recipes(false));
+   assert(!vulkan_precompile_validate_recipes(&precompile_context, false));
    graphics_jobs[0].program = graphics;
    published_count = 2;
    published_jobs[0].program = graphics;
@@ -729,14 +728,32 @@ static void test_exact_recipe_validation(void)
    published_jobs[1].program = compute;
    published_jobs[1].hash = 22;
    published_jobs[1].entry.value = VK_NULL_HANDLE;
-   assert(!vulkan_precompile_validate_recipes(true));
+   assert(!vulkan_precompile_validate_recipes(&precompile_context, true));
    published_jobs[1].entry.value = (VkPipeline)(uintptr_t)2;
-   assert(vulkan_precompile_validate_recipes(true));
-   vulkan_precompile_recipes.failed = true;
-   assert(!vulkan_precompile_validate_recipes(true));
-   free(vulkan_precompile_recipes.items);
-   memset(&vulkan_precompile_recipes, 0, sizeof(vulkan_precompile_recipes));
+   assert(vulkan_precompile_validate_recipes(&precompile_context, true));
+   precompile_context.recipes.failed = true;
+   assert(!vulkan_precompile_validate_recipes(&precompile_context, true));
+   free(precompile_context.recipes.items);
+   memset(&precompile_context, 0, sizeof(precompile_context));
    puts("PASS exact recipe validation: dedup, missing/wrong identity, queue versus publication and failure");
+}
+
+static void test_precompile_context_isolation(void)
+{
+   struct VulkanPrecompileContext first, second;
+   Program program;
+   memset(&first, 0, sizeof(first));
+   memset(&second, 0, sizeof(second));
+   memset(&program, 0, sizeof(program));
+   vulkan_precompile_expect_recipe(&first, &program, 1, true);
+   vulkan_precompile_expect_recipe(&second, &program, 2, false);
+   assert(first.recipes.count == 1 && first.recipes.items[0].hash == 1);
+   assert(second.recipes.count == 1 && second.recipes.items[0].hash == 2);
+   first.recipes.failed = true;
+   assert(!second.recipes.failed);
+   free(first.recipes.items);
+   free(second.recipes.items);
+   puts("PASS precompile context isolation: attempts do not share recipe or failure state");
 }
 
 int main(void)
@@ -749,6 +766,7 @@ int main(void)
    test_configuration_gate();
    test_runtime_escape_accounting();
    test_exact_recipe_validation();
+   test_precompile_context_isolation();
    puts("All Vulkan recipe regressions passed (no GPU or game required).");
    return 0;
 }
