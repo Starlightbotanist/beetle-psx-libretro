@@ -38,9 +38,7 @@
 #include <vulkan/vulkan.h>
 #endif
 
-/* The bundled Vulkan headers predate VK_EXT_pipeline_creation_cache_control.
- * Keep the compatibility declarations local until those headers are updated;
- * the numeric values are fixed by extension 298. */
+/* Compatibility declarations for the bundled older Vulkan headers. */
 #ifndef VK_EXT_pipeline_creation_cache_control
 #define VK_EXT_pipeline_creation_cache_control 1
 #define VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME \
@@ -3461,8 +3459,7 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
 
    static bool vulkan_shader_precompilation;
    static bool super_sampling;
-   /* Pipeline-selecting core options are sampled at the frame boundary, after
-    * live option adoption and HDR negotiation, before precompilation/drawing. */
+   /* Pipeline options sampled after live adoption and HDR negotiation. */
    static bool scaled_uv_offset;
    static bool adaptive_smoothing;
    static bool mdec_yuv;
@@ -3497,12 +3494,7 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       bool hot, precise, fog, multipass;
    };
 
-   /* Deep copy of one graphics-pipeline description. During precompilation a
-    * CPU-only command-state object uses the runtime pipeline-state setters,
-    * and creation is deferred into these self-contained jobs.
-    * No CommandBuffer or Program cache is accessed by worker threads; workers
-    * only call vkCreateGraphicsPipelines, and the main thread publishes the
-    * completed handles after joining them. */
+   /* Self-contained pipeline description for worker-side creation. */
    struct VulkanGraphicsPrecompileJob
    {
       Program *program;
@@ -3566,9 +3558,7 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       bool capture_failed;
    };
 
-   /* One complete precompile attempt. Keeping capture, work and validation in
-    * this stack-owned context prevents separate devices or nested lifetimes
-    * from sharing mutable process-global vectors. */
+   /* Stack-owned state for one isolated precompile attempt. */
    struct VulkanPrecompileContext
    {
       struct VulkanPipelineRecipeVec recipes;
@@ -6176,11 +6166,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          BufferHandle quad;
    };
 
-   /* Beetle's Vulkan program manifest. This is deliberately derived from the
-    * Renderer program slots above, not from another emulator or from a game
-    * trace. Adding a Program pointer to Renderer makes the size assertion
-    * fail until the program is classified here; the runtime uniqueness check
-    * catches duplicated or omitted offsets. */
+   /* Renderer-derived manifest. Size and uniqueness checks catch omissions. */
 #define RENDERER_PIPELINE_MANIFEST(X) \
    X(CopyToVram, copy_to_vram, Compute) \
    X(CopyToVramMasked, copy_to_vram_masked, Compute) \
@@ -10028,9 +10014,7 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    }
 }
 
-/* These attachment descriptors contain metadata only. The render-pass cache
- * copies formats, sample counts and subpass descriptions; it never retains
- * the Image/ImageView pointers. No image, allocation or framebuffer is made. */
+/* Metadata-only attachments; no image or framebuffer is allocated. */
 static const RenderPass *renderer_precompile_render_pass(Renderer *self,
       VkFormat color_format, bool primitives, bool feedback)
 {
@@ -10646,10 +10630,7 @@ static bool renderer_precompile_current_configuration_pipelines(
    self->device->precompile_context = &context;
    commandbuffer_init(&cmd, self->device, VK_NULL_HANDLE, Type_Generic);
 
-   /* CPU-only descriptions reuse the draw path's state setters and canonical
-    * identity. No synthetic vertices, command submissions or live queue edits.
-    * Ordinary draws occur in both pass types; masking/translucency require
-    * input-attachment compatibility. */
+   /* Capture CPU-only descriptions through the runtime state setters. */
    for (feedback = 0; feedback < 2; feedback++)
       variants += renderer_precompile_primitive_pipelines(self, &cmd, feedback != 0);
    renderer_precompile_manifest_nonprimitive_pipelines(self, &cmd);
@@ -13490,11 +13471,9 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
       return vk_pipeline_map_find(&self->pipelines, hash);
    }
 
-   static void device_pipeline_cache_mark_dirty(Device *self);
-
    static VkPipeline program_add_pipeline_with_cache_state(
           struct Program *self,
-         Hash hash,
+          Hash hash,
           VkPipeline pipeline,
           bool cache_changed)
    {
@@ -15815,10 +15794,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          vulkan_precompile_compute_job_fix_pointers(
                &compute_jobs->items[i]);
 
-      /* A seeded driver cache is opaque. When supported, ask the driver which
-       * exact descriptions it can instantiate without compiling. Hits are
-       * kept; misses are the only jobs sent through the normal compile path.
-       * Any unexpected probe error is advisory and falls back to compilation. */
+      /* Retain probe hits and compile misses or unexpected errors normally. */
       if (device->pipeline_cache_has_data &&
             device->ext.supports_pipeline_creation_cache_control &&
             total_count)
@@ -16112,9 +16088,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
-   /* Shared canonical identity for runtime and precompilation. Only shader-
-    * visible specialization slots and enabled fixed-function state are hashed.
-    * Dynamic bindings, buffer handles and inactive attributes are not recipes. */
+   /* Hash only effective shader and fixed-function pipeline state. */
    static Hash commandbuffer_pipeline_recipe_hash(struct CommandBuffer *self,
          bool graphics)
    {
@@ -17351,10 +17325,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       if (has_vk_extension(queried_extensions, ext_count, VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME))
          enabled_extensions[enabled_extensions_count++] = (VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME);
 
-      /* get_application_info() deliberately retains Vulkan 1.0 compatibility.
-       * Therefore use the extension query name, which vkGetInstanceProcAddr
-       * exposes only when the frontend enabled its instance dependency; a
-       * physical device's newer core version alone is not sufficient. */
+      /* Query the extension entry point while advertising Vulkan 1.0. */
       if (cache_control_is_extension)
          get_features2 = (PFN_vkGetPhysicalDeviceFeatures2)
             vkGetInstanceProcAddr(self->instance,
@@ -17846,7 +17817,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->gpu_props = *context_get_gpu_props(context);
       device_pipeline_cache_set_file_name(self);
 
-      /* Import each location into an empty shared cache. */
+      /* Import each location into an empty shared cache. flags=0 retains
+       * Vulkan's internal synchronization for Android worker access. */
       {
          VkPipelineCacheCreateInfo cache_info = {
             VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
@@ -17861,7 +17833,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
                   (int)cache_result);
          }
          else
+         {
             device_pipeline_cache_load(self);
+         }
       }
 
       self->graphics_queue_family_index = context_get_graphics_queue_family(context);
@@ -21474,10 +21448,7 @@ static void renderer_precompile_if_configuration_changed(Renderer *self)
          memcmp(&config, &self->precompile_configuration, sizeof(config)) == 0)
       return;
 
-   /* Existing exact identities are reused, so a bounded second pass queues
-    * only work that the first pass failed to publish. Keep both attempts at
-    * this already-blocking boundary; never turn a transient failure into a
-    * full retry on every gameplay frame. */
+   /* Retry unpublished identities once at this blocking boundary. */
    complete = renderer_precompile_current_configuration_pipelines(self);
    if (!complete)
    {
@@ -21512,9 +21483,7 @@ void rhi_vulkan_prepare_frame(void)
       return;
    }
 
-   /* Defensive: a live device without a renderer cannot begin or finalize a
-    * frame. Clear any stale flag before returning so finalize_frame cannot
-    * mistake this path for a successfully prepared frame. */
+   /* Do not leave finalize_frame a stale prepared-frame flag. */
    if (renderer == NULL)
    {
       inside_frame = false;
