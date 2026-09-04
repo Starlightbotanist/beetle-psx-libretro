@@ -18,7 +18,8 @@ def main():
     container_start = source.index("   struct IntrusiveListNode\n")
     container_end = source.index(
         "   /* Concrete temporary-hashmap node base", container_start)
-    publication_start = source.index("   static VkPipeline program_add_pipeline(")
+    publication_start = source.index(
+        "   static VkPipeline program_add_pipeline_with_cache_state(")
     publication_end = source.index("   static void program_fini(", publication_start)
 
     with tempfile.TemporaryDirectory(prefix="beetle-vulkan-allocation-") as tmp:

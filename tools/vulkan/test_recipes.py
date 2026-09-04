@@ -150,6 +150,18 @@ def main():
     assert "static bool vulkan_pipeline_precompiling" not in source
     assert "self->device->precompile_context = &context" in precompile
     assert "self->device->precompile_context = NULL" in precompile
+    # Partial success is valuable cache data. The dirty-count gate inside the
+    # save helper suppresses empty/unchanged attempts; plan completeness must
+    # not suppress persistence of pipelines that did publish successfully.
+    assert "device_pipeline_cache_save(self->device)" in precompile
+    assert "if (complete)\n      device_pipeline_cache_save" not in precompile
+
+    # The frontend-facing application info still requests Vulkan 1.0. Cache
+    # control must therefore use the enabled KHR feature-query path, not infer
+    # permission to call a promoted core command from the physical GPU version.
+    create_device = definition(source, "context_create_device")
+    assert '"vkGetPhysicalDeviceFeatures2KHR"' in create_device
+    assert '"vkGetPhysicalDeviceFeatures2"' not in create_device
 
     option_text = (root / "libretro_core_options.h").read_text(encoding="utf-8")
     option_start = option_text.index("BEETLE_OPT(vulkan_shader_precompilation)")

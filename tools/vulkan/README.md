@@ -11,6 +11,7 @@ From the repository root on a POSIX host:
 ```
 python3 tools/vulkan/test_recipes.py
 python3 tools/vulkan/test_allocation.py
+python3 tools/vulkan/test_precompile_jobs.py
 python3 tools/vulkan_cache/test_persistence.py
 python3 tools/vulkan_cache/test_persistence.py --diagnostics
 ```
@@ -32,6 +33,9 @@ python3 tools/vulkan_cache/test_persistence.py --windows --diagnostics
   validation.
 - Allocation: transactional pool/map growth, failed publication, duplicate
   handle ownership, and cleanup.
+- Precompile jobs: bounded graphics/compute batching, cache-probe flags,
+  cache-hit reuse, skipped completed work, and per-pipeline partial success
+  when a batched driver call reports an aggregate failure.
 - Persistence: both-location merge, stale concurrent writers, process locks,
   corrupt/incompatible files, allocation and I/O failures, checked close,
   stable-temporary cleanup, atomic replacement which preserves the prior file
@@ -62,8 +66,16 @@ runtime coverage.
 
 An incomplete plan receives one bounded retry at the same already-blocking
 configuration boundary. The second pass queues only identities that were not
-published by the first. A second failure is remembered so it cannot become a
+published by the first, while partial success is persisted even if the plan
+remains incomplete. A second failure is remembered so it cannot become a
 blocking retry on every gameplay frame; observed runtime misses remain logged.
+
+When `VK_EXT_pipeline_creation_cache_control` and its feature query are
+available, a populated driver cache is probed with fail-on-compile-required
+before normal compilation. Cache hits are retained and only misses use the
+compiling path; unexpected probe errors fall back safely. Both phases submit
+small batches to reduce driver-call overhead while preserving each output
+handle's result.
 
 Persistent files are named by Vulkan vendor/device/cache UUID and contain an
 embedded wrapper version. Ordinary shader changes do not require a wrapper

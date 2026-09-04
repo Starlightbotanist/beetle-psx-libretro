@@ -420,6 +420,7 @@
       if (device_pipeline_cache_directories_differ())
          seeded = device_pipeline_cache_seed_path(self,
                retro_save_directory, "save") || seeded;
+      self->pipeline_cache_has_data = seeded;
       if (!seeded)
          LOGI("[Vulkan pipeline cache] cold start; no compatible cache found\n");
    }
@@ -567,6 +568,7 @@ done:
     * or failed driver creation, is the unit of newly useful cached work. */
    static void device_pipeline_cache_mark_dirty(Device *self)
    {
+      self->pipeline_cache_has_data = true;
       if (self->pipeline_cache_dirty_count != ~0u)
          self->pipeline_cache_dirty_count++;
    }

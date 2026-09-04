@@ -77,6 +77,7 @@ typedef struct Device
    VkPipelineCache pipeline_cache;
    char pipeline_cache_file_name[96];
    unsigned pipeline_cache_dirty_count;
+   bool pipeline_cache_has_data;
    bool pipeline_cache_storage_warned;
    struct
    {
@@ -366,6 +367,7 @@ static void test_selection_and_updates(const char *tmp)
    assert(device_pipeline_cache_write(&writer, retro_save_directory, "save"));
    device_pipeline_cache_load(&first);
    device_pipeline_cache_load(&second);
+   assert(first.pipeline_cache_has_data && second.pipeline_cache_has_data);
    assert(first.pipeline_cache->entries == 3 && second.pipeline_cache->entries == 3);
    first.pipeline_cache->entries |= 4;
    assert(device_pipeline_cache_write(&first, retro_base_directory, "system"));
@@ -385,6 +387,7 @@ static void test_faults_and_unchanged_data(const char *tmp)
    retro_save_directory[0] = '\0';
    device.pipeline_cache->entries = 1;
    device_pipeline_cache_mark_dirty(&device);
+   assert(device.pipeline_cache_has_data);
    device_pipeline_cache_save(&device);
    assert(device.pipeline_cache_dirty_count == 0);
    old_queries = snapshot_queries;

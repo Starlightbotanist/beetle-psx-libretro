@@ -186,6 +186,9 @@ static void test_publication(void)
       fail_after(1);
       assert(program_add_pipeline(&program, 1, 103) == 102);
       assert(allocation_calls == 0 && device.destroyed == 2 && device.dirty == 1);
+      assert(program_add_pipeline_with_cache_state(&program, 2, 104, false) ==
+            104);
+      assert(device.dirty == 1);
       vk_pipeline_map_deinit(&program.pipelines);
       assert(live_allocations == 0);
    }
