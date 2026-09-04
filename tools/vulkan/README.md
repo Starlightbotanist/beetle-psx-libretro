@@ -50,9 +50,17 @@ diagnostic fields and per-job/per-use clocks/logs.
 The precompile traversal is derived from Beetle's renderer state branches.
 Runtime and capture share state setters, program selectors, and normalized
 identity generation. Validation checks every enumerated exact identity before
-and after publication, including identities already present in memory. It
-does not prove that future renderer branches have been added to the traversal;
-new paths still need regression cases and first-use checks.
+and after publication, including identities already present in memory. Its
+summary therefore reports `plan_complete`, not an unqualified claim that every
+future runtime branch was anticipated. Any later first-use identity absent
+after a successful plan is reported as a runtime escape and revokes that
+plan's completeness. New paths still need regression cases and representative
+runtime coverage.
+
+An incomplete plan receives one bounded retry at the same already-blocking
+configuration boundary. The second pass queues only identities that were not
+published by the first. A second failure is remembered so it cannot become a
+blocking retry on every gameplay frame; observed runtime misses remain logged.
 
 Persistent files are named by Vulkan vendor/device/cache UUID and contain an
 embedded wrapper version. Ordinary shader changes do not require a wrapper

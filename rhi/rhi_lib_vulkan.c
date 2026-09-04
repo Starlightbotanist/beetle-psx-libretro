@@ -4896,6 +4896,9 @@ static void cbh_move(struct CommandBufferHandle *dst,
          unsigned pipeline_cache_dirty_count;
          unsigned pipeline_cache_temp_serial;
          bool pipeline_cache_storage_warned;
+         bool precompile_plan_attempted;
+         bool precompile_plan_complete;
+         unsigned precompile_runtime_escapes;
 
          uint64_t cookie;
 
@@ -6308,7 +6311,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_hd_texture_uniforms(Renderer *self,
          HdTextureHandle hd_texture_index);
    static void renderer_flush_resolves(Renderer *self);
-   static void renderer_precompile_current_configuration_pipelines(
+   static bool renderer_precompile_current_configuration_pipelines(
          Renderer *self);
    static void commandbuffer_init(CommandBuffer *self, Device *device,
          VkCommandBuffer cmd, CommandBufferType type);
@@ -10573,7 +10576,7 @@ static void renderer_precompile_manifest_nonprimitive_pipelines(Renderer *self,
    }
 }
 
-static void renderer_precompile_current_configuration_pipelines(
+static bool renderer_precompile_current_configuration_pipelines(
       Renderer *self)
 {
    CommandBuffer cmd;
@@ -10620,13 +10623,14 @@ static void renderer_precompile_current_configuration_pipelines(
    if (complete)
       device_pipeline_cache_save(self->device);
 
-   LOGI("[Vulkan shader precompilation] variants=%u recipes=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld\n",
+   LOGI("[Vulkan shader precompilation] variants=%u recipes=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u plan_complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld\n",
       variants, vulkan_precompile_recipes.count, jobs, graphics_jobs, compute_jobs,
       manifest_programs, manifest_missing, workers,
       complete ? 1u : 0u, (long long)compile_elapsed_usec,
       (long long)(cpu_features_get_time_usec() - start_usec));
    free(vulkan_precompile_recipes.items);
    memset(&vulkan_precompile_recipes, 0, sizeof(vulkan_precompile_recipes));
+   return complete;
 }
 
 static void renderer_bind_primitive_texture(Renderer *self, bool scaled_read)
@@ -16067,6 +16071,22 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return hasher_get(&h);
    }
 
+   static void device_precompile_note_runtime_escape(Device *self,
+         Program *program, Hash hash, bool graphics)
+   {
+      if (!self->precompile_plan_attempted)
+         return;
+
+      self->precompile_plan_complete = false;
+      if (self->precompile_runtime_escapes != ~0u)
+         self->precompile_runtime_escapes++;
+      LOGE("[Vulkan shader precompilation] runtime escape type=%s program=%016llx pipeline=%016llx escapes=%u\n",
+            graphics ? "graphics" : "compute",
+            (unsigned long long)program->intrusive_node.key,
+            (unsigned long long)hash,
+            self->precompile_runtime_escapes);
+   }
+
    static void commandbuffer_flush_compute_pipeline(struct CommandBuffer *self)
    {
       Hash hash = commandbuffer_pipeline_recipe_hash(self, false);
@@ -16074,6 +16094,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       if (vulkan_pipeline_precompiling)
          vulkan_precompile_expect_recipe(self->current_program, hash, false);
       entry = program_find_pipeline(self->current_program, hash);
+      if (!vulkan_pipeline_precompiling && entry == NULL)
+         device_precompile_note_runtime_escape(self->device,
+               self->current_program, hash, false);
       self->current_pipeline = entry ? entry->value :
          commandbuffer_build_compute_pipeline(self, hash);
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
@@ -16088,6 +16111,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       if (vulkan_pipeline_precompiling)
          vulkan_precompile_expect_recipe(self->current_program, hash, true);
       entry = program_find_pipeline(self->current_program, hash);
+      if (!vulkan_pipeline_precompiling && entry == NULL)
+         device_precompile_note_runtime_escape(self->device,
+               self->current_program, hash, true);
       self->current_pipeline = entry ? entry->value :
          commandbuffer_build_graphics_pipeline(self, hash);
 #ifdef BEETLE_VULKAN_PIPELINE_DIAGNOSTICS
@@ -21947,10 +21973,14 @@ void rhi_vulkan_apply_pending_geometry(void)
 static void renderer_precompile_if_configuration_changed(Renderer *self)
 {
    struct VulkanPrecompileConfiguration config;
+   bool complete;
 
    if (!vulkan_shader_precompilation)
    {
       self->precompile_configuration_valid = false;
+      self->device->precompile_plan_attempted = false;
+      self->device->precompile_plan_complete = false;
+      self->device->precompile_runtime_escapes = 0;
       return;
    }
 
@@ -21977,12 +22007,24 @@ static void renderer_precompile_if_configuration_changed(Renderer *self)
          memcmp(&config, &self->precompile_configuration, sizeof(config)) == 0)
       return;
 
-   /* Existing exact identities are reused; only the newly reachable delta is
-    * queued. Remember even a failed attempt so OOM/driver failure cannot cause
-    * a blocking retry every frame. Changing options or reloading retries it. */
-   renderer_precompile_current_configuration_pipelines(self);
+   /* Existing exact identities are reused, so a bounded second pass queues
+    * only work that the first pass failed to publish. Keep both attempts at
+    * this already-blocking boundary; never turn a transient failure into a
+    * full retry on every gameplay frame. */
+   complete = renderer_precompile_current_configuration_pipelines(self);
+   if (!complete)
+   {
+      LOGI("[Vulkan shader precompilation] plan incomplete; retrying missing pipelines once\n");
+      complete = renderer_precompile_current_configuration_pipelines(self);
+   }
+
+   self->device->precompile_plan_attempted = true;
+   self->device->precompile_plan_complete = complete;
+   self->device->precompile_runtime_escapes = 0;
    self->precompile_configuration = config;
    self->precompile_configuration_valid = true;
+   if (!complete)
+      LOGE("[Vulkan shader precompilation] plan remains incomplete after retry; runtime escapes will be reported\n");
 }
 
 void rhi_vulkan_prepare_frame(void)

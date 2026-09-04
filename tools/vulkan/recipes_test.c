@@ -14,6 +14,7 @@
 #define RHI_INLINE static inline
 #define VK_ASSERT assert
 #define LOGE(...) ((void)0)
+#define LOGI(...) ((void)0)
 #define VULKAN_NUM_SPEC_CONSTANTS 10
 #define VULKAN_NUM_VERTEX_ATTRIBS 16
 #define VULKAN_NUM_VERTEX_BUFFERS 16
@@ -75,7 +76,13 @@ typedef struct RenderPass
    VkFormat color_format;
 } RenderPass;
 typedef struct RenderPassMap { RenderPass items[128]; unsigned count; } RenderPassMap;
-typedef struct Device { RenderPassMap render_passes; } Device;
+typedef struct Device
+{
+   RenderPassMap render_passes;
+   bool precompile_plan_attempted;
+   bool precompile_plan_complete;
+   unsigned precompile_runtime_escapes;
+} Device;
 typedef struct VertexAttribState
 {
    unsigned binding, format;
@@ -122,6 +129,7 @@ static bool super_sampling, adaptive_smoothing, mdec_yuv, show_vram, psx_hdr_act
 static int psx_video_cable, dither_mode, psx_hdr_sdr_eotf;
 static int psx_hdr_overbright_hot, psx_pgxp_color, psx_pgxp_fog, psx_hdr_multipass;
 static unsigned precompile_attempts;
+static unsigned precompile_failures_remaining;
 static struct
 {
    struct VulkanPipelineRecipe *items;
@@ -205,8 +213,16 @@ static void commandbuffer_draw(CommandBuffer *cmd, uint32_t v, uint32_t n, uint3
 { record_recipe(cmd, true); }
 static void commandbuffer_dispatch(CommandBuffer *cmd, uint32_t x, uint32_t y, uint32_t z)
 { record_recipe(cmd, false); }
-static void renderer_precompile_current_configuration_pipelines(Renderer *self)
-{ precompile_attempts++; }
+static bool renderer_precompile_current_configuration_pipelines(Renderer *self)
+{
+   precompile_attempts++;
+   if (precompile_failures_remaining)
+   {
+      precompile_failures_remaining--;
+      return false;
+   }
+   return true;
+}
 static VkFormat renderer_hdr_scanout_format(Renderer *self)
 { return VK_FORMAT_A2B10G10R10_UNORM_PACK32; }
 #include "state_under_test.h"
@@ -604,6 +620,7 @@ static void test_configuration_gate(void)
    psx_hdr_overbright_hot = psx_pgxp_color = psx_pgxp_fog = psx_hdr_multipass = 0;
    vulkan_shader_precompilation = true;
    precompile_attempts = 0;
+   precompile_failures_remaining = 0;
    renderer_precompile_if_configuration_changed(&renderer);
    assert(precompile_attempts == 1);
    renderer_precompile_if_configuration_changed(&renderer);
@@ -639,7 +656,45 @@ static void test_configuration_gate(void)
    vulkan_shader_precompilation = true;
    renderer_precompile_if_configuration_changed(&renderer);
    assert(precompile_attempts == calls + 1);
-   puts("PASS configuration gate: one attempt per configuration, live deltas and disable/re-enable");
+
+   setup_renderer(&renderer);
+   precompile_attempts = 0;
+   precompile_failures_remaining = 1;
+   renderer_precompile_if_configuration_changed(&renderer);
+   assert(precompile_attempts == 2);
+   assert(renderer.precompile_configuration_valid);
+   assert(renderer.device->precompile_plan_attempted);
+   assert(renderer.device->precompile_plan_complete);
+
+   setup_renderer(&renderer);
+   precompile_attempts = 0;
+   precompile_failures_remaining = 2;
+   renderer_precompile_if_configuration_changed(&renderer);
+   assert(precompile_attempts == 2);
+   assert(renderer.precompile_configuration_valid);
+   assert(renderer.device->precompile_plan_attempted);
+   assert(!renderer.device->precompile_plan_complete);
+   renderer_precompile_if_configuration_changed(&renderer);
+   assert(precompile_attempts == 2);
+   precompile_failures_remaining = 0;
+   puts("PASS configuration gate: live deltas, disable/re-enable and one bounded retry");
+}
+
+static void test_runtime_escape_accounting(void)
+{
+   Program program;
+   memset(&test_device, 0, sizeof(test_device));
+   memset(&program, 0, sizeof(program));
+   program.intrusive_node.key = 0x1234;
+   device_precompile_note_runtime_escape(&test_device, &program, 0x5678, true);
+   assert(!test_device.precompile_plan_attempted);
+   assert(test_device.precompile_runtime_escapes == 0);
+   test_device.precompile_plan_attempted = true;
+   test_device.precompile_plan_complete = true;
+   device_precompile_note_runtime_escape(&test_device, &program, 0x5678, true);
+   assert(!test_device.precompile_plan_complete);
+   assert(test_device.precompile_runtime_escapes == 1);
+   puts("PASS runtime escape accounting: observed misses revoke plan completeness");
 }
 
 static void test_exact_recipe_validation(void)
@@ -692,6 +747,7 @@ int main(void)
    test_scanout_selectors();
    test_active_manifest_matrix();
    test_configuration_gate();
+   test_runtime_escape_accounting();
    test_exact_recipe_validation();
    puts("All Vulkan recipe regressions passed (no GPU or game required).");
    return 0;

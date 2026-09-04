@@ -107,7 +107,8 @@ def main():
         "renderer_precompile_if_configuration_changed",
     ))
     validation_text = "".join(definition(source, name) for name in (
-        "vulkan_precompile_expect_recipe", "vulkan_precompile_validate_recipes"))
+        "vulkan_precompile_expect_recipe", "vulkan_precompile_validate_recipes",
+        "device_precompile_note_runtime_escape"))
     renderpass_text = "".join(definition(source, name) for name in (
         "image_create_info_defaults", "image_create_info_render_target",
         "render_pass_info_defaults", "render_pass_info_subpass_defaults",
