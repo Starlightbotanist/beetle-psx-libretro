@@ -17331,7 +17331,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #elif defined(__unix__) || defined(__APPLE__)
 #include <errno.h>
 #include <fcntl.h>
-#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -17395,15 +17394,30 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          return true;
       }
 #elif defined(__unix__) || defined(__APPLE__)
-      lock->fd = open(lock_path, O_CREAT | O_RDWR, 0600);
-      if (lock->fd < 0)
-         return false;
-      if (flock(lock->fd, LOCK_EX | LOCK_NB) != 0)
       {
-         close(lock->fd);
-         return false;
+         struct flock file_lock;
+         lock->fd = open(lock_path, O_CREAT | O_RDWR, 0600);
+         if (lock->fd < 0)
+         {
+            LOGE("[Vulkan pipeline cache] could not open lock errno=%d\n",
+                  errno);
+            return false;
+         }
+         memset(&file_lock, 0, sizeof(file_lock));
+         /* Prefer standardized record locking to BSD flock. Android's
+          * emulated-storage FUSE path may reject the latter. */
+         file_lock.l_type = F_WRLCK;
+         file_lock.l_whence = SEEK_SET;
+         file_lock.l_len = 1;
+         if (fcntl(lock->fd, F_SETLK, &file_lock) != 0)
+         {
+            LOGI("[Vulkan pipeline cache] lock unavailable errno=%d\n",
+                  errno);
+            close(lock->fd);
+            return false;
+         }
+         return true;
       }
-      return true;
 #else
       /* Libretro VFS has no exclusive locking or atomic-replace contract.
        * Reading such paths remains supported; never risk an existing cache

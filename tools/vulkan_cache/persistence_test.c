@@ -400,6 +400,10 @@ static void test_lock_and_fallback(const char *tmp)
    Device writer = make_device(), reader = make_device();
    struct RhiPipelineCacheLock lock;
    char path[PATH_MAX_LENGTH];
+#ifndef _WIN32
+   pid_t holder;
+   int holder_release;
+#endif
    new_roots(tmp, 3);
    writer.pipeline_cache->entries = 1;
    assert(device_pipeline_cache_write(&writer, retro_base_directory, "system"));
@@ -434,13 +438,54 @@ static void test_lock_and_fallback(const char *tmp)
       assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 #endif
    }
+#ifndef _WIN32
+   /* POSIX record locks belong to a process, so a second lock attempt by this
+    * process would succeed. Have another process hold the lock while the
+    * writer exercises the fallback path. */
+   device_pipeline_cache_unlock(&lock);
+   {
+      int ready_pipe[2], release_pipe[2];
+      char signal;
+      assert(pipe(ready_pipe) == 0);
+      assert(pipe(release_pipe) == 0);
+      holder = fork();
+      assert(holder >= 0);
+      if (holder == 0)
+      {
+         struct RhiPipelineCacheLock other;
+         close(ready_pipe[0]);
+         close(release_pipe[1]);
+         if (!device_pipeline_cache_lock(path, &other) ||
+             write(ready_pipe[1], "R", 1) != 1 ||
+             read(release_pipe[0], &signal, 1) != 1)
+            _exit(2);
+         device_pipeline_cache_unlock(&other);
+         _exit(0);
+      }
+      close(ready_pipe[1]);
+      close(release_pipe[0]);
+      assert(read(ready_pipe[0], &signal, 1) == 1);
+      close(ready_pipe[0]);
+      holder_release = release_pipe[1];
+   }
+#endif
    writer.pipeline_cache->entries = 3;
    device_pipeline_cache_mark_dirty(&writer);
    device_pipeline_cache_save(&writer); /* Busy SYSTEM falls back to SAVE. */
    assert(writer.pipeline_cache_dirty_count == 0);
    assert(disk_entries(&writer, retro_base_directory) == 1);
    assert(disk_entries(&writer, retro_save_directory) == 3);
+#ifdef _WIN32
    device_pipeline_cache_unlock(&lock);
+#else
+   {
+      int status;
+      assert(write(holder_release, "X", 1) == 1);
+      close(holder_release);
+      assert(waitpid(holder, &status, 0) == holder);
+      assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+   }
+#endif
    device_pipeline_cache_load(&reader);
    assert(reader.pipeline_cache->entries == 3); /* Stale SYSTEM cannot shadow SAVE. */
    free(writer.pipeline_cache);
