@@ -76,6 +76,8 @@ extern int   psx_hdr_multipass;
  * (16F) scaled framebuffer, which is allocated before HDR negotiation
  * completes. Non-zero = a 30-bit/HDR format was requested. */
 extern int   psx_color_format;
+extern char retro_base_directory[4096];
+extern char retro_save_directory[4096];
 
 /* VOLK_GENERATE_PROTOTYPES_H */
 #if defined(VK_VERSION_1_0)
@@ -152,6 +154,7 @@ extern PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements;
 extern PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 extern PFN_vkGetDeviceQueue vkGetDeviceQueue;
 extern PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
+extern PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
 extern PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 extern PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 extern PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -161,6 +164,7 @@ extern PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties;
 extern PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties;
 extern PFN_vkInvalidateMappedMemoryRanges vkInvalidateMappedMemoryRanges;
 extern PFN_vkMapMemory vkMapMemory;
+extern PFN_vkMergePipelineCaches vkMergePipelineCaches;
 extern PFN_vkQueueSubmit vkQueueSubmit;
 extern PFN_vkResetCommandPool vkResetCommandPool;
 extern PFN_vkResetDescriptorPool vkResetDescriptorPool;
@@ -299,8 +303,10 @@ static void volkGenLoadDevice(void* context,
    vkGetBufferMemoryRequirements = (PFN_vkGetBufferMemoryRequirements)load(context, "vkGetBufferMemoryRequirements");
    vkGetDeviceQueue = (PFN_vkGetDeviceQueue)load(context, "vkGetDeviceQueue");
    vkGetImageMemoryRequirements = (PFN_vkGetImageMemoryRequirements)load(context, "vkGetImageMemoryRequirements");
+   vkGetPipelineCacheData = (PFN_vkGetPipelineCacheData)load(context, "vkGetPipelineCacheData");
    vkInvalidateMappedMemoryRanges = (PFN_vkInvalidateMappedMemoryRanges)load(context, "vkInvalidateMappedMemoryRanges");
    vkMapMemory = (PFN_vkMapMemory)load(context, "vkMapMemory");
+   vkMergePipelineCaches = (PFN_vkMergePipelineCaches)load(context, "vkMergePipelineCaches");
    vkQueueSubmit = (PFN_vkQueueSubmit)load(context, "vkQueueSubmit");
    vkResetCommandPool = (PFN_vkResetCommandPool)load(context, "vkResetCommandPool");
    vkResetDescriptorPool = (PFN_vkResetDescriptorPool)load(context, "vkResetDescriptorPool");
@@ -405,6 +411,7 @@ PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements;
 PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
 PFN_vkGetDeviceQueue vkGetDeviceQueue;
 PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements;
+PFN_vkGetPipelineCacheData vkGetPipelineCacheData;
 PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures;
 PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -414,6 +421,7 @@ PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties;
 PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties;
 PFN_vkInvalidateMappedMemoryRanges vkInvalidateMappedMemoryRanges;
 PFN_vkMapMemory vkMapMemory;
+PFN_vkMergePipelineCaches vkMergePipelineCaches;
 PFN_vkQueueSubmit vkQueueSubmit;
 PFN_vkResetCommandPool vkResetCommandPool;
 PFN_vkResetDescriptorPool vkResetDescriptorPool;
@@ -448,6 +456,8 @@ PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR;
 
 #include <rthreads/rthreads.h>
 #include <streams/file_stream.h>
+#include <encodings/crc32.h>
+#include <file/file_path.h>
 
 /* C89-compatible compile-time assertion. C89 has no static_assert /
  * _Static_assert; emit a typedef whose array size is negative when the
@@ -4695,7 +4705,13 @@ static void cbh_move(struct CommandBufferHandle *dst,
          VkQueue graphics_queue;
          VkQueue compute_queue;
          VkQueue transfer_queue;
+         /* Shared driver compiler cache, seeded from validated persistent
+          * data and written back on clean shutdown on every platform. */
          VkPipelineCache pipeline_cache;
+         char pipeline_cache_file_name[96];
+         unsigned pipeline_cache_dirty_count;
+         bool pipeline_cache_has_data;
+         bool pipeline_cache_storage_warned;
 
          uint64_t cookie;
 
@@ -12419,11 +12435,35 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
       return ret ? ret->value : VK_NULL_HANDLE;
    }
 
+   static void device_pipeline_cache_mark_dirty(Device *self);
+
    static VkPipeline program_add_pipeline(struct Program *self,
          Hash hash,
          VkPipeline pipeline)
    {
-      return vk_pipeline_map_emplace_yield(&self->pipelines, hash, pipeline)->value;
+      IntrusivePODWrapperPipeline *entry;
+
+      if (pipeline == VK_NULL_HANDLE)
+         return VK_NULL_HANDLE;
+
+      entry = vk_pipeline_map_find(&self->pipelines, hash);
+      if (entry != NULL)
+      {
+         if (entry->value != pipeline)
+            vkDestroyPipeline(device_get_device(self->device), pipeline, NULL);
+         return entry->value;
+      }
+
+      entry = vk_pipeline_map_emplace_yield(&self->pipelines, hash, pipeline);
+      if (entry == NULL)
+      {
+         LOGE("[Vulkan pipeline cache] could not publish pipeline; releasing unowned handle\n");
+         vkDestroyPipeline(device_get_device(self->device), pipeline, NULL);
+         return VK_NULL_HANDLE;
+      }
+
+      device_pipeline_cache_mark_dirty(self->device);
+      return entry->value;
    }
 
    static void program_fini(struct Program *self)
@@ -15630,6 +15670,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return self->per_frame.items[self->frame_context_index];
    }
 
+   /* Keep cache internals in this translation unit for private Device access. */
+#include "rhi_vulkan_cache.inc"
    static void device_init(Device *self)
    {
       /* Device is malloc'd with uninitialised storage; in the C++ source it was
@@ -15702,6 +15744,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    static void device_deinit(Device *self)
    {
       device_wait_idle_nolock(self);
+      device_pipeline_cache_save(self);
 
       framebuffer_allocator_clear(&self->framebuffer_allocator);
       attachment_allocator_clear(&self->transient_allocator);
@@ -15979,12 +16022,17 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->instance = context_get_instance(context);
       self->gpu = context_get_gpu(context);
       self->device = context_get_device(context);
+      self->mem_props = *context_get_mem_props(context);
+      self->gpu_props = *context_get_gpu_props(context);
+      device_pipeline_cache_set_file_name(self);
 
+      /* Import each location into an empty shared cache. */
       {
          VkPipelineCacheCreateInfo cache_info = {
             VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
          };
-         VkResult cache_result = vkCreatePipelineCache(
+         VkResult cache_result;
+         cache_result = vkCreatePipelineCache(
                self->device, &cache_info, NULL, &self->pipeline_cache);
          if (cache_result != VK_SUCCESS)
          {
@@ -15992,6 +16040,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             LOGE("[Vulkan pipeline cache] create failed result=%d; continuing without driver cache\n",
                   (int)cache_result);
          }
+         else
+            device_pipeline_cache_load(self);
       }
 
       self->graphics_queue_family_index = context_get_graphics_queue_family(context);
@@ -16000,9 +16050,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->compute_queue = context_get_compute_queue(context);
       self->transfer_queue_family_index = context_get_transfer_queue_family(context);
       self->transfer_queue = context_get_transfer_queue(context);
-
-      self->mem_props = *context_get_mem_props(context);
-      self->gpu_props = *context_get_gpu_props(context);
 
       device_init_workarounds(self);
 

@@ -289,24 +289,27 @@ bool filestream_write_file(const char *path, const void *data, int64_t size);
 /**
  * Writes the entirety of a given buffer to a file at a given path,
  * by way of a sibling temporary file that is renamed over the target
- * once it is complete. A process that dies partway through leaves
- * either the previous contents of \c path or the new ones, never a
- * partial file.
+ * once it is complete. With a replacement-capable VFS rename, a process
+ * that dies partway through leaves either the previous contents of \c path
+ * or the new ones, never a partial file.
  *
  * Use this for anything a later run reads back and trusts without a
  * length or checksum of its own, where a truncated file is worse than
  * an absent one.
  *
- * On targets whose rename refuses an existing destination, the target
- * is removed first and the rename retried, so on those the replacement
- * is not atomic.
+ * Atomic replacement requires the active VFS rename implementation to
+ * replace an existing destination. The built-in implementation provides
+ * this on supported targets. This helper cannot strengthen the semantics
+ * of a frontend callback which does not; it never deletes the target as a
+ * fallback, and removes its temporary after a failed rename.
  *
  * @param path Path to the file that will be written to.
  * @param data The buffer to write to \c path.
  * @param size The size of \c data, in bytes.
  * @return \c true if the file was written successfully,
- * \c false if there was an error, in which case \c path is left as it
- * was and no temporary file remains.
+ * \c false if there was an error, in which case no temporary file remains.
+ * This helper does not remove \c path on failure; behavior inside an active
+ * frontend rename callback is defined by that callback.
  */
 bool filestream_write_file_atomic(const char *path, const void *data, int64_t size);
 
