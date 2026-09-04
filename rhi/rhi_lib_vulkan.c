@@ -12,6 +12,7 @@
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
 #include "rhi_defer.h"
 #include "tt_trace.h"
+#include <features/features_cpu.h>
 #include <retro_inline.h>
 #include <math.h>
 #include "rhi_tt.h"
@@ -3438,7 +3439,6 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
    };
 
    static bool vulkan_shader_precompilation;
-   static bool vulkan_pipeline_precompiling;
    static bool super_sampling;
    /* Pipeline-selecting core options are sampled at the frame boundary, after
     * live option adoption and HDR negotiation, before precompilation/drawing. */
@@ -3460,42 +3460,12 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       Hash hash;
       bool graphics;
    };
-   static struct
+   struct VulkanPipelineRecipeVec
    {
       struct VulkanPipelineRecipe *items;
       unsigned count, capacity;
       bool failed;
-   } vulkan_precompile_recipes;
-
-   static void vulkan_precompile_expect_recipe(Program *program,
-         Hash hash, bool graphics)
-   {
-      struct VulkanPipelineRecipe *items;
-      unsigned i;
-      for (i = 0; i < vulkan_precompile_recipes.count; i++)
-         if (vulkan_precompile_recipes.items[i].program == program &&
-               vulkan_precompile_recipes.items[i].hash == hash &&
-               vulkan_precompile_recipes.items[i].graphics == graphics)
-            return;
-      if (vulkan_precompile_recipes.count == vulkan_precompile_recipes.capacity)
-      {
-         unsigned capacity = vulkan_precompile_recipes.capacity
-            ? vulkan_precompile_recipes.capacity * 2 : 128;
-         items = (struct VulkanPipelineRecipe *)realloc(
-               vulkan_precompile_recipes.items, capacity * sizeof(*items));
-         if (!items)
-         {
-            vulkan_precompile_recipes.failed = true;
-            return;
-         }
-         vulkan_precompile_recipes.items = items;
-         vulkan_precompile_recipes.capacity = capacity;
-      }
-      items = &vulkan_precompile_recipes.items[vulkan_precompile_recipes.count++];
-      items->program = program;
-      items->hash = hash;
-      items->graphics = graphics;
-   }
+   };
 
    /* Only values which select pipeline state belong here. Display controls
     * passed as uniforms/push constants do not require another precompile. */
@@ -3551,9 +3521,6 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       bool capture_failed;
    };
 
-   static struct VulkanGraphicsPrecompileJobVec
-      vulkan_graphics_precompile_jobs;
-
    struct VulkanComputePrecompileJob
    {
       Program *program;
@@ -3576,8 +3543,57 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       bool capture_failed;
    };
 
-   static struct VulkanComputePrecompileJobVec
-      vulkan_compute_precompile_jobs;
+   /* One complete precompile attempt. Keeping capture, work and validation in
+    * this stack-owned context prevents separate devices or nested lifetimes
+    * from sharing mutable process-global vectors. */
+   struct VulkanPrecompileContext
+   {
+      struct VulkanPipelineRecipeVec recipes;
+      struct VulkanGraphicsPrecompileJobVec graphics_jobs;
+      struct VulkanComputePrecompileJobVec compute_jobs;
+   };
+
+   static void vulkan_precompile_expect_recipe(
+         struct VulkanPrecompileContext *context, Program *program,
+         Hash hash, bool graphics)
+   {
+      struct VulkanPipelineRecipeVec *recipes = &context->recipes;
+      struct VulkanPipelineRecipe *items;
+      unsigned i;
+      for (i = 0; i < recipes->count; i++)
+         if (recipes->items[i].program == program &&
+               recipes->items[i].hash == hash &&
+               recipes->items[i].graphics == graphics)
+            return;
+      if (recipes->count == recipes->capacity)
+      {
+         unsigned capacity = recipes->capacity
+            ? recipes->capacity * 2 : 128;
+         items = (struct VulkanPipelineRecipe *)realloc(
+               recipes->items, capacity * sizeof(*items));
+         if (!items)
+         {
+            recipes->failed = true;
+            return;
+         }
+         recipes->items = items;
+         recipes->capacity = capacity;
+      }
+      items = &recipes->items[recipes->count++];
+      items->program = program;
+      items->hash = hash;
+      items->graphics = graphics;
+   }
+
+   static void vulkan_precompile_context_fini(
+         struct VulkanPrecompileContext *context)
+   {
+      free(context->recipes.items);
+      free(context->graphics_jobs.items);
+      free(context->compute_jobs.items);
+      memset(context, 0, sizeof(*context));
+   }
+
 static void program_set_shader(struct Program *self,
       ShaderStage stage,
       Shader *handle)
@@ -4889,6 +4905,7 @@ static void cbh_move(struct CommandBufferHandle *dst,
          bool precompile_plan_attempted;
          bool precompile_plan_complete;
          unsigned precompile_runtime_escapes;
+         struct VulkanPrecompileContext *precompile_context;
 
          uint64_t cookie;
 
@@ -6308,8 +6325,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void commandbuffer_fini(CommandBuffer *self);
    static IntrusivePODWrapperPipeline *program_find_pipeline(
          Program *self, Hash hash);
-   static void vulkan_precompile_jobs_begin(void);
-   static bool vulkan_precompile_jobs_finish(Device *device,
+   static bool vulkan_precompile_jobs_finish(
+         struct VulkanPrecompileContext *context, Device *device,
          unsigned *job_count, unsigned *graphics_job_count,
          unsigned *compute_job_count, unsigned *worker_count,
          retro_time_t *compile_elapsed_usec);
@@ -7112,8 +7129,6 @@ static void renderer_init(Renderer *self,
    buffer_create_info.size = sizeof(quad_data);
    buffer_create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
    self->quad = device_create_buffer(self->device, &buffer_create_info, quad_data);
-
-   vulkan_pipeline_precompiling = false;
 
    /* HDR negotiation and live option adoption finish before prepare_frame.
     * Precompile there, without touching framebuffer contents or draw queues. */
@@ -10116,13 +10131,14 @@ static unsigned renderer_precompile_primitive_pipelines(Renderer *self,
       SemiTransparentMode_AddQuarter
    };
    unsigned variants = 1;
-   VK_ASSERT(vulkan_pipeline_precompiling && cmd->cmd == VK_NULL_HANDLE);
+   VK_ASSERT(self->device->precompile_context &&
+         cmd->cmd == VK_NULL_HANDLE);
    cmd->compatible_render_pass = renderer_precompile_render_pass(self,
          self->scaled_fb_format, true, feedback);
    if (!cmd->compatible_render_pass ||
          render_pass_get_render_pass(cmd->compatible_render_pass) == VK_NULL_HANDLE)
    {
-      vulkan_precompile_recipes.failed = true;
+      self->device->precompile_context->recipes.failed = true;
       cmd->compatible_render_pass = NULL;
       return 0;
    }
@@ -10162,13 +10178,14 @@ static void renderer_precompile_quad_pipeline(Renderer *self,
 {
    if (!program)
       return;
-   VK_ASSERT(vulkan_pipeline_precompiling && cmd->cmd == VK_NULL_HANDLE);
+   VK_ASSERT(self->device->precompile_context &&
+         cmd->cmd == VK_NULL_HANDLE);
    cmd->compatible_render_pass = renderer_precompile_render_pass(self,
          format, false, false);
    if (!cmd->compatible_render_pass ||
          render_pass_get_render_pass(cmd->compatible_render_pass) == VK_NULL_HANDLE)
    {
-      vulkan_precompile_recipes.failed = true;
+      self->device->precompile_context->recipes.failed = true;
       cmd->compatible_render_pass = NULL;
       return;
    }
@@ -10190,7 +10207,8 @@ static void renderer_precompile_compute_pipeline(Renderer *self,
 {
    if (!program)
       return;
-   VK_ASSERT(vulkan_pipeline_precompiling && cmd->cmd == VK_NULL_HANDLE);
+   VK_ASSERT(self->device->precompile_context &&
+         cmd->cmd == VK_NULL_HANDLE);
    if (program == self->pipelines.resolve_to_unscaled)
       renderer_set_resolve_pipeline_state(self, cmd, filter);
    else
@@ -10313,13 +10331,15 @@ static bool renderer_precompile_manifest_program_is_active(Renderer *self,
    }
 }
 
-static bool vulkan_precompile_validate_recipes(bool published)
+static bool vulkan_precompile_validate_recipes(
+      const struct VulkanPrecompileContext *context, bool published)
 {
+   const struct VulkanPipelineRecipeVec *recipes = &context->recipes;
    unsigned i;
-   bool complete = !vulkan_precompile_recipes.failed;
-   for (i = 0; i < vulkan_precompile_recipes.count; i++)
+   bool complete = !recipes->failed;
+   for (i = 0; i < recipes->count; i++)
    {
-      const struct VulkanPipelineRecipe *recipe = &vulkan_precompile_recipes.items[i];
+      const struct VulkanPipelineRecipe *recipe = &recipes->items[i];
       IntrusivePODWrapperPipeline *entry =
          program_find_pipeline(recipe->program, recipe->hash);
       bool found = entry && entry->value != VK_NULL_HANDLE;
@@ -10328,9 +10348,9 @@ static bool vulkan_precompile_validate_recipes(bool published)
       {
          if (recipe->graphics)
          {
-            for (j = 0; j < vulkan_graphics_precompile_jobs.count; j++)
-               if (vulkan_graphics_precompile_jobs.items[j].program == recipe->program &&
-                     vulkan_graphics_precompile_jobs.items[j].hash == recipe->hash)
+            for (j = 0; j < context->graphics_jobs.count; j++)
+               if (context->graphics_jobs.items[j].program == recipe->program &&
+                     context->graphics_jobs.items[j].hash == recipe->hash)
                {
                   found = true;
                   break;
@@ -10338,9 +10358,9 @@ static bool vulkan_precompile_validate_recipes(bool published)
          }
          else
          {
-            for (j = 0; j < vulkan_compute_precompile_jobs.count; j++)
-               if (vulkan_compute_precompile_jobs.items[j].program == recipe->program &&
-                     vulkan_compute_precompile_jobs.items[j].hash == recipe->hash)
+            for (j = 0; j < context->compute_jobs.count; j++)
+               if (context->compute_jobs.items[j].program == recipe->program &&
+                     context->compute_jobs.items[j].hash == recipe->hash)
                {
                   found = true;
                   break;
@@ -10360,6 +10380,7 @@ static bool vulkan_precompile_validate_recipes(bool published)
 }
 
 static bool renderer_precompile_manifest_validate(Renderer *self,
+      const struct VulkanPrecompileContext *context,
       unsigned *active_programs,
       unsigned *missing_programs)
 {
@@ -10403,8 +10424,8 @@ static bool renderer_precompile_manifest_validate(Renderer *self,
          continue;
       }
 
-      for (j = 0; j < vulkan_precompile_recipes.count; j++)
-         if (vulkan_precompile_recipes.items[j].program == program)
+      for (j = 0; j < context->recipes.count; j++)
+         if (context->recipes.items[j].program == program)
          {
             found = true;
             break;
@@ -10570,6 +10591,7 @@ static bool renderer_precompile_current_configuration_pipelines(
       Renderer *self)
 {
    CommandBuffer cmd;
+   struct VulkanPrecompileContext context;
    unsigned feedback;
    retro_time_t start_usec = cpu_features_get_time_usec();
    retro_time_t compile_elapsed_usec = 0;
@@ -10583,10 +10605,15 @@ static bool renderer_precompile_current_configuration_pipelines(
    bool manifest_complete;
    bool complete;
 
-   vulkan_precompile_jobs_begin();
-   memset(&vulkan_precompile_recipes, 0, sizeof(vulkan_precompile_recipes));
+   if (self->device->precompile_context)
+   {
+      LOGE("[Vulkan shader precompilation] nested precompile attempt rejected\n");
+      return false;
+   }
+
+   memset(&context, 0, sizeof(context));
+   self->device->precompile_context = &context;
    commandbuffer_init(&cmd, self->device, VK_NULL_HANDLE, Type_Generic);
-   vulkan_pipeline_precompiling = true;
 
    /* CPU-only descriptions reuse the draw path's state setters and canonical
     * identity. No synthetic vertices, command submissions or live queue edits.
@@ -10595,17 +10622,17 @@ static bool renderer_precompile_current_configuration_pipelines(
    for (feedback = 0; feedback < 2; feedback++)
       variants += renderer_precompile_primitive_pipelines(self, &cmd, feedback != 0);
    renderer_precompile_manifest_nonprimitive_pipelines(self, &cmd);
-   manifest_complete = renderer_precompile_manifest_validate(self,
+   manifest_complete = renderer_precompile_manifest_validate(self, &context,
          &manifest_programs, &manifest_missing);
-   if (!vulkan_precompile_validate_recipes(false))
+   if (!vulkan_precompile_validate_recipes(&context, false))
       manifest_complete = false;
 
-   complete = vulkan_precompile_jobs_finish(self->device, &jobs,
+   complete = vulkan_precompile_jobs_finish(&context, self->device, &jobs,
          &graphics_jobs, &compute_jobs, &workers, &compile_elapsed_usec);
-   if (!vulkan_precompile_validate_recipes(true))
+   if (!vulkan_precompile_validate_recipes(&context, true))
       complete = false;
    complete = complete && manifest_complete;
-   vulkan_pipeline_precompiling = false;
+   self->device->precompile_context = NULL;
    commandbuffer_fini(&cmd);
 
    /* Android may terminate without teardown. Save successful new work now;
@@ -10614,12 +10641,11 @@ static bool renderer_precompile_current_configuration_pipelines(
       device_pipeline_cache_save(self->device);
 
    LOGI("[Vulkan shader precompilation] variants=%u recipes=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u plan_complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld\n",
-      variants, vulkan_precompile_recipes.count, jobs, graphics_jobs, compute_jobs,
+      variants, context.recipes.count, jobs, graphics_jobs, compute_jobs,
       manifest_programs, manifest_missing, workers,
       complete ? 1u : 0u, (long long)compile_elapsed_usec,
       (long long)(cpu_features_get_time_usec() - start_usec));
-   free(vulkan_precompile_recipes.items);
-   memset(&vulkan_precompile_recipes, 0, sizeof(vulkan_precompile_recipes));
+   vulkan_precompile_context_fini(&context);
    return complete;
 }
 
@@ -15197,15 +15223,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
       }
 
-      if (vulkan_pipeline_precompiling)
+      if (self->device->precompile_context)
       {
          vulkan_precompile_queue_compute_pipeline(self, hash, &info);
          return VK_NULL_HANDLE;
       }
 
       res = vkCreateComputePipelines(device_get_device(self->device),
-            device_get_pipeline_cache(self->device), 1, &info, NULL,
-            &compute_pipeline);
+            device_get_pipeline_cache(self->device), 1, &info, NULL, &compute_pipeline);
       if (res != VK_SUCCESS)
       {
          LOGE("Failed to create compute pipeline!\n");
@@ -15258,8 +15283,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          Hash hash,
          const VkGraphicsPipelineCreateInfo *pipe)
    {
+      struct VulkanPrecompileContext *context =
+         self->device->precompile_context;
       struct VulkanGraphicsPrecompileJobVec *jobs =
-         &vulkan_graphics_precompile_jobs;
+         &context->graphics_jobs;
       struct VulkanGraphicsPrecompileJob *job;
       unsigned i;
 
@@ -15414,8 +15441,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          Hash hash,
          const VkComputePipelineCreateInfo *pipe)
    {
+      struct VulkanPrecompileContext *context =
+         self->device->precompile_context;
       struct VulkanComputePrecompileJobVec *jobs =
-         &vulkan_compute_precompile_jobs;
+         &context->compute_jobs;
       struct VulkanComputePrecompileJob *job;
       const VkSpecializationInfo *source = pipe->stage.pSpecializationInfo;
       unsigned i;
@@ -15489,6 +15518,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    struct VulkanPrecompileQueue
    {
       slock_t *lock;
+      struct VulkanPrecompileContext *context;
       unsigned next_job;
       unsigned graphics_jobs;
       unsigned total_jobs;
@@ -15515,7 +15545,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          if (i < queue->graphics_jobs)
          {
             struct VulkanGraphicsPrecompileJob *job =
-               &vulkan_graphics_precompile_jobs.items[i];
+               &queue->context->graphics_jobs.items[i];
             job->result = vkCreateGraphicsPipelines(
                   device_get_device(worker->device),
                    worker->pipeline_cache,
@@ -15524,7 +15554,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          else
          {
             struct VulkanComputePrecompileJob *job =
-               &vulkan_compute_precompile_jobs.items[
+               &queue->context->compute_jobs.items[
                   i - queue->graphics_jobs];
             job->result = vkCreateComputePipelines(
                   device_get_device(worker->device),
@@ -15534,25 +15564,16 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
-   static void vulkan_precompile_jobs_begin(void)
-   {
-      free(vulkan_graphics_precompile_jobs.items);
-      memset(&vulkan_graphics_precompile_jobs, 0,
-            sizeof(vulkan_graphics_precompile_jobs));
-      free(vulkan_compute_precompile_jobs.items);
-      memset(&vulkan_compute_precompile_jobs, 0,
-            sizeof(vulkan_compute_precompile_jobs));
-   }
-
-   static bool vulkan_precompile_jobs_finish(Device *device,
+   static bool vulkan_precompile_jobs_finish(
+         struct VulkanPrecompileContext *context, Device *device,
          unsigned *job_count, unsigned *graphics_job_count,
          unsigned *compute_job_count, unsigned *worker_count,
          retro_time_t *compile_elapsed_usec)
    {
       struct VulkanGraphicsPrecompileJobVec *jobs =
-         &vulkan_graphics_precompile_jobs;
+         &context->graphics_jobs;
       struct VulkanComputePrecompileJobVec *compute_jobs =
-         &vulkan_compute_precompile_jobs;
+         &context->compute_jobs;
       enum { VulkanPrecompileMaxWorkers = 4 };
       struct VulkanPrecompileWorker worker[VulkanPrecompileMaxWorkers];
       struct VulkanPrecompileQueue queue;
@@ -15566,6 +15587,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       memset(worker, 0, sizeof(worker));
       memset(&queue, 0, sizeof(queue));
       memset(threads, 0, sizeof(threads));
+      queue.context = context;
 
       total_count = jobs->count + compute_jobs->count;
       *job_count = total_count;
@@ -15658,6 +15680,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       for (i = 0; i < jobs->count; i++)
       {
          struct VulkanGraphicsPrecompileJob *job = &jobs->items[i];
+
          if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
          {
             LOGE("[Vulkan shader precompilation] graphics pipeline creation failed result=%d\n",
@@ -15677,6 +15700,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       for (i = 0; i < compute_jobs->count; i++)
       {
          struct VulkanComputePrecompileJob *job = &compute_jobs->items[i];
+
          if (job->result != VK_SUCCESS || job->pipeline == VK_NULL_HANDLE)
          {
             LOGE("[Vulkan shader precompilation] compute pipeline creation failed result=%d\n",
@@ -15693,10 +15717,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             complete = false;
       }
 
-      free(jobs->items);
-      memset(jobs, 0, sizeof(*jobs));
-      free(compute_jobs->items);
-      memset(compute_jobs, 0, sizeof(*compute_jobs));
       return complete;
    }
 
@@ -15866,7 +15886,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       pipe.pStages = stages;
       pipe.stageCount = num_stages;
 
-      if (vulkan_pipeline_precompiling)
+      if (self->device->precompile_context)
       {
          vulkan_precompile_queue_graphics_pipeline(self, hash, &pipe);
          return VK_NULL_HANDLE;
@@ -15983,10 +16003,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       Hash hash = commandbuffer_pipeline_recipe_hash(self, false);
       IntrusivePODWrapperPipeline *entry;
-      if (vulkan_pipeline_precompiling)
-         vulkan_precompile_expect_recipe(self->current_program, hash, false);
+      if (self->device->precompile_context)
+         vulkan_precompile_expect_recipe(self->device->precompile_context,
+               self->current_program, hash, false);
       entry = program_find_pipeline(self->current_program, hash);
-      if (!vulkan_pipeline_precompiling && entry == NULL)
+      if (!self->device->precompile_context && entry == NULL)
          device_precompile_note_runtime_escape(self->device,
                self->current_program, hash, false);
       self->current_pipeline = entry ? entry->value :
@@ -15997,10 +16018,11 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       Hash hash = commandbuffer_pipeline_recipe_hash(self, true);
       IntrusivePODWrapperPipeline *entry;
-      if (vulkan_pipeline_precompiling)
-         vulkan_precompile_expect_recipe(self->current_program, hash, true);
+      if (self->device->precompile_context)
+         vulkan_precompile_expect_recipe(self->device->precompile_context,
+               self->current_program, hash, true);
       entry = program_find_pipeline(self->current_program, hash);
-      if (!vulkan_pipeline_precompiling && entry == NULL)
+      if (!self->device->precompile_context && entry == NULL)
          device_precompile_note_runtime_escape(self->device,
                self->current_program, hash, true);
       self->current_pipeline = entry ? entry->value :
@@ -16632,7 +16654,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(!self->is_compute);
-      if (vulkan_pipeline_precompiling)
+      if (self->device->precompile_context)
       {
          /* Synthetic precompile draws only need to produce the exact runtime
           * pipeline description. Queue that description without binding a
@@ -16652,7 +16674,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    {
       VK_ASSERT(self->current_program);
       VK_ASSERT(self->is_compute);
-      if (vulkan_pipeline_precompiling)
+      if (self->device->precompile_context)
       {
          /* As with synthetic draws, capture the exact runtime pipeline but do
           * not bind descriptors or record a dispatch into the live buffer. */
