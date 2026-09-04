@@ -38,6 +38,26 @@
 #include <vulkan/vulkan.h>
 #endif
 
+/* The bundled Vulkan headers predate VK_EXT_pipeline_creation_cache_control.
+ * Keep the compatibility declarations local until those headers are updated;
+ * the numeric values are fixed by extension 298. */
+#ifndef VK_EXT_pipeline_creation_cache_control
+#define VK_EXT_pipeline_creation_cache_control 1
+#define VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME \
+   "VK_EXT_pipeline_creation_cache_control"
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT \
+   ((VkStructureType)1000297000)
+#define VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT \
+   ((VkPipelineCreateFlagBits)0x00000100)
+#define VK_PIPELINE_COMPILE_REQUIRED_EXT ((VkResult)1000297000)
+typedef struct VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT
+{
+   VkStructureType sType;
+   void *pNext;
+   VkBool32 pipelineCreationCacheControl;
+} VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT;
+#endif
+
 /* HDR output state, owned by libretro.c (see beetle_psx_globals.h). When
  * psx_hdr_active is set, the Vulkan renderer emits the display quad as
  * PQ-encoded Rec.2020 into a 10-bit (A2B10G10R10) scanout image, which the
@@ -1548,6 +1568,7 @@ static IntrusivePODWrapperPipeline *vk_pipeline_map_emplace_yield(
       bool supports_external;
       bool supports_dedicated;
       bool supports_debug_marker;
+      bool supports_pipeline_creation_cache_control;
       VkPhysicalDeviceFeatures enabled_features;
    };
 
@@ -3511,6 +3532,7 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
          [VULKAN_NUM_SPEC_CONSTANTS];
       VkPipeline pipeline;
       VkResult result;
+      bool cache_hit;
    };
 
    struct VulkanGraphicsPrecompileJobVec
@@ -3533,6 +3555,7 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       uint32_t specialization_data[VULKAN_NUM_SPEC_CONSTANTS];
       VkPipeline pipeline;
       VkResult result;
+      bool cache_hit;
    };
 
    struct VulkanComputePrecompileJobVec
@@ -3551,6 +3574,20 @@ static VkShaderModule shader_get_module(const struct Shader *self) { return self
       struct VulkanPipelineRecipeVec recipes;
       struct VulkanGraphicsPrecompileJobVec graphics_jobs;
       struct VulkanComputePrecompileJobVec compute_jobs;
+   };
+
+   struct VulkanPrecompileStats
+   {
+      unsigned jobs;
+      unsigned graphics_jobs;
+      unsigned compute_jobs;
+      unsigned workers;
+      unsigned cache_hits;
+      unsigned cache_misses;
+      unsigned cache_probe_errors;
+      bool cache_probe;
+      retro_time_t cache_probe_elapsed_usec;
+      retro_time_t compile_elapsed_usec;
    };
 
    static void vulkan_precompile_expect_recipe(
@@ -6327,9 +6364,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          Program *self, Hash hash);
    static bool vulkan_precompile_jobs_finish(
          struct VulkanPrecompileContext *context, Device *device,
-         unsigned *job_count, unsigned *graphics_job_count,
-         unsigned *compute_job_count, unsigned *worker_count,
-         retro_time_t *compile_elapsed_usec);
+         struct VulkanPrecompileStats *stats);
    static bool vulkan_precompile_queue_compute_pipeline(
          struct CommandBuffer *self,
          Hash hash,
@@ -10592,14 +10627,10 @@ static bool renderer_precompile_current_configuration_pipelines(
 {
    CommandBuffer cmd;
    struct VulkanPrecompileContext context;
+   struct VulkanPrecompileStats stats;
    unsigned feedback;
    retro_time_t start_usec = cpu_features_get_time_usec();
-   retro_time_t compile_elapsed_usec = 0;
    unsigned variants = 0;
-   unsigned jobs = 0;
-   unsigned graphics_jobs = 0;
-   unsigned compute_jobs = 0;
-   unsigned workers = 0;
    unsigned manifest_programs = 0;
    unsigned manifest_missing = 0;
    bool manifest_complete;
@@ -10627,23 +10658,26 @@ static bool renderer_precompile_current_configuration_pipelines(
    if (!vulkan_precompile_validate_recipes(&context, false))
       manifest_complete = false;
 
-   complete = vulkan_precompile_jobs_finish(&context, self->device, &jobs,
-         &graphics_jobs, &compute_jobs, &workers, &compile_elapsed_usec);
+   complete = vulkan_precompile_jobs_finish(&context, self->device, &stats);
    if (!vulkan_precompile_validate_recipes(&context, true))
       complete = false;
    complete = complete && manifest_complete;
    self->device->precompile_context = NULL;
    commandbuffer_fini(&cmd);
 
-   /* Android may terminate without teardown. Save successful new work now;
-    * an unchanged configuration/payload will not be rewritten. */
-   if (complete)
-      device_pipeline_cache_save(self->device);
+   /* Android may terminate without teardown. Persist every successfully
+    * published pipeline even when another job failed; dirty state makes this
+    * a no-op when the pass added nothing. */
+   device_pipeline_cache_save(self->device);
 
-   LOGI("[Vulkan shader precompilation] variants=%u recipes=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u plan_complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld\n",
-      variants, context.recipes.count, jobs, graphics_jobs, compute_jobs,
-      manifest_programs, manifest_missing, workers,
-      complete ? 1u : 0u, (long long)compile_elapsed_usec,
+   LOGI("[Vulkan shader precompilation] variants=%u recipes=%u jobs=%u graphics_jobs=%u compute_jobs=%u manifest_programs=%u manifest_missing=%u workers=%u cache_probe=%u cache_hits=%u cache_misses=%u cache_probe_errors=%u cache_probe_elapsed_us=%lld plan_complete=%u compile_elapsed_us=%lld total_elapsed_us=%lld\n",
+      variants, context.recipes.count, stats.jobs, stats.graphics_jobs,
+      stats.compute_jobs,
+      manifest_programs, manifest_missing, stats.workers,
+      stats.cache_probe ? 1u : 0u, stats.cache_hits, stats.cache_misses,
+      stats.cache_probe_errors,
+      (long long)stats.cache_probe_elapsed_usec, complete ? 1u : 0u,
+      (long long)stats.compile_elapsed_usec,
       (long long)(cpu_features_get_time_usec() - start_usec));
    vulkan_precompile_context_fini(&context);
    return complete;
@@ -13458,9 +13492,11 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
 
    static void device_pipeline_cache_mark_dirty(Device *self);
 
-   static VkPipeline program_add_pipeline(struct Program *self,
-          Hash hash,
-          VkPipeline pipeline)
+   static VkPipeline program_add_pipeline_with_cache_state(
+          struct Program *self,
+         Hash hash,
+          VkPipeline pipeline,
+          bool cache_changed)
    {
       IntrusivePODWrapperPipeline *entry;
 
@@ -13483,8 +13519,16 @@ static bool deviceallocator_allocate(struct DeviceAllocator *self, uint32_t size
          return VK_NULL_HANDLE;
       }
 
-      device_pipeline_cache_mark_dirty(self->device);
+      if (cache_changed)
+         device_pipeline_cache_mark_dirty(self->device);
       return entry->value;
+   }
+
+   static VkPipeline program_add_pipeline(struct Program *self,
+          Hash hash,
+          VkPipeline pipeline)
+   {
+      return program_add_pipeline_with_cache_state(self, hash, pipeline, true);
    }
 
    static void program_fini(struct Program *self)
@@ -15515,6 +15559,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       struct VulkanPrecompileQueue *queue;
    };
 
+   enum
+   {
+      VulkanPrecompileBatchSize = 4,
+      VulkanPrecompileMaxWorkers = 4
+   };
+
    struct VulkanPrecompileQueue
    {
       slock_t *lock;
@@ -15522,6 +15572,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       unsigned next_job;
       unsigned graphics_jobs;
       unsigned total_jobs;
+      bool cache_probe;
    };
 
    static void vulkan_precompile_worker(void *userdata)
@@ -15532,97 +15583,158 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       for (;;)
       {
-         unsigned i;
+         unsigned first;
+         unsigned end;
 
          if (queue->lock)
             slock_lock(queue->lock);
-         i = queue->next_job++;
+         first = queue->next_job;
+         if (first < queue->graphics_jobs)
+            end = min_(first + VulkanPrecompileBatchSize,
+                  queue->graphics_jobs);
+         else
+            end = min_(first + VulkanPrecompileBatchSize,
+                  queue->total_jobs);
+         queue->next_job = end;
          if (queue->lock)
             slock_unlock(queue->lock);
-         if (i >= queue->total_jobs)
+         if (first >= queue->total_jobs)
             break;
 
-         if (i < queue->graphics_jobs)
+         if (first < queue->graphics_jobs)
          {
-            struct VulkanGraphicsPrecompileJob *job =
-               &queue->context->graphics_jobs.items[i];
-            job->result = vkCreateGraphicsPipelines(
-                  device_get_device(worker->device),
-                   worker->pipeline_cache,
-                   1, &job->pipe, NULL, &job->pipeline);
+            VkGraphicsPipelineCreateInfo
+               pipes[VulkanPrecompileBatchSize];
+            VkPipeline pipelines[VulkanPrecompileBatchSize] = {
+               VK_NULL_HANDLE
+            };
+            struct VulkanGraphicsPrecompileJob
+               *batch[VulkanPrecompileBatchSize];
+            VkResult result;
+            unsigned count = 0;
+            unsigned i;
+
+            for (i = first; i < end; i++)
+            {
+               struct VulkanGraphicsPrecompileJob *job =
+                  &queue->context->graphics_jobs.items[i];
+               if (job->result != VK_NOT_READY)
+                  continue;
+               batch[count] = job;
+               pipes[count] = job->pipe;
+               if (queue->cache_probe)
+                  pipes[count].flags |=
+                     VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT;
+               count++;
+            }
+
+            if (!count)
+               continue;
+            result = vkCreateGraphicsPipelines(
+                  device_get_device(worker->device), worker->pipeline_cache,
+                  count, pipes, NULL, pipelines);
+            for (i = 0; i < count; i++)
+            {
+               batch[i]->pipeline = pipelines[i];
+               batch[i]->result = pipelines[i] != VK_NULL_HANDLE ?
+                  VK_SUCCESS : result;
+            }
          }
          else
          {
-            struct VulkanComputePrecompileJob *job =
-               &queue->context->compute_jobs.items[
-                  i - queue->graphics_jobs];
-            job->result = vkCreateComputePipelines(
-                  device_get_device(worker->device),
-                   worker->pipeline_cache,
-                   1, &job->pipe, NULL, &job->pipeline);
+            VkComputePipelineCreateInfo pipes[VulkanPrecompileBatchSize];
+            VkPipeline pipelines[VulkanPrecompileBatchSize] = {
+               VK_NULL_HANDLE
+            };
+            struct VulkanComputePrecompileJob
+               *batch[VulkanPrecompileBatchSize];
+            VkResult result;
+            unsigned count = 0;
+            unsigned i;
+
+            for (i = first; i < end; i++)
+            {
+               struct VulkanComputePrecompileJob *job =
+                  &queue->context->compute_jobs.items[
+                     i - queue->graphics_jobs];
+               if (job->result != VK_NOT_READY)
+                  continue;
+               batch[count] = job;
+               pipes[count] = job->pipe;
+               if (queue->cache_probe)
+                  pipes[count].flags |=
+                     VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT;
+               count++;
+            }
+
+            if (!count)
+               continue;
+            result = vkCreateComputePipelines(
+                  device_get_device(worker->device), worker->pipeline_cache,
+                  count, pipes, NULL, pipelines);
+            for (i = 0; i < count; i++)
+            {
+               batch[i]->pipeline = pipelines[i];
+               batch[i]->result = pipelines[i] != VK_NULL_HANDLE ?
+                  VK_SUCCESS : result;
+            }
          }
       }
    }
 
-   static bool vulkan_precompile_jobs_finish(
-         struct VulkanPrecompileContext *context, Device *device,
-         unsigned *job_count, unsigned *graphics_job_count,
-         unsigned *compute_job_count, unsigned *worker_count,
-         retro_time_t *compile_elapsed_usec)
+   static unsigned vulkan_precompile_pending_jobs(
+         const struct VulkanPrecompileContext *context)
    {
-      struct VulkanGraphicsPrecompileJobVec *jobs =
-         &context->graphics_jobs;
-      struct VulkanComputePrecompileJobVec *compute_jobs =
-         &context->compute_jobs;
-      enum { VulkanPrecompileMaxWorkers = 4 };
+      unsigned pending = 0;
+      unsigned i;
+      for (i = 0; i < context->graphics_jobs.count; i++)
+         if (context->graphics_jobs.items[i].result == VK_NOT_READY)
+            pending++;
+      for (i = 0; i < context->compute_jobs.count; i++)
+         if (context->compute_jobs.items[i].result == VK_NOT_READY)
+            pending++;
+      return pending;
+   }
+
+   static unsigned vulkan_precompile_workers_run(
+         struct VulkanPrecompileContext *context, Device *device,
+         bool cache_probe, retro_time_t *elapsed_usec)
+   {
       struct VulkanPrecompileWorker worker[VulkanPrecompileMaxWorkers];
       struct VulkanPrecompileQueue queue;
       sthread_t *threads[VulkanPrecompileMaxWorkers - 1];
       retro_time_t start_usec;
-      bool complete;
       unsigned workers = 1;
-      unsigned total_count;
+      unsigned pending = vulkan_precompile_pending_jobs(context);
       unsigned i;
 
       memset(worker, 0, sizeof(worker));
       memset(&queue, 0, sizeof(queue));
       memset(threads, 0, sizeof(threads));
       queue.context = context;
-
-      total_count = jobs->count + compute_jobs->count;
-      *job_count = total_count;
-      *graphics_job_count = jobs->count;
-      *compute_job_count = compute_jobs->count;
-      *worker_count = 0;
-      *compile_elapsed_usec = 0;
-      /* Zero jobs is a successful warm result when every expected identity is
-       * already present. Exact recipe validation below distinguishes that from
-       * an incomplete capture. */
-      complete = !jobs->capture_failed &&
-         !compute_jobs->capture_failed;
-
-      for (i = 0; i < jobs->count; i++)
-         vulkan_precompile_job_fix_pointers(&jobs->items[i]);
-      for (i = 0; i < compute_jobs->count; i++)
-         vulkan_precompile_compute_job_fix_pointers(
-               &compute_jobs->items[i]);
+      queue.graphics_jobs = context->graphics_jobs.count;
+      queue.total_jobs = queue.graphics_jobs + context->compute_jobs.count;
+      queue.cache_probe = cache_probe;
+      *elapsed_usec = 0;
+      if (!pending)
+         return 0;
 
       start_usec = cpu_features_get_time_usec();
 #if defined(ANDROID)
-      if (total_count > 1)
+      if (pending > 1)
       {
          unsigned available_cores = cpu_features_get_core_amount();
          unsigned desired_workers = available_cores;
-         VkPipelineCache device_cache = device_get_pipeline_cache(device);
 
          if (desired_workers > VulkanPrecompileMaxWorkers)
             desired_workers = VulkanPrecompileMaxWorkers;
-         if (desired_workers > total_count)
-            desired_workers = total_count;
+         if (desired_workers > pending)
+            desired_workers = pending;
 
-         LOGI("[Vulkan shader precompilation pool] requested_workers=%u available_cores=%u selected_workers=%u cache_mode=%s\n",
+         LOGI("[Vulkan shader precompilation pool] phase=%s requested_workers=%u available_cores=%u selected_workers=%u cache_mode=shared batch_size=%u\n",
+               cache_probe ? "cache-probe" : "compile",
                VulkanPrecompileMaxWorkers, available_cores,
-               desired_workers, "shared");
+               desired_workers, VulkanPrecompileBatchSize);
 
          if (desired_workers >= 2)
          {
@@ -15630,14 +15742,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             if (queue.lock)
             {
                unsigned worker_index;
-               queue.graphics_jobs = jobs->count;
-               queue.total_jobs = total_count;
                for (worker_index = 1;
                     worker_index < desired_workers;
                     worker_index++)
                {
                   worker[worker_index].device = device;
-                  worker[worker_index].pipeline_cache = device_cache;
+                  worker[worker_index].pipeline_cache =
+                     device_get_pipeline_cache(device);
                   worker[worker_index].queue = &queue;
                   threads[worker_index - 1] = sthread_create(
                         vulkan_precompile_worker,
@@ -15660,11 +15771,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
       }
 #endif
-      if (!queue.total_jobs)
-      {
-         queue.graphics_jobs = jobs->count;
-         queue.total_jobs = total_count;
-      }
       worker[0].device = device;
       worker[0].pipeline_cache = device_get_pipeline_cache(device);
       worker[0].queue = &queue;
@@ -15674,8 +15780,97 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       if (queue.lock)
          slock_free(queue.lock);
-      *compile_elapsed_usec = cpu_features_get_time_usec() - start_usec;
-      *worker_count = total_count ? workers : 0;
+      *elapsed_usec = cpu_features_get_time_usec() - start_usec;
+      return workers;
+   }
+
+   static bool vulkan_precompile_jobs_finish(
+         struct VulkanPrecompileContext *context, Device *device,
+         struct VulkanPrecompileStats *stats)
+   {
+      struct VulkanGraphicsPrecompileJobVec *jobs =
+         &context->graphics_jobs;
+      struct VulkanComputePrecompileJobVec *compute_jobs =
+         &context->compute_jobs;
+      bool complete;
+      unsigned probe_workers = 0;
+      unsigned compile_workers;
+      unsigned total_count;
+      unsigned i;
+
+      memset(stats, 0, sizeof(*stats));
+      total_count = jobs->count + compute_jobs->count;
+      stats->jobs = total_count;
+      stats->graphics_jobs = jobs->count;
+      stats->compute_jobs = compute_jobs->count;
+      /* Zero jobs is a successful warm result when every expected identity is
+       * already present. Exact recipe validation below distinguishes that from
+       * an incomplete capture. */
+      complete = !jobs->capture_failed &&
+         !compute_jobs->capture_failed;
+
+      for (i = 0; i < jobs->count; i++)
+         vulkan_precompile_job_fix_pointers(&jobs->items[i]);
+      for (i = 0; i < compute_jobs->count; i++)
+         vulkan_precompile_compute_job_fix_pointers(
+               &compute_jobs->items[i]);
+
+      /* A seeded driver cache is opaque. When supported, ask the driver which
+       * exact descriptions it can instantiate without compiling. Hits are
+       * kept; misses are the only jobs sent through the normal compile path.
+       * Any unexpected probe error is advisory and falls back to compilation. */
+      if (device->pipeline_cache_has_data &&
+            device->ext.supports_pipeline_creation_cache_control &&
+            total_count)
+      {
+         stats->cache_probe = true;
+         probe_workers = vulkan_precompile_workers_run(context, device, true,
+               &stats->cache_probe_elapsed_usec);
+         for (i = 0; i < jobs->count; i++)
+         {
+            struct VulkanGraphicsPrecompileJob *job = &jobs->items[i];
+            if (job->pipeline != VK_NULL_HANDLE)
+            {
+               job->result = VK_SUCCESS;
+               job->cache_hit = true;
+               stats->cache_hits++;
+            }
+            else
+            {
+               if (job->result == VK_PIPELINE_COMPILE_REQUIRED_EXT)
+                  stats->cache_misses++;
+               else
+                  stats->cache_probe_errors++;
+               job->result = VK_NOT_READY;
+            }
+         }
+         for (i = 0; i < compute_jobs->count; i++)
+         {
+            struct VulkanComputePrecompileJob *job = &compute_jobs->items[i];
+            if (job->pipeline != VK_NULL_HANDLE)
+            {
+               job->result = VK_SUCCESS;
+               job->cache_hit = true;
+               stats->cache_hits++;
+            }
+            else
+            {
+               if (job->result == VK_PIPELINE_COMPILE_REQUIRED_EXT)
+                  stats->cache_misses++;
+               else
+                  stats->cache_probe_errors++;
+               job->result = VK_NOT_READY;
+            }
+         }
+         LOGI("[Vulkan shader precompilation cache probe] hits=%u compile_required=%u errors=%u elapsed_us=%lld\n",
+               stats->cache_hits, stats->cache_misses,
+               stats->cache_probe_errors,
+               (long long)stats->cache_probe_elapsed_usec);
+      }
+
+      compile_workers = vulkan_precompile_workers_run(context, device, false,
+            &stats->compile_elapsed_usec);
+      stats->workers = max_(probe_workers, compile_workers);
 
       for (i = 0; i < jobs->count; i++)
       {
@@ -15692,8 +15887,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             continue;
          }
 
-         if (program_add_pipeline(job->program, job->hash, job->pipeline) ==
-               VK_NULL_HANDLE)
+         if (program_add_pipeline_with_cache_state(job->program, job->hash,
+                  job->pipeline, !job->cache_hit) == VK_NULL_HANDLE)
             complete = false;
       }
 
@@ -15712,8 +15907,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             continue;
          }
 
-         if (program_add_pipeline(job->program, job->hash, job->pipeline) ==
-               VK_NULL_HANDLE)
+         if (program_add_pipeline_with_cache_state(job->program, job->hash,
+                  job->pipeline, !job->cache_hit) == VK_NULL_HANDLE)
             complete = false;
       }
 
@@ -17145,11 +17340,55 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #endif
 
       { VkPhysicalDeviceFeatures2KHR features = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR };
+      VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT cache_control = {
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT
+      };
+      PFN_vkGetPhysicalDeviceFeatures2 get_features2 = NULL;
+      bool cache_control_is_extension = has_vk_extension(queried_extensions,
+            ext_count,
+            VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME);
 
       if (has_vk_extension(queried_extensions, ext_count, VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME))
          enabled_extensions[enabled_extensions_count++] = (VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME);
 
-      vkGetPhysicalDeviceFeatures(gpu, &features.features);
+      /* get_application_info() deliberately retains Vulkan 1.0 compatibility.
+       * Therefore use the extension query name, which vkGetInstanceProcAddr
+       * exposes only when the frontend enabled its instance dependency; a
+       * physical device's newer core version alone is not sufficient. */
+      if (cache_control_is_extension)
+         get_features2 = (PFN_vkGetPhysicalDeviceFeatures2)
+            vkGetInstanceProcAddr(self->instance,
+                  "vkGetPhysicalDeviceFeatures2KHR");
+
+      if (get_features2)
+      {
+         features.pNext = &cache_control;
+         get_features2(gpu, &features);
+      }
+      else
+         vkGetPhysicalDeviceFeatures(gpu, &features.features);
+
+      if (cache_control.pipelineCreationCacheControl)
+      {
+         bool already_enabled = false;
+         unsigned extension_index;
+         for (extension_index = 0;
+              extension_index < enabled_extensions_count;
+              extension_index++)
+            if (strcmp(enabled_extensions[extension_index],
+                     VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME) == 0)
+         {
+            already_enabled = true;
+            break;
+         }
+         if (!already_enabled)
+            enabled_extensions[enabled_extensions_count++] =
+               VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME;
+         cache_control.pipelineCreationCacheControl = VK_TRUE;
+         device_info.pNext = &cache_control;
+         self->ext.supports_pipeline_creation_cache_control = true;
+         LOGI("GPU supports pipeline creation cache-control probes.\n");
+      }
 
       /* Enable device features we might care about. */
       {
