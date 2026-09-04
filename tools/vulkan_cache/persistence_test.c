@@ -77,7 +77,6 @@ typedef struct Device
    VkPipelineCache pipeline_cache;
    char pipeline_cache_file_name[96];
    unsigned pipeline_cache_dirty_count;
-   unsigned pipeline_cache_temp_serial;
    bool pipeline_cache_storage_warned;
    struct
    {
@@ -97,6 +96,10 @@ static bool fail_write, fail_close, fail_replace, fail_read;
 static VkResult import_error, merge_error;
 
 static retro_time_t cpu_features_get_time_usec(void) { return mock_time; }
+
+#ifdef _WIN32
+static wchar_t *utf8_to_utf16_string_alloc(const char *text);
+#endif
 
 static uint32_t encoding_crc32(uint32_t crc, const void *data, size_t size)
 {
@@ -148,7 +151,18 @@ static RFILE *filestream_open(const char *path, unsigned mode, unsigned hint)
    RFILE *result;
    if (mode == RETRO_VFS_FILE_ACCESS_READ && fail_read)
       return NULL;
+#ifdef _WIN32
+   {
+      wchar_t *wide = utf8_to_utf16_string_alloc(path);
+      if (!wide)
+         return NULL;
+      file = _wfopen(wide,
+            mode == RETRO_VFS_FILE_ACCESS_WRITE ? L"wb" : L"rb");
+      free(wide);
+   }
+#else
    file = fopen(path, mode == RETRO_VFS_FILE_ACCESS_WRITE ? "wb" : "rb");
+#endif
    if (!file)
       return NULL;
    result = (RFILE *)malloc(sizeof(*result));
@@ -187,16 +201,20 @@ static int filestream_close(RFILE *file)
    return result;
 }
 
-static int filestream_delete(const char *path) { return remove(path); }
-
-static int filestream_rename(const char *old_path, const char *new_path)
+static int filestream_delete(const char *path)
 {
-   vfs_replace_attempts++;
-   return fail_replace ? -1 : rename(old_path, new_path);
+#ifdef _WIN32
+   wchar_t *wide = utf8_to_utf16_string_alloc(path);
+   int result = wide ? _wremove(wide) : -1;
+   free(wide);
+   return result;
+#else
+   return remove(path);
+#endif
 }
 
 #ifdef _WIN32
-wchar_t *utf8_to_utf16_string_alloc(const char *text)
+static wchar_t *utf8_to_utf16_string_alloc(const char *text)
 {
    int length = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
    wchar_t *wide = (wchar_t *)malloc((size_t)length * sizeof(*wide));
@@ -208,12 +226,27 @@ wchar_t *utf8_to_utf16_string_alloc(const char *text)
    assert(MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, length));
    return wide;
 }
-
-static BOOL test_move_file_ex(LPCWSTR old_path, LPCWSTR new_path, DWORD flags)
-{
-   return fail_replace ? FALSE : MoveFileExW(old_path, new_path, flags);
-}
 #endif
+
+static int filestream_rename(const char *old_path, const char *new_path)
+{
+   vfs_replace_attempts++;
+   if (fail_replace)
+      return -1;
+#ifdef _WIN32
+   {
+      wchar_t *old_wide = utf8_to_utf16_string_alloc(old_path);
+      wchar_t *new_wide = utf8_to_utf16_string_alloc(new_path);
+      bool replaced = old_wide && new_wide &&
+         MoveFileExW(old_wide, new_wide, MOVEFILE_REPLACE_EXISTING) != 0;
+      free(old_wide);
+      free(new_wide);
+      return replaced ? 0 : -1;
+   }
+#else
+   return rename(old_path, new_path);
+#endif
+}
 
 static VkResult vkCreatePipelineCache(void *device,
       const VkPipelineCacheCreateInfo *info, void *allocator,
@@ -262,14 +295,9 @@ static VkResult vkGetPipelineCacheData(void *device, VkPipelineCache cache,
    return VK_SUCCESS;
 }
 
-/* Exercise production code, including native file locking and replacement. */
-#ifdef _WIN32
-#define MoveFileExW test_move_file_ex
-#endif
+/* Exercise the common atomic writer and the production persistence code. */
+#include "atomic_write_under_test.h"
 #include "persistence_under_test.h"
-#ifdef _WIN32
-#undef MoveFileExW
-#endif
 
 static Device make_device(void)
 {
@@ -671,22 +699,17 @@ static void test_windows_native_paths(const char *tmp)
    assert(file != INVALID_HANDLE_VALUE);
    assert(WriteFile(file, "old", 3, &count, NULL) && count == 3);
    assert(CloseHandle(file));
-   file = CreateFileW(temp_wide, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-   assert(file != INVALID_HANDLE_VALUE);
-   assert(WriteFile(file, "new", 3, &count, NULL) && count == 3);
-   assert(CloseHandle(file));
-   /* A real Windows sharing violation must preserve both destination and
-    * complete temporary. This is not the injected rename-failure path. */
+   /* A real Windows sharing violation must preserve the old destination;
+    * the common helper also removes the failed stable temporary. */
    file = CreateFileW(path_wide, GENERIC_READ, FILE_SHARE_READ, NULL,
          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
    assert(file != INVALID_HANDLE_VALUE);
-   assert(!device_pipeline_cache_replace(temp, path));
+   assert(!filestream_write_file_atomic(path, "new", 3));
    assert(ReadFile(file, bytes, sizeof(bytes), &count, NULL) && count == 3);
    assert(memcmp(bytes, "old", 3) == 0);
-   assert(GetFileAttributesW(temp_wide) != INVALID_FILE_ATTRIBUTES);
+   assert(GetFileAttributesW(temp_wide) == INVALID_FILE_ATTRIBUTES);
    assert(CloseHandle(file));
-   assert(device_pipeline_cache_replace(temp, path));
+   assert(filestream_write_file_atomic(path, "new", 3));
    assert(GetFileAttributesW(temp_wide) == INVALID_FILE_ATTRIBUTES);
    file = CreateFileW(path_wide, GENERIC_READ, FILE_SHARE_READ, NULL,
          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);

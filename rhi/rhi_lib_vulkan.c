@@ -4894,7 +4894,6 @@ static void cbh_move(struct CommandBufferHandle *dst,
          VkPipelineCache pipeline_cache;
          char pipeline_cache_file_name[96];
          unsigned pipeline_cache_dirty_count;
-         unsigned pipeline_cache_temp_serial;
          bool pipeline_cache_storage_warned;
          bool precompile_plan_attempted;
          bool precompile_plan_complete;
@@ -17464,31 +17463,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #endif
    }
 
-   static bool device_pipeline_cache_replace(const char *temp_path,
-         const char *path)
-   {
-#if defined(_WIN32)
-      wchar_t *temp_wide = utf8_to_utf16_string_alloc(temp_path);
-      wchar_t *path_wide = utf8_to_utf16_string_alloc(path);
-      bool replaced = temp_wide && path_wide &&
-         MoveFileExW(temp_wide, path_wide, MOVEFILE_REPLACE_EXISTING) != 0;
-      free(temp_wide);
-      free(path_wide);
-      return replaced;
-#elif defined(__unix__) || defined(__APPLE__)
-      /* The temporary is created through filestream, whose hybrid VFS uses
-       * the frontend fallback when Android scoped storage rejects a local
-       * operation. Publish through the same abstraction. Ordinary local
-       * paths still resolve to POSIX rename(), while sandboxed paths no
-       * longer strand a valid temporary beside the native lock file. */
-      return filestream_rename(temp_path, path) == 0;
-#else
-      (void)temp_path;
-      (void)path;
-      return false;
-#endif
-   }
-
    struct RhiPipelineCacheHeaderV1
    {
       uint32_t header_size;
@@ -17700,23 +17674,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return file_data;
    }
 
-   static bool device_pipeline_cache_unique_path(Device *self, char *out,
-         size_t out_size, const char *path, const char *suffix)
-   {
-      unsigned long process_id = 0;
-      int length;
-#if defined(_WIN32)
-      process_id = (unsigned long)GetCurrentProcessId();
-#elif defined(__unix__) || defined(__APPLE__)
-      process_id = (unsigned long)getpid();
-#endif
-      length = snprintf(out, out_size, "%s.%s-%lu-%llx-%llx-%u", path,
-            suffix, process_id, (unsigned long long)(uintptr_t)self,
-            (unsigned long long)cpu_features_get_time_usec(),
-            ++self->pipeline_cache_temp_serial);
-      return length >= 0 && (size_t)length < out_size;
-   }
-
    /* Called only with this file's native lock held. Keep exactly the newest
     * driver-rejected blob at a stable sibling path. Atomic replacement bounds
     * quarantine storage to one file per GPU/location while retaining useful
@@ -17727,7 +17684,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       int length = snprintf(rejected_path, sizeof(rejected_path),
             "%s.rejected", path);
       if (length >= 0 && (size_t)length < sizeof(rejected_path) &&
-            device_pipeline_cache_replace(path, rejected_path))
+            filestream_rename(path, rejected_path) == 0)
          LOGI("[Vulkan pipeline cache] quarantined driver-rejected data\n");
    }
 
@@ -17867,16 +17824,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          const char *location)
    {
       char path[PATH_MAX_LENGTH];
-      char temp_path[PATH_MAX_LENGTH];
       struct RhiPipelineCacheLock lock;
       size_t old_size = 0;
       size_t payload_size = 0;
       size_t file_size;
       void *old_data = NULL;
       uint8_t *file_data = NULL;
-      RFILE *file;
-      int64_t written;
-      int close_result;
       bool rejected = false;
       bool saved = false;
       bool read_failed;
@@ -17926,38 +17879,18 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #endif
          goto done;
       }
-      if (!device_pipeline_cache_unique_path(self, temp_path,
-               sizeof(temp_path), path, "tmp"))
-         goto done;
-      file = filestream_open(temp_path, RETRO_VFS_FILE_ACCESS_WRITE,
-            RETRO_VFS_FILE_ACCESS_HINT_SEQUENTIAL_BULK);
-      if (!file)
-      {
-         LOGE("[Vulkan pipeline cache] could not open temporary cache location=%s\n",
-               location);
-         goto done;
-      }
       file_size = VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + payload_size;
-      written = filestream_write(file, file_data, (int64_t)file_size);
-      close_result = filestream_close(file);
-      if (close_result != 0)
-         free(file);
-      /* Buffered providers may report disk-full only at close. Never publish
-       * such a temporary, and never delete the previous good destination. */
-      if (written == (int64_t)file_size && close_result == 0)
-         saved = device_pipeline_cache_replace(temp_path, path);
-      if (written != (int64_t)file_size || close_result != 0)
-         LOGE("[Vulkan pipeline cache] temporary write failed location=%s written=%lld expected=%llu close=%d\n",
-               location, (long long)written,
-               (unsigned long long)file_size, close_result);
-      else if (!saved)
-         LOGE("[Vulkan pipeline cache] temporary publish failed location=%s\n",
-               location);
-      if (!saved)
-         filestream_delete(temp_path);
-      else
+      /* The destination lock makes one stable sibling temporary sufficient.
+       * The common helper truncates a crash leftover, verifies write/close,
+       * atomically replaces the destination and removes a failed temporary. */
+      saved = filestream_write_file_atomic(path, file_data,
+            (int64_t)file_size);
+      if (saved)
          LOGI("[Vulkan pipeline cache] saved bytes=%llu location=%s\n",
                (unsigned long long)payload_size, location);
+      else
+         LOGE("[Vulkan pipeline cache] atomic write failed location=%s bytes=%llu\n",
+               location, (unsigned long long)file_size);
 done:
       free(file_data);
       free(old_data);
