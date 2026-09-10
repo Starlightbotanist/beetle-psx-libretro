@@ -9089,10 +9089,12 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    {
       if (rect_intersects(&self->render_state.draw_rect, &rect))
       {
-         /* HACK hd_texture_vram should contains the texture we are reading from
-          * in vram coordinate avoid texture filtering and enable scaled read if
-          * the texture is rendered content */
-         bool texture_rendered = fbatlas_texture_rendered(&self->atlas, &hd_texture_vram);
+         TTRect sampled_vram = hd_texture_vram;
+         bool texture_rendered;
+         /* A one-column HD span has width 0; query its actual framebuffer area. */
+         if (sampled_vram.height && !sampled_vram.width)
+            sampled_vram.width = 1;
+         texture_rendered = fbatlas_texture_rendered(&self->atlas, &sampled_vram);
          filtering = !texture_rendered;
          scaled_read = texture_rendered;
       }
