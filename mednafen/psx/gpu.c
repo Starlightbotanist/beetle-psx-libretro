@@ -1333,6 +1333,23 @@ static void GPU_SoftReset(void) /* Control command 0x00 */
    GPU.TexDisableAllowChange = false;
 }
 
+void GPU_SyncRHIFramebuffer(void)
+{
+   rhi_intf_toggle_display(GPU.DisplayOff);
+   rhi_intf_set_draw_area(GPU.ClipX0, GPU.ClipY0,
+                          GPU.ClipX1, GPU.ClipY1);
+
+   rhi_intf_load_image(0, 0, 1024, 512,
+                       GPU.vram, false, false);
+
+   rhi_intf_set_vram_framebuffer_coords(
+         GPU.DisplayFB_XStart, GPU.DisplayFB_YStart);
+   rhi_intf_set_horizontal_display_range(GPU.HorizStart, GPU.HorizEnd);
+   rhi_intf_set_vertical_display_range(GPU.VertStart, GPU.VertEnd);
+
+   RHI_UpdateDisplayMode();
+}
+
 void GPU_Power(void)
 {
    memset(GPU.vram, 0, 512 * 1024 * UPSCALE(&GPU) * UPSCALE(&GPU) * sizeof(*GPU.vram));
@@ -2719,19 +2736,7 @@ void GPU_RestoreStateP3(void)
 
    IRQ_Assert(IRQ_GPU, GPU.IRQPending);
 
-   rhi_intf_toggle_display(GPU.DisplayOff);
-   rhi_intf_set_draw_area( GPU.ClipX0, GPU.ClipY0,
-                           GPU.ClipX1, GPU.ClipY1);
-
-   rhi_intf_load_image( 0,    0,
-                        1024, 512,
-                        GPU.vram, false, false);
-
-   rhi_intf_set_vram_framebuffer_coords(GPU.DisplayFB_XStart, GPU.DisplayFB_YStart);
-   rhi_intf_set_horizontal_display_range(GPU.HorizStart, GPU.HorizEnd);
-   rhi_intf_set_vertical_display_range(GPU.VertStart, GPU.VertEnd);
-
-   RHI_UpdateDisplayMode();
+   GPU_SyncRHIFramebuffer();
 }
 
 int GPU_StateAction(StateMem *sm, int load, int data_only)

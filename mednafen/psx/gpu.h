@@ -279,12 +279,12 @@ bool     GPU_DMACanWrite(void);
 int32_t  GPU_Update(const int32_t sys_timestamp);
 int32_t  GPU_GetScanlineNum(void);
 
-/* Used by rhi_lib_gl.c to access the VRAM contents and
- * to drive state restore points. */
+/* Used by hardware renderers and frontend reset/state-restore paths. */
 uint16_t *GPU_get_vram(void);
 void     GPU_RestoreStateP1(bool load);
 void     GPU_RestoreStateP2(bool load);
 void     GPU_RestoreStateP3(void);
+void     GPU_SyncRHIFramebuffer(void);
 
 void GPU_set_dither_upscale_shift(uint8_t factor);
 
