@@ -10873,7 +10873,12 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    }
    case SemiTransparentMode_Add:
    {
-      if (state->masked)
+      /* A flat native-colour source is already reduced to RGB5, and its
+       * alpha carries only the set-mask bit. Fixed-function blending can
+       * therefore apply additive colour while using destination alpha to
+       * suppress the source and preserve masked destination pixels. Avoid
+       * the programmable framebuffer read for this representable case. */
+      if (state->masked && (!state->native_color || state->textured))
       {
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
@@ -10896,8 +10901,14 @@ static void renderer_semi_transparent_set_state(Renderer *self,
          commandbuffer_set_program(cbh_get(&self->cmd), textured);
          commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
          commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
-                                VK_BLEND_FACTOR_ZERO);
+         if (state->masked)
+            commandbuffer_set_blend_factors(cbh_get(&self->cmd),
+                  VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+                  VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE);
+         else
+            commandbuffer_set_blend_factors(cbh_get(&self->cmd),
+                  VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+                  VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
       }
       break;
    }
