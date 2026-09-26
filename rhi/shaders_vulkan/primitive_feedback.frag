@@ -41,6 +41,10 @@ layout(location = 6) in mediump vec4 vFog;
 
 void main()
 {
+	bool raw_texture = false;
+	vec3 shaded;
+	vec3 add_src;
+	float blend_amt;
 #ifdef TEXTURED
 	vec4 NNColor = sample_vram_atlas(clamp_coord(vUV));
 	if (all(equal(NNColor, vec4(0.0))))
@@ -50,17 +54,23 @@ void main()
 
 	/* Raw texture colour bypasses vertex modulation. The final store bias
 	 * remains below because this program emits a derived blended result. */
-	bool raw_texture = (uint(vParam.z) & 0x2000u) != 0u;
+	raw_texture = (uint(vParam.z) & 0x2000u) != 0u;
 	vec3 shaded_hot = raw_texture ? color.rgb :
 		color.rgb * ((PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb) * (255.0 / 128.0);
-	vec3 shaded     = clamp(shaded_hot, 0.0, 1.0);
-	vec3 add_src    = (HDR_HOT_SOURCE != 0) ? max(shaded_hot, vec3(0.0)) : shaded;
-	float blend_amt = NNColor.a;
+	shaded     = clamp(shaded_hot, 0.0, 1.0);
+	add_src    = (HDR_HOT_SOURCE != 0) ? max(shaded_hot, vec3(0.0)) : shaded;
+	blend_amt = NNColor.a;
 #else
-	vec3 shaded = (PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb;
-#define add_src shaded
-	const float blend_amt = 1.0;
+	shaded = (PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb;
+	add_src = shaded;
+	blend_amt = 1.0;
 #endif
+	if (primitive_native_color() && !raw_texture)
+	{
+		/* The PS1 reduces the source to RGB5 before semitransparency. */
+		shaded = quantize_native_rgb5(shaded, primitive_dither_enabled());
+		add_src = shaded;
+	}
 
 #ifdef MSAA
 	// Need to be render per-sample here.
@@ -93,17 +103,15 @@ void main()
 	FragColor = vec4(blended, vColor.a);
 #endif
 
-	// Get round down behavior instead of round-to-nearest.
-	// This is required for various "fade" out effects.
-	// However, don't accidentially round down if we are already rounded to avoid
-	// unintended feedback effects.
-	FragColor.rgb -= 0.49 / 255.0;
-
-#if 0
-#if defined(TEXTURED)
-	if ((vParam.z & 0x100) != 0)
-		FragColor.rgb += textureLod(uDitherLUT, gl_FragCoord.xy * 0.25, 0.0).xxx - 4.0 / 255.0;
-#endif
-	FragColor.rgb = quantize_bgr555(FragColor.rgb);
-#endif
+	if (primitive_native_color())
+	{
+		/* Average and quarter-add can leave half/quarter RGB5 steps. Store the
+		 * same integer result as the hardware after programmable blending. */
+		FragColor.rgb = quantize_native_rgb5(FragColor.rgb, false);
+	}
+	else
+	{
+		/* Preserve the higher-colour path's historical truncation bias. */
+		FragColor.rgb -= 0.49 / 255.0;
+	}
 }
