@@ -61,12 +61,12 @@ layout(location = 6) in mediump vec4 vFog;
 void main()
 {
 	float opacity = 1.0;
+	bool raw_texture = false;
 #ifdef TEXTURED
 	vec4 NNColor;
 
 	bool fastpath = (vParam.z & 0x100) != 0;
 	bool hd_enabled = !fastpath && (vParam.z & 0x200) == 0;
-	bool cache_hit = (vParam.z & 0x400) != 0;
 
 	vec4 hdColor;
 	if (fastpath) {
@@ -120,7 +120,7 @@ void main()
 
 	/* 0x2000 carries the GP0 raw-texture bit. Do not infer this from a
 	 * neutral vertex colour: 0x808080 is also valid modulated input. */
-	bool raw_texture = (uint(vParam.z) & 0x2000u) != 0u;
+	raw_texture = (uint(vParam.z) & 0x2000u) != 0u;
 	bool fixed_feedback = (uint(vParam.z) & 0x800u) != 0u;
 	if (fixed_feedback)
 	{
@@ -143,15 +143,12 @@ void main()
 		vec3 texel5 = floor(color.rgb * 31.0 + vec3(0.5));
 		vec3 shade8 = floor(fshade * 255.0 + vec3(0.001));
 		vec3 modulated = floor(texel5 * shade8 / 16.0);
-#if defined(UNSCALED)
-		ivec2 dc = ivec2(gl_FragCoord.xy) & 3;
-#else
-		ivec2 dc = (ivec2(gl_FragCoord.xy) / SCALE) & 3;
-#endif
-		float md = ((uint(vParam.z) & 0x8000u) != 0u)
+		ivec2 dc = primitive_dither_coord();
+		float md = primitive_dither_enabled()
 			? float(dither_pattern[dc.y * 4 + dc.x]) : 0.0;
 		vec3 q5 = clamp(floor((modulated + md) / 8.0), vec3(0.0), vec3(31.0));
-		FragColor = vec4(q5 / 31.0, NNColor.a + vColor.a);
+		FragColor = vec4(primitive_native_color() ? q5 * (8.0 / 255.0) : q5 / 31.0,
+			NNColor.a + vColor.a);
 		return;
 	}
 	vec3 shaded_hot = raw_texture ? color.rgb :
@@ -170,20 +167,18 @@ void main()
 	FragColor = vec4((PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb, vColor.a);
 #endif
 
-	// Get round down behavior instead of round-to-nearest.
-	// This is required for various "fade" out effects.
-	// However, don't accidentially round down if we are already rounded to avoid
-	// unintended feedback effects.
-	/* Raw texture colour is already quantized by the PlayStation GPU. The
-	 * generic store bias can move it across a later 1555 packing boundary. */
-	if (!raw_texture)
+	if (primitive_native_color())
+	{
+		/* A raw texel is already the exact 8-bit expansion of a PS1 RGB5
+		 * value. Ordinary writes are always truncated; DTD only adds the
+		 * ordered offset before that truncation. */
+		if (!raw_texture)
+			FragColor.rgb = quantize_native_rgb5(FragColor.rgb,
+				primitive_dither_enabled());
+	}
+	else if (!raw_texture)
+	{
+		/* Preserve the higher-colour path's historical truncation bias. */
 		FragColor.rgb -= 0.49 / 255.0;
-
-#if 0
-#if defined(TEXTURED)
-	if ((vParam.z & 0x100) != 0)
-		FragColor.rgb += textureLod(uDitherLUT, gl_FragCoord.xy * 0.25, 0.0).xxx - 4.0 / 255.0;
-#endif
-	FragColor.rgb = quantize_bgr555(FragColor.rgb);
-#endif
+	}
 }

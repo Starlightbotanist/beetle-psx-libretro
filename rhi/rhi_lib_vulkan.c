@@ -5425,6 +5425,7 @@ static struct PrimitiveInfo primitive_info_make(
       SemiTransparentMode semi_transparent;
       bool textured;
       bool masked;
+      bool native_color;
       bool filtering;
       bool scaled_read;
       unsigned shift;
@@ -5437,6 +5438,7 @@ static bool semi_transparent_state_eq(const struct SemiTransparentState *a,
    {
       return a->scissor_index == b->scissor_index && hd_handle_eq(&a->hd_texture_index, &b->hd_texture_index) &&
          a->semi_transparent == b->semi_transparent && a->textured == b->textured && a->masked == b->masked &&
+         a->native_color == b->native_color &&
          a->filtering == b->filtering && a->scaled_read == b->scaled_read && a->shift == b->shift &&
          a->offset_uv == b->offset_uv;
    }
@@ -5608,10 +5610,13 @@ static bool semi_transparent_state_eq(const struct SemiTransparentState *a,
       ScanoutMode scanout_mode;
       ScanoutFilter scanout_filter;
       ScanoutFilter scanout_mdec_filter;
+      /* Frame-latched native-colour configuration. The first flag selects
+       * native versus internal-resolution dither spacing; the second selects
+       * RGB5 write-time storage independently of each primitive's DTD bit. */
       bool dither_native_resolution;
-      /* The dtd bit of the primitive being queued (from the push_*
-       * entry points). Feeds the fixed-point framebuffer-feedback
-       * modulation path; the scanout-level dither is separate. */
+      bool native_color;
+      /* The DTD bit of the primitive being queued (from the push_* entry
+       * points). Feeds fixed-point modulation and native RGB5 writes. */
       bool primitive_dither;
       bool force_mask_bit;
       bool texture_color_modulate;
@@ -5667,6 +5672,7 @@ static void render_state_init(struct RenderState *s)
    s->scanout_filter = ScanoutFilter_None;
    s->scanout_mdec_filter = ScanoutFilter_None;
    s->dither_native_resolution = false;
+   s->native_color = false;
    s->force_mask_bit = false;
    s->texture_color_modulate = false;
    s->mask_test = false;
@@ -8488,7 +8494,8 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
          display_rect.height * render_scale,
          analog ? VK_FORMAT_R16G16B16A16_SFLOAT
          : hdr_quad ? renderer_hdr_scanout_format(self)
-            : (self->render_state.scanout_mode == ScanoutMode_ABGR1555_Dither ? VK_FORMAT_A1R5G5B5_UNORM_PACK16 : VK_FORMAT_R8G8B8A8_UNORM));
+            : (self->render_state.scanout_mode == ScanoutMode_ABGR1555_Dither &&
+               !self->render_state.native_color ? VK_FORMAT_A1R5G5B5_UNORM_PACK16 : VK_FORMAT_R8G8B8A8_UNORM));
 
    info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
    info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -8538,7 +8545,11 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
     * 30-bit output exists to avoid 15-bit quantisation; re-imposing it to feed
     * the cable trades the precision the user asked for against an artifact. So
     * HDR suppresses the dither with a cable exactly as it does without one. */
-   dither = (self->render_state.scanout_mode == ScanoutMode_ABGR1555_Dither) && !psx_hdr_active;
+   /* Native-colour rendering has already applied the GP0 primitive's DTD bit
+    * and stored RGB5. Applying this display-wide pass as well would dither and
+    * quantize the image a second time. */
+   dither = (self->render_state.scanout_mode == ScanoutMode_ABGR1555_Dither) &&
+      !self->render_state.native_color && !psx_hdr_active;
 
    if (bpp24)
    {
@@ -9218,9 +9229,6 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          /* All UVs are within a single hd texture, and there are no & or | shenanigans. Tell the shader to use the fast path. */
          param = param | 0x100;
       }
-      if (cache_hit) {
-         param = param | 0x400; /* dbg cache hit */
-      }
    }
    if (hd_handle_is_none(&hd_texture_index)) {
       /* This flag says skip hd textures */
@@ -9277,6 +9285,17 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    }
    if (self->render_state.primitive_dither)
       param = (int16_t)((uint16_t)param | 0x8000u);
+   if (self->render_state.native_color)
+   {
+      /* 0x0400 (formerly an unconsumed cache-hit debug marker) selects native
+       * RGB5 storage; 0x4000 selects a 4x4 dither pattern in native PS1 pixels
+       * instead of internal-resolution pixels. Both are authoritative frame
+       * configuration, while 0x8000 above is the individual primitive's GP0
+       * DTD bit. */
+      param = (int16_t)((uint16_t)param | 0x0400u);
+      if (self->render_state.dither_native_resolution)
+         param = (int16_t)((uint16_t)param | 0x4000u);
+   }
 
    { unsigned i; for (i = 0; i < count; i++) {
       output[i].x = x[i];
@@ -9522,6 +9541,7 @@ static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
          SemiTransparentState _sts = { scissor_index, hd_texture_index, self->render_state.semi_transparent,
                                                self->render_state.texture_mode != TextureMode_None,
                                                self->render_state.mask_test,
+                                               self->render_state.native_color,
                                                filtering,
                                                scaled_read,
                                      shift,
@@ -9582,6 +9602,7 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices)
          scissor_index, hd_texture_index, self->render_state.semi_transparent,
          self->render_state.texture_mode != TextureMode_None,
          self->render_state.mask_test,
+         self->render_state.native_color,
          filtering,
          scaled_read,
          shift,
@@ -10033,6 +10054,7 @@ static void renderer_render_opaque_primitives(Renderer *self){
    commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
+   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
    renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
    commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
@@ -10086,6 +10108,12 @@ static bool renderer_semi_trans_needs_feedback(const Renderer *self,
 {
    if (state->semi_transparent == SemiTransparentMode_None)
       return false;
+   /* RGBA8 fixed-function blending cannot perform the PS1's required RGB5
+    * source preparation and post-blend truncation for every blend mode. Keep
+    * native-colour draws in the existing ordered feedback path so the stored
+    * value is authoritative before any later texture read or VRAM copy. */
+   if (state->native_color)
+      return true;
    if (state->masked)
       return true;
    return psx_hdr_multipass &&
@@ -20426,6 +20454,13 @@ void rhi_vulkan_prepare_frame(void)
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
    renderer->sprite_filter_exclude = (FilterExclude)(filter_exclude_sprites);
    renderer->polygon_2d_filter_exclude = (FilterExclude)(filter_exclude_2d_polygons);
+   /* Latch the option at the frame boundary before any GP0 work is queued.
+    * A requested wide/HDR format retains its higher-precision path even if
+    * the frontend leaves the dither option at its default value. */
+   renderer->render_state.native_color =
+      psx_color_format == 0 && dither_mode != DITHER_OFF;
+   renderer->render_state.dither_native_resolution =
+      dither_mode == DITHER_NATIVE;
 }
 
 static ScanoutMode get_scanout_mode(bool bpp24)
@@ -20504,7 +20539,6 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
     * the config above so it picks the right rect/pages folder). */
    texture_tracker_ensure_directories(renderer->tracker, dump_textures, replace_textures);
    renderer->render_state.adaptive_smoothing = adaptive_smoothing;
-   renderer->render_state.dither_native_resolution = dither_mode == DITHER_NATIVE;
    renderer->render_state.crop_overscan = vulkan_crop_overscan;
    renderer->render_state.offset_cycles = image_offset_cycles;
    renderer_set_visible_scanlines(renderer, initial_scanline, last_scanline, initial_scanline_pal, last_scanline_pal);
