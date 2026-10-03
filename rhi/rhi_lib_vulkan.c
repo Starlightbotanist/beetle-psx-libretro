@@ -9152,8 +9152,11 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          }
          else
          {
+            /* Preserve the HD matching span, but floor the inclusive last
+             * texel to its packed word for framebuffer reads and hazards. */
+            unsigned hd_max_u = (max_u + (1u << shift) - 1) >> shift;
             min_u >>= shift;
-            max_u = (max_u + (1 << shift) - 1) >> shift;
+            max_u >>= shift;
             width = max_u - min_u + 1;
             {
                TTRect _r = { min_u, min_v, width, height };
@@ -9163,8 +9166,9 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
             hd_texture_vram.x = self->render_state.texture_offset_x + min_u;
             hd_texture_vram.y = self->render_state.texture_offset_y + min_v;
 
-            /* HDTODO: this might be wrong because it can result in TTRect's with 0 width, also notice that height has the same +1 */
-            hd_texture_vram.width = width - 1; /* This is -1 due to boundary shenanigans above (otherwise upload.rect.contains(snoop) would return false for the right-most tiles) */
+            /* HD matching uses the historical boundary span, not the full
+             * sampled area (which can include the same packed last word). */
+            hd_texture_vram.width = hd_max_u - min_u;
             hd_texture_vram.height = height;
          }
       }
