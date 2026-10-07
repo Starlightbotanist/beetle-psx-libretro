@@ -3987,10 +3987,9 @@ static void DoSimpleCommand(int cmd)
    switch(cmd)
    {
       case MDFN_MSC_RESET:
-         PSX_Power();
-         break;
       case MDFN_MSC_POWER:
          PSX_Power();
+         GPU_SyncRHIFramebuffer();
          break;
       case MDFN_MSC_INSERT_DISK:
          CDInsertEject();
