@@ -17288,8 +17288,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
-   POD_VEC_DECLARE(VkSubmitInfoVec, VkSubmitInfo);
-
    static void device_submit_queue(Device *self, CommandBufferType type, VkFence *fence,
          unsigned semaphore_count, Semaphore *semaphores){
             VkFence cleared_fence;
@@ -17313,8 +17311,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
       { CommandBufferVec cmds = { NULL, 0, 0 };
 
-      VkSubmitInfoVec submits = { NULL, 0, 0 };
-      size_t last_cmd = 0;
+      VkSubmitInfo submit;
 
       SemaphoreVec waits[2]   = { { NULL, 0, 0 }, { NULL, 0, 0 } };
       SemaphoreVec signals[2] = { { NULL, 0, 0 }, { NULL, 0, 0 } };
@@ -17345,27 +17342,17 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          CommandBufferVec_push(&cmds, &_cb);
       } }
 
-      if (CommandBufferVec_size(&cmds) > (int)last_cmd)
-      {
-         /* Push all pending cmd buffers to their own submission. */
-         VkSubmitInfo zero_submit;
-         memset(&zero_submit, 0, sizeof(zero_submit));
-         VkSubmitInfoVec_push(&submits, &zero_submit);
-
-         { VkSubmitInfo *submit = VkSubmitInfoVec_back(&submits);
-         submit->sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-         submit->pNext = NULL;
-         submit->commandBufferCount = CommandBufferVec_size(&cmds) - last_cmd;
-         submit->pCommandBuffers = CommandBufferVec_data(&cmds) + last_cmd;
-         last_cmd = CommandBufferVec_size(&cmds);
-         }
-      }
+      /* Nonempty pending buffers form exactly one queue submission. */
+      memset(&submit, 0, sizeof(submit));
+      submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit.commandBufferCount = CommandBufferVec_size(&cmds);
+      submit.pCommandBuffers = CommandBufferVec_data(&cmds);
 
       cleared_fence = fence ? fencemanager_request_cleared_fence(&self->managers.fence) : VK_NULL_HANDLE;
 
       { unsigned i; for (i = 0; i < semaphore_count; i++) {
          VkSemaphore cleared_semaphore = semaphoremanager_request_cleared_semaphore(&self->managers.semaphore);
-         SemaphoreVec_push(&signals[VkSubmitInfoVec_size(&submits) - 1], &cleared_semaphore);
+         SemaphoreVec_push(&signals[0], &cleared_semaphore);
          VK_ASSERT(!sem_is_valid(&semaphores[i]));
          {
             struct SemaphoreHolder *_sh = (struct SemaphoreHolder *)object_pool_raw_allocate(&self->handle_pool.semaphores);
@@ -17374,19 +17361,15 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
       } }
 
-      { int i; for (i = 0; i < VkSubmitInfoVec_size(&submits); i++) {
-         VkSubmitInfo *submit = VkSubmitInfoVec_at(&submits, i);
-         submit->waitSemaphoreCount = SemaphoreVec_size(&waits[i]);
-         if (!SemaphoreVec_empty(&waits[i]))
-         {
-            submit->pWaitSemaphores = SemaphoreVec_data(&waits[i]);
-            submit->pWaitDstStageMask = VkFlagsVec_data(&stages[i]);
-         }
-
-         submit->signalSemaphoreCount = SemaphoreVec_size(&signals[i]);
-         if (!SemaphoreVec_empty(&signals[i]))
-            submit->pSignalSemaphores = SemaphoreVec_data(&signals[i]);
-      } }
+      submit.waitSemaphoreCount = SemaphoreVec_size(&waits[0]);
+      if (!SemaphoreVec_empty(&waits[0]))
+      {
+         submit.pWaitSemaphores = SemaphoreVec_data(&waits[0]);
+         submit.pWaitDstStageMask = VkFlagsVec_data(&stages[0]);
+      }
+      submit.signalSemaphoreCount = SemaphoreVec_size(&signals[0]);
+      if (!SemaphoreVec_empty(&signals[0]))
+         submit.pSignalSemaphores = SemaphoreVec_data(&signals[0]);
 
       switch (type)
       {
@@ -17403,14 +17386,13 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
 
       { bool queue_locked = device_queue_lock(self, queue);
-      result = vkQueueSubmit(queue, VkSubmitInfoVec_size(&submits), VkSubmitInfoVec_data(&submits), cleared_fence);
+      result = vkQueueSubmit(queue, 1, &submit, cleared_fence);
       device_queue_unlock(self, queue_locked); }
       if (result != VK_SUCCESS)
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
       cbhvec_clear(submissions);
 
       CommandBufferVec_free_storage(&cmds);
-      VkSubmitInfoVec_free_storage(&submits);
       SemaphoreVec_free_storage(&waits[0]);  SemaphoreVec_free_storage(&waits[1]);
       SemaphoreVec_free_storage(&signals[0]); SemaphoreVec_free_storage(&signals[1]);
       VkFlagsVec_free_storage(&stages[0]);  VkFlagsVec_free_storage(&stages[1]);
