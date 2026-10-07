@@ -737,13 +737,14 @@ static INLINE void WriteMemory_u32(int32_t *timestamp, uint32_t address, uint32_
 // Fill size of 2-words seems to work on a PS1, and even behaves as if the line size is 2 words in regards to clearing
 // the valid bits(when the tag matches, of course), but is obviously not very efficient unless running code that's just endless branching.
 //
-static INLINE uint32_t ReadInstruction(int32_t *timestamp, uint32_t address)
+/* Keep cache fills and uncached reads out of the instruction-cache hit path. */
+static uint32_t NO_INLINE ReadInstructionCacheMiss(int32_t *timestamp,
+      uint32_t address)
 {
    uint32_t instr;
 
    instr = ICache[(address & 0xFFC) >> 2].Data;
 
-   if (ICache[(address & 0xFFC) >> 2].TV != address)
    {
       ReadAbsorb[ReadAbsorbWhich] = 0;
       ReadAbsorbWhich             = 0;
@@ -834,6 +835,14 @@ static INLINE uint32_t ReadInstruction(int32_t *timestamp, uint32_t address)
    }
 
    return instr;
+}
+
+static INLINE uint32_t ReadInstruction(int32_t *timestamp, uint32_t address)
+{
+   const __ICache *entry = &ICache[(address & 0xFFC) >> 2];
+   if (MDFN_LIKELY(entry->TV == address))
+      return entry->Data;
+   return ReadInstructionCacheMiss(timestamp, address);
 }
 
 static uint32_t NO_INLINE CPU_Exception(uint32_t code, uint32_t PC, const uint32_t NP, const uint32_t instr)
