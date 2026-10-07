@@ -7508,18 +7508,9 @@ static void renderer_ssaa_framebuffer(Renderer *self)
    unsigned right = (rect->x + rect->width + BLOCK_WIDTH - 1) / BLOCK_WIDTH;
    unsigned bottom = (rect->y + rect->height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT;
 
-   /* Exact element count is known up front (block grid), so use a single
-    * malloc'd buffer filled by index rather than a growing array. */
    unsigned resolves_count = (bottom > top && right > left) ? (bottom - top) * (right - left) : 0;
-   VkRect2D *resolves_ssaa = (VkRect2D *)malloc((resolves_count ? resolves_count : 1) * sizeof(VkRect2D));
-   unsigned resolves_n = 0;
-   { unsigned y; for (y = top; y < bottom; y++) { unsigned x; for (x = left; x < right; x++) {
-         VkRect2D r = {
-            { (int)(x * BLOCK_WIDTH % FB_WIDTH), (int)(y * BLOCK_HEIGHT % FB_HEIGHT) },
-            { BLOCK_WIDTH, BLOCK_HEIGHT }
-         };
-         resolves_ssaa[resolves_n++] = r;
-      } } }
+   unsigned x = left;
+   unsigned y = top;
 
    renderer_ensure_command_buffer(self);
 
@@ -7536,18 +7527,27 @@ static void renderer_ssaa_framebuffer(Renderer *self)
 
    /* No push constants: the unscaled resolve takes its clamp bounds from
     * textureSize() on the bound source view. */
-   { unsigned size = resolves_n;
-   { unsigned i; for (i = 0; i < size; i += 1024) {
-      void * ptr;
-      unsigned to_run = min_(size - i, 1024u);
-
-      ptr = commandbuffer_allocate_constant_data(cbh_get(&self->cmd), 1, 0, to_run * sizeof(VkRect2D));
-      memcpy(ptr, resolves_ssaa + i, to_run * sizeof(VkRect2D));
+   /* Fill the mapped dispatch data directly, in the same block order. */
+   { unsigned i; for (i = 0; i < resolves_count; i += 1024) {
+      unsigned j;
+      unsigned to_run = min_(resolves_count - i, 1024u);
+      VkRect2D *rects = (VkRect2D *)commandbuffer_allocate_constant_data(
+            cbh_get(&self->cmd), 1, 0, to_run * sizeof(VkRect2D));
+      for (j = 0; j < to_run; j++)
+      {
+         rects[j].offset.x = (int)(x * BLOCK_WIDTH % FB_WIDTH);
+         rects[j].offset.y = (int)(y * BLOCK_HEIGHT % FB_HEIGHT);
+         rects[j].extent.width = BLOCK_WIDTH;
+         rects[j].extent.height = BLOCK_HEIGHT;
+         if (++x == right)
+         {
+            x = left;
+            y++;
+         }
+      }
       commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
       commandbuffer_dispatch(cbh_get(&self->cmd), 1, 1, to_run);
    } }
-   free(resolves_ssaa);
-   }
 }
 
 static TTRect renderer_compute_vram_framebuffer_rect(Renderer *self)
