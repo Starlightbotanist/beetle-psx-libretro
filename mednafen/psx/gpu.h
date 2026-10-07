@@ -328,6 +328,7 @@ uint16_t *GPU_get_vram(void);
 void     GPU_RestoreStateP1(bool load);
 void     GPU_RestoreStateP2(bool load);
 void     GPU_RestoreStateP3(void);
+void     GPU_SyncRHIFramebuffer(void);
 
 void GPU_set_dither_upscale_shift(uint8_t factor);
 
