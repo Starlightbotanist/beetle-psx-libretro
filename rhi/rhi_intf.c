@@ -90,6 +90,24 @@ static void tt_coh_reset(void)
    tt_coh_da_pending = true;
 }
 
+/* Bulk mark wide block spans, splitting only at the VRAM row boundary. */
+static void tt_coh_mark_large_rect(uint32_t col, uint32_t row,
+      uint32_t cols, uint32_t rows, uint8_t value)
+{
+   uint32_t first = TT_COH_BW - col;
+   uint32_t ky;
+
+   if (first > cols)
+      first = cols;
+   for (ky = 0; ky < rows; ky++)
+   {
+      uint32_t offset = ((row + ky) & (TT_COH_BH - 1)) * TT_COH_BW;
+      memset(tt_coh_clean + offset + col, value, first);
+      if (cols > first)
+         memset(tt_coh_clean + offset, value, cols - first);
+   }
+}
+
 /* DIRTY: every block the rect OVERLAPS (conservative superset). */
 static void tt_coh_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
@@ -100,10 +118,15 @@ static void tt_coh_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
    by0 = (y & (TT_COH_VRAM_H - 1)) >> TT_COH_SH;
    nbx = ((x & 7) + w + 7) >> TT_COH_SH; if (nbx > TT_COH_BW) nbx = TT_COH_BW;
    nby = ((y & 7) + h + 7) >> TT_COH_SH; if (nby > TT_COH_BH) nby = TT_COH_BH;
+   if (nbx > 4)
+   {
+      tt_coh_mark_large_rect(bx0, by0, nbx, nby, 0);
+      return;
+   }
    for (ky = 0; ky < nby; ky++)
       for (kx = 0; kx < nbx; kx++)
          tt_coh_clean[((by0 + ky) & (TT_COH_BH - 1)) * TT_COH_BW
-                    + ((bx0 + kx) & (TT_COH_BW - 1))] = 0;
+                     + ((bx0 + kx) & (TT_COH_BW - 1))] = 0;
 }
 
 /* CLEAN: only blocks FULLY CONTAINED in the rect (subset). */
@@ -120,10 +143,15 @@ static void tt_coh_clean_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
       return;
    sc = cb1 - cb0; if (sc > TT_COH_BW) sc = TT_COH_BW;
    sr = rb1 - rb0; if (sr > TT_COH_BH) sr = TT_COH_BH;
+   if (sc > 4)
+   {
+      tt_coh_mark_large_rect(cb0 & (TT_COH_BW - 1), rb0, sc, sr, 1);
+      return;
+   }
    for (br = 0; br < sr; br++)
       for (bc = 0; bc < sc; bc++)
          tt_coh_clean[((rb0 + br) & (TT_COH_BH - 1)) * TT_COH_BW
-                    + ((cb0 + bc) & (TT_COH_BW - 1))] = 1;
+                     + ((cb0 + bc) & (TT_COH_BW - 1))] = 1;
 }
 
 /* True iff every block the rect touches is clean (=> whole rect coherent). */
