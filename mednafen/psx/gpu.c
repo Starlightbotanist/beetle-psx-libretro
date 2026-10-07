@@ -2913,14 +2913,6 @@ void GPU_FlushDeferredScanout(void)
 
 void GPU_RestoreStateP1(bool load)
 {
-   /* The idle schedule is not part of a state; the ForceEventUpdates()
-    * after a load puts the GPU on a fresh grid, as it always has. */
-   if (load && GPU.idle_virtual)
-   {
-      GPU.idle_virtual = false;
-      PSX_EventVirtual(PSX_EVENT_GPU, false);
-   }
-
    if (!load && !rhi_intf_has_software_renderer())
    {
       /* Pure hardware renderer: the composited framebuffer lives only on the
@@ -3055,6 +3047,16 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
    uint16_t off_u = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_u : 0;
    uint16_t off_v = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_v : 0;
    bool may_be_2d = !load && GPU.InCmd == INCMD_QUAD && GPU.may_be_2d;
+
+   /* Only a real state load invalidates the idle schedule. Renderer context
+    * rebuilds also use RestoreStateP1(true), but must leave event timing intact.
+    * StateAction's caller refreshes the schedule with ForceEventUpdates(). */
+   if (load && GPU.idle_virtual)
+   {
+      GPU.idle_virtual = false;
+      PSX_EventVirtual(PSX_EVENT_GPU, false);
+   }
+
    GPU_RestoreStateP1(load);
 
    /* Older states omit the emulated caches. Invalidate their tags so a
