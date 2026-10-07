@@ -6594,9 +6594,9 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
       gl_image_load_vertex slice[4] =
       {
          {   {   0,   0   }   },
-         {   {1023,   0   }   },
-         {   {   0, 511   }   },
-         {   {1023, 511   }   },
+         {   {VRAM_WIDTH_PIXELS,   0           }   },
+         {   {   0,               VRAM_HEIGHT }   },
+         {   {VRAM_WIDTH_PIXELS,   VRAM_HEIGHT }   },
       };
 
       if (renderer->image_load_buffer)
