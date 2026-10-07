@@ -6010,7 +6010,6 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
             Program *mipmap_energy_blur;
          } pipelines;
 
-         ImageHandle dither_lut;
          /* 256x1 R32_UINT copy of the selected CLUT, filled by
           * renderer_preserve_palette when a write is about to overwrite the
           * row in VRAM; bound at set 0 binding 5 (uPalette). */
@@ -6684,7 +6683,6 @@ static void renderer_init(Renderer *self,
 {
    ImageCreateInfo info;
    VkImageFormatProperties props;
-   ImageCreateInfo dither_info;
    /* The Renderer is malloc'd with uninitialised storage. In the pre-C++->C
     * source it was new'd, so every member was zero/default-initialised before
     * the constructor body ran; the explicit field assignments below replaced
@@ -6721,7 +6719,6 @@ static void renderer_init(Renderer *self,
    self->framebuffer.data             = NULL;
    self->palette_cache.data           = NULL;
    self->framebuffer_ssaa.data        = NULL;
-   self->dither_lut.data              = NULL;
    /* self->render_state's default member initializers were moved out when
     * RenderState seed them here (was implicit at construction). */
    render_state_init(&self->render_state);
@@ -6918,12 +6915,6 @@ static void renderer_init(Renderer *self,
    }
    commandbuffer_full_barrier(cbh_get(&self->cmd));
 
-   dither_info = image_create_info_immutable_2d_image(4, 4, VK_FORMAT_R8_UNORM, false);
-   /* This lut is biased with 4 to be able to use UNORM easily. */
-   { static const uint8_t dither_lut_data[16] = { 0, 4, 1, 5, 6, 2, 7, 3, 1, 5, 0, 4, 7, 3, 6, 2 };
-
-   ImageInitialData dither_initial = { dither_lut_data };
-   ih_move(&self->dither_lut, device_create_image(self->device, &dither_info, &dither_initial));
 
    { static const float quad_data[] = {
       -128, -128, +127, -128, -128, +127, +127, +127,
@@ -6943,7 +6934,7 @@ static void renderer_init(Renderer *self,
    }
 
    }
-   }
+
    }
    self->valid = true;}
 
@@ -8608,7 +8599,6 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
 
    if (dither)
    {
-      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 2, image_get_view(ih_get(&self->dither_lut)), StockSampler_NearestWrap);
       { struct DitherData
       {
          int32_t dither_shift;
@@ -10142,7 +10132,6 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    commandbuffer_begin_render_pass(cbh_get(&self->cmd), &info, VK_SUBPASS_CONTENTS_INLINE);
    commandbuffer_set_scissor(cbh_get(&self->cmd), &info.render_area);
    self->queue.default_scissor = info.render_area;
-   commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 2, image_get_view(ih_get(&self->dither_lut)), StockSampler_NearestWrap);
    commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 5, image_get_view(ih_get(&self->palette_cache)), StockSampler_NearestClamp);
 
    renderer_render_opaque_primitives(self);
@@ -11044,7 +11033,6 @@ static void renderer_fini(Renderer *self)
    ih_reset(&self->bias_framebuffer);
    ih_reset(&self->framebuffer);
    ih_reset(&self->framebuffer_ssaa);
-   ih_reset(&self->dither_lut);
    ih_reset(&self->palette_cache);
    ih_reset(&self->last_scanout);
    ih_reset(&self->reuseable_scanout);
