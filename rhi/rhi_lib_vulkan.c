@@ -8982,52 +8982,83 @@ static HdTextureHandle renderer_get_hd_texture_index(Renderer *self,
 }
 
 /* --- GPU-written VRAM provenance (see vram_gpu_written) --- */
-static void vram_prov_op(Renderer *self, int x, int y, int w, int h, int set)
+struct VramProvenanceRange
 {
-   int bx0, by0, bx1, by1, bx, by;
+   int first_word, last_word, first_row, last_row;
+   uint32_t first_mask, last_mask;
+};
+
+/* Derive an inclusive word/row range from the clipped pixel rectangle.
+ * Only its two edge words need masks; interior words are entirely covered. */
+RHI_INLINE bool vram_prov_range(int x, int y, int w, int h,
+      struct VramProvenanceRange *range)
+{
+   int first, last;
    if (w <= 0 || h <= 0)
-      return;
+      return false;
    if (x < 0) { w += x; x = 0; }
    if (y < 0) { h += y; y = 0; }
    if (x >= (int)FB_WIDTH || y >= (int)FB_HEIGHT || w <= 0 || h <= 0)
-      return;
-   if (w > (int)FB_WIDTH - x)  w = (int)FB_WIDTH  - x;
+      return false;
+   if (w > (int)FB_WIDTH - x)  w = (int)FB_WIDTH - x;
    if (h > (int)FB_HEIGHT - y) h = (int)FB_HEIGHT - y;
-   bx0 = x / 8; by0 = y / 8;
-   bx1 = (x + w - 1) / 8; by1 = (y + h - 1) / 8;
-   for (by = by0; by <= by1; by++)
-      for (bx = bx0; bx <= bx1; bx++)
+   first = x / 8;
+   last = (x + w - 1) / 8;
+   range->first_word = first / 32;
+   range->last_word = last / 32;
+   range->first_row = y / 8;
+   range->last_row = (y + h - 1) / 8;
+   range->first_mask = 0xffffffffu << (first & 31);
+   range->last_mask = 0xffffffffu >> (31 - (last & 31));
+   if (range->first_word == range->last_word)
+      range->first_mask &= range->last_mask;
+   return true;
+}
+
+RHI_INLINE uint32_t vram_prov_mask(const struct VramProvenanceRange *range,
+      int word)
+{
+   return word == range->first_word ? range->first_mask :
+         word == range->last_word ? range->last_mask : 0xffffffffu;
+}
+
+static void vram_prov_op(Renderer *self, int x, int y, int w, int h, int set)
+{
+   struct VramProvenanceRange range;
+   int word_x, by;
+   if (!vram_prov_range(x, y, w, h, &range))
+      return;
+   /* Each column uses the same mask on every row. */
+   for (word_x = range.first_word; word_x <= range.last_word; word_x++)
+   {
+      uint32_t mask = vram_prov_mask(&range, word_x);
+      for (by = range.first_row; by <= range.last_row; by++)
       {
-         unsigned bit  = (unsigned)(by * VRAM_PROV_BLOCKS_X + bx);
-         unsigned word = bit / 32u;
-         uint32_t m    = 1u << (bit & 31u);
+         unsigned word = (unsigned)(by * (VRAM_PROV_BLOCKS_X / 32) + word_x);
          if (set)
-            self->vram_gpu_written[word] |= m;
+            self->vram_gpu_written[word] |= mask;
          else
-            self->vram_gpu_written[word] &= ~m;
+            self->vram_gpu_written[word] &= ~mask;
       }
+   }
 }
 
 static bool vram_prov_any(Renderer *self, int x, int y, int w, int h)
 {
-   int bx0, by0, bx1, by1, bx, by;
-   if (w <= 0 || h <= 0)
+   struct VramProvenanceRange range;
+   int word_x, by;
+   if (!vram_prov_range(x, y, w, h, &range))
       return false;
-   if (x < 0) { w += x; x = 0; }
-   if (y < 0) { h += y; y = 0; }
-   if (x >= (int)FB_WIDTH || y >= (int)FB_HEIGHT || w <= 0 || h <= 0)
-      return false;
-   if (w > (int)FB_WIDTH - x)  w = (int)FB_WIDTH  - x;
-   if (h > (int)FB_HEIGHT - y) h = (int)FB_HEIGHT - y;
-   bx0 = x / 8; by0 = y / 8;
-   bx1 = (x + w - 1) / 8; by1 = (y + h - 1) / 8;
-   for (by = by0; by <= by1; by++)
-      for (bx = bx0; bx <= bx1; bx++)
+   for (word_x = range.first_word; word_x <= range.last_word; word_x++)
+   {
+      uint32_t mask = vram_prov_mask(&range, word_x);
+      for (by = range.first_row; by <= range.last_row; by++)
       {
-         unsigned bit  = (unsigned)(by * VRAM_PROV_BLOCKS_X + bx);
-         if (self->vram_gpu_written[bit / 32u] & (1u << (bit & 31u)))
+         unsigned word = (unsigned)(by * (VRAM_PROV_BLOCKS_X / 32) + word_x);
+         if (self->vram_gpu_written[word] & mask)
             return true;
       }
+   }
    return false;
 }
 
