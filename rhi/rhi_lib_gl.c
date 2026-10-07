@@ -222,6 +222,9 @@ static void gl_diag_errors(const char *site)
  * point that touches the context after the frontend may have. */
 static void gl_normalize_inherited_state(void)
 {
+   /* PS1 dithering is applied in the draw shader. Driver dithering would
+    * also alter exact VRAM uploads and copies into the RGB5_A1 target. */
+   glDisable(GL_DITHER);
    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
    glPixelStorei(GL_UNPACK_ALIGNMENT,   4);
