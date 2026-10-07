@@ -9369,7 +9369,18 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          param = (int16_t)((uint16_t)param | 0x4000u);
    }
 
-   { unsigned i; for (i = 0; i < count; i++) {
+   {
+   /* These fields are shared by every vertex of this queued primitive.
+    * Capture them after depth allocation and HD lookup, which may flush. */
+   const TextureWindow window = self->render_state.texture_window;
+   const UVRect limits = self->render_state.UVLimits;
+   const int16_t pal_x = (int16_t)self->render_state.palette_offset_x;
+   const int16_t pal_y = (int16_t)self->render_state.palette_offset_y;
+   const int16_t base_x = (int16_t)self->render_state.texture_offset_x;
+   const int16_t base_y = (int16_t)self->render_state.texture_offset_y;
+   const float mask_bit = self->render_state.force_mask_bit ? 1.0f : 0.0f;
+   unsigned i;
+   for (i = 0; i < count; i++) {
       output[i].x = x[i];
       output[i].y = y[i];
       output[i].z = z;
@@ -9377,26 +9388,25 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       output[i].color[0] = vertices[i].cf[0];
       output[i].color[1] = vertices[i].cf[1];
       output[i].color[2] = vertices[i].cf[2];
-      output[i].color[3] = 0.0f;
       output[i].fog[0]   = vertices[i].fog[0];
       output[i].fog[1]   = vertices[i].fog[1];
       output[i].fog[2]   = vertices[i].fog[2];
       output[i].fog[3]   = vertices[i].fog[3];
       output[i].uv_plane = 0;
-      output[i].window = self->render_state.texture_window;
-      output[i].pal_x = (int16_t)(self->render_state.palette_offset_x);
-      output[i].pal_y = (int16_t)(self->render_state.palette_offset_y);
+      output[i].window = window;
+      output[i].pal_x = pal_x;
+      output[i].pal_y = pal_y;
       output[i].params = param;
       output[i].u = (int16_t)(vertices[i].u);
       output[i].v = (int16_t)(vertices[i].v);
-      output[i].base_uv_x = (int16_t)(self->render_state.texture_offset_x);
-      output[i].base_uv_y = (int16_t)(self->render_state.texture_offset_y);
-      output[i].min_u = self->render_state.UVLimits.min_u;
-      output[i].min_v = self->render_state.UVLimits.min_v;
-      output[i].max_u = self->render_state.UVLimits.max_u;
-      output[i].max_v = self->render_state.UVLimits.max_v;
+      output[i].base_uv_x = base_x;
+      output[i].base_uv_y = base_y;
+      output[i].min_u = limits.min_u;
+      output[i].min_v = limits.min_v;
+      output[i].max_u = limits.max_u;
+      output[i].max_v = limits.max_v;
 
-      output[i].color[3] = self->render_state.force_mask_bit ? 1.0f : 0.0f;
+      output[i].color[3] = mask_bit;
    } }
    *hd_texture_index_out = hd_texture_index; *filtering_out = filtering; *scaled_read_out = scaled_read; *shift_out = shift; *offset_uv_out = offset_uv;
    }
@@ -9665,9 +9675,12 @@ static void renderer_build_native_interpolants(Renderer *self,
    int64_t denom;
    uint32_t planes[10];
    unsigned i, c, anchor;
+   /* renderer_build_attribs already carries the GP0 raw-texture bit.
+    * Raw texels bypass vertex colour modulation in both drawing paths. */
    bool color = self->render_state.native_color &&
          (vertices[0].color != vertices[1].color ||
-          vertices[0].color != vertices[2].color);
+          vertices[0].color != vertices[2].color) &&
+         ((uint16_t)output[0].params & 0x2000u) == 0u;
    bool uv = self->render_state.texture_mode != TextureMode_None &&
          (vertices[0].u != vertices[1].u || vertices[0].u != vertices[2].u ||
           vertices[0].v != vertices[1].v || vertices[0].v != vertices[2].v);
