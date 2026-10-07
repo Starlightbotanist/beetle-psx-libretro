@@ -1770,7 +1770,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                   clut_x, clut_y, \
                   blend_mode, \
                   2 - (MO_LIT), \
-                  DitherEnabled(gpu), \
+                  DitherEnabled(gpu) && ((TEXTURED_LIT) ? (TM_LIT) : (GOURAUD_LIT)), \
                   (BM_VAL), \
                   (ME_LIT), \
                   gpu->MaskSetOR != 0, \
@@ -1812,7 +1812,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                clut_x, clut_y, \
                blend_mode, \
                2 - (MO_LIT), \
-               DitherEnabled(gpu), \
+               DitherEnabled(gpu) && ((TEXTURED_LIT) ? (TM_LIT) : (GOURAUD_LIT)), \
                (BM_VAL), \
                (ME_LIT), \
                gpu->MaskSetOR != 0); \

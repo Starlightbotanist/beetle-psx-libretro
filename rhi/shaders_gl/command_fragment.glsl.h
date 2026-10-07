@@ -1232,6 +1232,15 @@ STRINGIZE(
        * conversion and can turn a channel into n - 1. Let the RGB5
        * attachment round it back to the same hardware value instead. */
       if (native_rgb5 != 0u &&
+          frag_texture_blend_mode == BLEND_MODE_NO_TEXTURE)
+      {
+         /* Untextured shading is an 8-bit color. Dither before reducing
+          * groups of eight to the hardware's 5-bit channel values. */
+         vec3 color8 = color.rgb * 255. + vec3(float(dither_offset));
+         output_rgb = clamp(floor((color8 + vec3(0.001)) / 8.),
+                            vec3(0.), vec3(31.)) / 31.;
+      }
+      else if (native_rgb5 != 0u &&
           frag_texture_blend_mode != BLEND_MODE_RAW_TEXTURE)
          output_rgb = floor(clamp(output_rgb, vec3(0.), vec3(1.)) * 31.) /
                       31.;
