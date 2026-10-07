@@ -10004,33 +10004,25 @@ static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
    }
 }
 
-static bool renderer_primitive_info_sort_gt(const PrimitiveInfo *a,
-      const PrimitiveInfo *b)
+/* qsort comparator: preserve the descending batch and triangle order. */
+static int renderer_primitive_info_qsort_cmp(const void *pa, const void *pb)
 {
+   const PrimitiveInfo *a = (const PrimitiveInfo *)pa;
+   const PrimitiveInfo *b = (const PrimitiveInfo *)pb;
    if (a->offset_uv != b->offset_uv)
-      return a->offset_uv > b->offset_uv;
+      return a->offset_uv > b->offset_uv ? -1 : 1;
    if (a->shift != b->shift)
-      return a->shift > b->shift;
+      return a->shift > b->shift ? -1 : 1;
    if (a->scaled_read != b->scaled_read)
-      return a->scaled_read > b->scaled_read;
+      return a->scaled_read > b->scaled_read ? -1 : 1;
    if (a->filtering != b->filtering)
-      return a->filtering > b->filtering;
+      return a->filtering > b->filtering ? -1 : 1;
    if (hd_handle_ne(&a->hd_texture_index, &b->hd_texture_index))
-      return hd_handle_gt(&a->hd_texture_index, &b->hd_texture_index);
+      return hd_handle_gt(&a->hd_texture_index, &b->hd_texture_index) ? -1 : 1;
    if (a->scissor_index != b->scissor_index)
-      return a->scissor_index > b->scissor_index;
-   return a->triangle_index > b->triangle_index;
-}
-
-/* qsort comparator: descending order, matching primitive_info_sort_gt. */
-static int renderer_primitive_info_qsort_cmp(const void *pa, const void *pb){
-   const PrimitiveInfo *a = (const PrimitiveInfo *)(pa);
-   const PrimitiveInfo *b = (const PrimitiveInfo *)(pb);
-   if (renderer_primitive_info_sort_gt(a, b))
-      return -1;
-   if (renderer_primitive_info_sort_gt(b, a))
-      return 1;
-   return 0;
+      return a->scissor_index > b->scissor_index ? -1 : 1;
+   return (a->triangle_index < b->triangle_index) -
+      (a->triangle_index > b->triangle_index);
 }
 
 static void renderer_dispatch(Renderer *self,
