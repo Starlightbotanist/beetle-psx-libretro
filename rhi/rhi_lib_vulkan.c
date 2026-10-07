@@ -5540,9 +5540,10 @@ static bool semi_transparent_state_eq(const struct SemiTransparentState *a,
        * clear-quad positional initializers zero it, which is exactly the
        * no-cue encoding. */
       float fog[4];
-      /* Two wrapped 8.12 UV planes; ordinary/enhanced vertices leave these
-       * zero. Keeping the original UVs preserves filtered/HD fallback. */
-      uint32_t uv_plane[4];
+      /* One native UV word; the remaining coefficients share packed XY/w
+       * and the zero depth-cue factor. Keep original UVs, depth, enhancement
+       * limits and far colour intact for filtered/HD shading. */
+      uint32_t uv_plane;
    };
 
 /* Read both payloads as bits. Ordinary vertices carry float colour/fog;
@@ -5550,9 +5551,10 @@ static bool semi_transparent_state_eq(const struct SemiTransparentState *a,
  * their original packed colour. The vertex shader selects the interpretation. */
 static void renderer_set_interpolant_attribs(CommandBuffer *cmd)
 {
+   commandbuffer_set_vertex_attrib(cmd, 0, 0, VK_FORMAT_R32G32B32A32_UINT, offsetof(BufferVertex, x));
    commandbuffer_set_vertex_attrib(cmd, 1, 0, VK_FORMAT_R32G32B32A32_UINT, offsetof(BufferVertex, color));
    commandbuffer_set_vertex_attrib(cmd, 6, 0, VK_FORMAT_R32G32B32A32_UINT, offsetof(BufferVertex, fog));
-   commandbuffer_set_vertex_attrib(cmd, 7, 0, VK_FORMAT_R32G32B32A32_UINT, offsetof(BufferVertex, uv_plane));
+   commandbuffer_set_vertex_attrib(cmd, 7, 0, VK_FORMAT_R32_UINT, offsetof(BufferVertex, uv_plane));
 }
 
 /* Persistent GPU-written VRAM provenance at 8x8-block granularity,
@@ -6190,7 +6192,6 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
       renderer_set_opaque_primitive_spec_constants(self, TransMode_SemiTransOpaque);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
       renderer_set_interpolant_attribs(cbh_get(&self->cmd));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
@@ -6211,7 +6212,6 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
       renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
       renderer_set_interpolant_attribs(cbh_get(&self->cmd));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x)); /* Pad to support AMD */
@@ -9351,7 +9351,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       output[i].fog[1]   = vertices[i].fog[1];
       output[i].fog[2]   = vertices[i].fog[2];
       output[i].fog[3]   = vertices[i].fog[3];
-      memset(output[i].uv_plane, 0, sizeof(output[i].uv_plane));
+      output[i].uv_plane = 0;
       output[i].window = self->render_state.texture_window;
       output[i].pal_x = (int16_t)(self->render_state.palette_offset_x);
       output[i].pal_y = (int16_t)(self->render_state.palette_offset_y);
@@ -9686,8 +9686,18 @@ static void renderer_build_native_interpolants(Renderer *self,
          renderer_set_native_color_plane(output + i, planes, vertices[i].color);
       if (uv)
       {
+         uint32_t xy = (uint16_t)x[i] | ((uint32_t)(uint16_t)y[i] << 16);
+         /* Leave depth untouched; replace only the packed XY and UV lanes. */
+         memcpy(&output[i].x, &xy, sizeof(xy));
+         memcpy(&output[i].y, planes + 6, sizeof(uint32_t));
+         memcpy(&output[i].w, planes + 7, sizeof(uint32_t));
          output[i].params = (int16_t)((uint16_t)output[i].params | 0x0008u);
-         memcpy(output[i].uv_plane, planes + 6, sizeof(output[i].uv_plane));
+         output[i].uv_plane = planes[8];
+         /* Native interpolation excludes PGXP; its GP0 vertices have no
+          * depth-cue sidecar. Only the zero cue factor is reused here, not
+          * the far colour, depth, original UVs or enhancement limits. */
+         VK_ASSERT(vertices[i].fog[3] == 0.0f);
+         memcpy(output[i].fog + 3, planes + 9, sizeof(uint32_t));
       }
    }
 }
@@ -10254,7 +10264,6 @@ static void renderer_render_opaque_primitives(Renderer *self){
    commandbuffer_set_opaque_state(cbh_get(&self->cmd));
    commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
    commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
    renderer_set_interpolant_attribs(cbh_get(&self->cmd));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
    renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
@@ -10411,7 +10420,6 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
    commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
    commandbuffer_set_depth_test(cbh_get(&self->cmd), true, false);
    commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
    renderer_set_interpolant_attribs(cbh_get(&self->cmd));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));

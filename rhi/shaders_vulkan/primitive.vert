@@ -1,13 +1,13 @@
 #version 450
 
-layout(location = 0) in vec4 Position;
+layout(location = 0) in highp uvec4 Position;
 layout(location = 1) in highp uvec4 Color;
 layout(location = 3) in mediump ivec3 Param;
 #ifdef TEXTURED
 layout(location = 2) in mediump uvec4 Window;
 layout(location = 4) in ivec4 UV;
 layout(location = 5) in highp uvec4 UVRange;
-layout(location = 7) in highp uvec4 UVPlane;
+layout(location = 7) in highp uint UVPlane;
 layout(location = 10) flat out highp uvec2 vUVOrigin;
 layout(location = 11) flat out highp uvec2 vUVDX;
 layout(location = 12) flat out highp uvec2 vUVDY;
@@ -37,11 +37,21 @@ layout(constant_id = 5) const int OFFSET_UV = 0;
 
 void main()
 {
+   vec4 position = uintBitsToFloat(Position);
+#ifdef TEXTURED
+   if ((uint(Param.z) & 0x0008u) != 0u)
+   {
+      /* Native positions are signed-16 integral XY, with unchanged depth.
+       * The other two position lanes carry the first wrapped UV plane. */
+      ivec2 xy = ivec2(int(Position.x << 16u) >> 16, int(Position.x) >> 16);
+      position = vec4(vec2(xy), uintBitsToFloat(Position.z), 1.0);
+   }
+#endif
    vec2 off = vec2(0.5, 0.5);
 #ifdef UNSCALED
-   gl_Position = vec4((Position.xy + off) / FB_SIZE * 2.0 - 1.0, Position.z, 1.0) * Position.w;
+   gl_Position = vec4((position.xy + off) / FB_SIZE * 2.0 - 1.0, position.z, 1.0) * position.w;
 #else
-   gl_Position = vec4(Position.xy / FB_SIZE * 2.0 - 1.0, Position.z, 1.0) * Position.w;
+   gl_Position = vec4(position.xy / FB_SIZE * 2.0 - 1.0, position.z, 1.0) * position.w;
 #endif
    if ((uint(Param.z) & 0x0004u) != 0u)
    {
@@ -72,8 +82,12 @@ void main()
    else
       vUV = vec2(UV.xy);
 #endif
-   uvec2 low = UVPlane.xz;
-   uvec2 high = UVPlane.yw;
+   uvec2 low = uvec2(Position.y, UVPlane);
+   uvec2 high = uvec2(Position.w, Fog.w);
+   /* The GP0 native path has no PGXP cue. Restore the zero factor while
+    * retaining the far colour and all enhanced shading inputs. */
+   if ((uint(Param.z) & 0x0008u) != 0u)
+      vFog.a = 0.0;
    vUVOrigin = low & 0xfffffu;
    vUVDX = (low >> 20u) | ((high & 0xffu) << 12u);
    vUVDY = (high >> 8u) & 0xfffffu;
