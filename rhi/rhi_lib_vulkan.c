@@ -9664,6 +9664,28 @@ static void renderer_build_native_line_colors(Renderer *self,
             vertices[i < 2 || i == 3 ? 0 : 1].color);
 }
 
+/* Build one wrapped 8.12 plane from three endpoint values. */
+RHI_INLINE void renderer_build_triangle_interpolant(uint32_t *packed,
+      const int32_t *x, const int32_t *y, const int32_t *value,
+      int64_t denom, unsigned anchor)
+{
+   uint32_t dx, dy, origin;
+   /* A constant channel has zero slopes, regardless of triangle geometry. */
+   if (value[0] == value[1] && value[0] == value[2])
+   {
+      renderer_pack_interpolant(packed,
+            ((uint32_t)value[0] << 12) + 2048u, 0u, 0u);
+      return;
+   }
+   dx = (uint32_t)(((int64_t)(value[1] - value[0]) * (y[2] - y[1]) -
+         (int64_t)(value[2] - value[1]) * (y[1] - y[0])) * 4096 / denom);
+   dy = (uint32_t)(((int64_t)(x[1] - x[0]) * (value[2] - value[1]) -
+         (int64_t)(x[2] - x[1]) * (value[1] - value[0])) * 4096 / denom);
+   origin = ((uint32_t)value[anchor] << 12) + 2048u -
+         dx * (uint32_t)x[anchor] - dy * (uint32_t)y[anchor];
+   renderer_pack_interpolant(packed, origin, dx, dy);
+}
+
 /* Build from GP0 bytes and the queued, draw-offset-adjusted positions.
  * Unsigned arithmetic preserves the rasterizer's wrapped 8.12 accumulator.
  * Planes travel with their triangle, so flush/reset/restore retain no side
@@ -9710,19 +9732,13 @@ static void renderer_build_native_interpolants(Renderer *self,
    for (c = 0; c < 5; c++)
    {
       int32_t value[3];
-      uint32_t dx, dy, origin;
       if (c < 3 ? !color : !uv)
          continue;
       for (i = 0; i < 3; i++)
          value[i] = c < 3 ? ((vertices[i].color >> (c * 8)) & 255) :
                (c == 3 ? vertices[i].u : vertices[i].v);
-      dx = (uint32_t)(((int64_t)(value[1] - value[0]) * (y[2] - y[1]) -
-            (int64_t)(value[2] - value[1]) * (y[1] - y[0])) * 4096 / denom);
-      dy = (uint32_t)(((int64_t)(x[1] - x[0]) * (value[2] - value[1]) -
-            (int64_t)(x[2] - x[1]) * (value[1] - value[0])) * 4096 / denom);
-      origin = ((uint32_t)value[anchor] << 12) + 2048u -
-            dx * (uint32_t)x[anchor] - dy * (uint32_t)y[anchor];
-      renderer_pack_interpolant(planes + c * 2, origin, dx, dy);
+      renderer_build_triangle_interpolant(planes + c * 2,
+            x, y, value, denom, anchor);
    }
    for (i = 0; i < 3; i++)
    {
