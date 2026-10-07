@@ -1,12 +1,16 @@
 #version 450
 
 layout(location = 0) in vec4 Position;
-layout(location = 1) in vec4 Color;
+layout(location = 1) in highp uvec4 Color;
 layout(location = 3) in mediump ivec3 Param;
 #ifdef TEXTURED
 layout(location = 2) in mediump uvec4 Window;
 layout(location = 4) in ivec4 UV;
 layout(location = 5) in highp uvec4 UVRange;
+layout(location = 7) in highp uvec4 UVPlane;
+layout(location = 10) flat out highp uvec2 vUVOrigin;
+layout(location = 11) flat out highp uvec2 vUVDX;
+layout(location = 12) flat out highp uvec2 vUVDY;
 
 layout(location = 1) out highp vec2 vUV;
 layout(location = 3) flat out mediump ivec2 vBaseUV;
@@ -20,8 +24,11 @@ layout(location = 0) out highp vec4 vColor;
 layout(location = 2) flat out mediump ivec3 vParam;
 /* Depth-cue sidecar: far colour + blend factor. t == 0 (the no-cue
  * encoding) makes the fragment mix the identity. */
-layout(location = 6) in vec4 Fog;
-layout(location = 6) out mediump vec4 vFog;
+layout(location = 6) in highp uvec4 Fog;
+layout(location = 6) out highp vec4 vFog;
+layout(location = 7) flat out highp uvec3 vColorOrigin;
+layout(location = 8) flat out highp uvec3 vColorDX;
+layout(location = 9) flat out highp uvec3 vColorDY;
 
 const vec2 FB_SIZE = vec2(1024.0, 512.0);
 //const vec4 texture_limits = vec4(0.0, 0.0, 1024.0, 1024.0);
@@ -36,8 +43,24 @@ void main()
 #else
    gl_Position = vec4(Position.xy / FB_SIZE * 2.0 - 1.0, Position.z, 1.0) * Position.w;
 #endif
-   vColor = Color;
-   vFog   = Fog;
+   if ((uint(Param.z) & 0x0004u) != 0u)
+   {
+      /* Each pair holds an 8.12 origin and two wrapped 8.12 slopes.
+       * Decode once per vertex; fragments then use integer pixel positions. */
+      uvec3 low = uvec3(Color.x, Color.z, Fog.x);
+      uvec3 high = uvec3(Color.y, Color.w, Fog.y);
+      vColorOrigin = low & 0xfffffu;
+      vColorDX = (low >> 20u) | ((high & 0xffu) << 12u);
+      vColorDY = (high >> 8u) & 0xfffffu;
+      vColor = vec4((uvec4(Fog.z) >> uvec4(0u, 8u, 16u, 24u)) & 255u) / 255.0;
+      vFog = vec4(0.0);
+   }
+   else
+   {
+      vColor = uintBitsToFloat(Color);
+      vFog = uintBitsToFloat(Fog);
+      vColorOrigin = vColorDX = vColorDY = uvec3(0u);
+   }
    vParam = Param;
 #ifdef TEXTURED
    // iCB: Offset UVs by half a pixel to account for rounding errors in projection
@@ -49,6 +72,11 @@ void main()
    else
       vUV = vec2(UV.xy);
 #endif
+   uvec2 low = UVPlane.xz;
+   uvec2 high = UVPlane.yw;
+   vUVOrigin = low & 0xfffffu;
+   vUVDX = (low >> 20u) | ((high & 0xffu) << 12u);
+   vUVDY = (high >> 8u) & 0xfffffu;
    vBaseUV = UV.zw;
    vWindow = ivec4(Window);
    vTexLimits = ivec4(UVRange);
