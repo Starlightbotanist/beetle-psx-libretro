@@ -5872,6 +5872,25 @@ static void gl_defer_dispatch(void *user, const rhi_defer_op_t *op)
    }
 }
 
+static bool gl_context_preserve_vram(void)
+{
+   uint16_t *vram = GPU_get_vram();
+
+   /* With a software framebuffer the CPU copy is already authoritative.
+    * Otherwise retain GPU-rendered pixels before releasing their textures.
+    * rhi_gl_close marks shutdown invalid before GPU_Destroy frees the copy. */
+   if (static_renderer.state != GL_STATE_VALID ||
+       !static_renderer.state_data || !vram || has_software_fb)
+      return true;
+
+   if (!rhi_intf_read_vram(0, 0, VRAM_WIDTH_PIXELS, VRAM_HEIGHT, vram))
+   {
+      log_cb(RETRO_LOG_WARN, "[gl_context] Could not preserve VRAM before rebuilding the renderer.\n");
+      return false;
+   }
+   return true;
+}
+
 static void gl_context_reset(void)
 {
    /* Resolve the GL function-pointer table for this context.
@@ -5910,6 +5929,8 @@ static void gl_context_reset(void)
     * mirroring vk_context_reset. */
    if (static_renderer.state_data)
    {
+      if (!gl_context_preserve_vram())
+         return;
       gl_renderer_free(static_renderer.state_data);
       free(static_renderer.state_data);
       static_renderer.state_data = NULL;
@@ -5984,6 +6005,7 @@ static void gl_context_reset(void)
 
 static void gl_context_destroy(void)
 {
+   gl_context_preserve_vram();
    if (static_renderer.state_data)
    {
       gl_renderer_free(static_renderer.state_data);
