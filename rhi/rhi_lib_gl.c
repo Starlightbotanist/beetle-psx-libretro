@@ -1012,6 +1012,10 @@ struct gl_renderer {
    bool fb_feedback_texture_failed;
    /* gl_framebuffer used as an output when running draw commands */
    gl_texture fb_out;
+   /* Draws need depth/stencil; uploads and mirrors are color-only. */
+   gl_framebuffer fb_out_draw;
+   gl_framebuffer fb_out_upload;
+   gl_framebuffer fb_texture_mirror;
    /* Exact internal format selected when fb_out was allocated. */
    GLenum fb_out_internal_format;
 
@@ -1843,11 +1847,9 @@ fail:
 static void gl_framebuffer_init(struct gl_framebuffer *fb,
       struct gl_texture* color_texture)
 {
-   GLuint id = 0;
    GLenum col_attach_0 = GL_COLOR_ATTACHMENT0;
-   glGenFramebuffers(1, &id);
-
-   fb->id                    = id;
+   if (!fb->id)
+      glGenFramebuffers(1, &fb->id);
 
    fb->_color_texture.id     = color_texture->id;
    fb->_color_texture.width  = color_texture->width;
@@ -1873,6 +1875,16 @@ static void gl_framebuffer_init(struct gl_framebuffer *fb,
                0,
                (GLsizei) color_texture->width,
                (GLsizei) color_texture->height);
+}
+
+static void gl_renderer_free_framebuffers(gl_renderer *renderer)
+{
+   glDeleteFramebuffers(1, &renderer->fb_out_draw.id);
+   renderer->fb_out_draw.id = 0;
+   glDeleteFramebuffers(1, &renderer->fb_out_upload.id);
+   renderer->fb_out_upload.id = 0;
+   glDeleteFramebuffers(1, &renderer->fb_texture_mirror.id);
+   renderer->fb_texture_mirror.id = 0;
 }
 
 static void gl_texture_init(
@@ -3095,7 +3107,6 @@ static gl_draw_buffer *gl_draw_buffer_build(const char *vertex_shader_src,
 
 static void gl_renderer_draw(gl_renderer *renderer)
 {
-   gl_framebuffer _fb;
    int16_t x;
    int16_t y;
    size_t bi;
@@ -3139,7 +3150,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
    }
 
    /* Bind the out framebuffer */
-   gl_framebuffer_init(&_fb, &renderer->fb_out);
+   gl_framebuffer_init(&renderer->fb_out_draw, &renderer->fb_out);
 
 #ifdef HAVE_OPENGLES3
    glFramebufferTexture2D( GL_DRAW_FRAMEBUFFER,
@@ -3404,7 +3415,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
    renderer->set_mask = false;
    renderer->force_mask = false;
 
-   glDeleteFramebuffers(1, &_fb.id);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
 
 static void gl_renderer_upload_textures(
@@ -3418,7 +3429,6 @@ static void gl_renderer_upload_textures(
    uint16_t y_start;
    uint16_t y_end;
    gl_image_load_vertex slice[4];
-   gl_framebuffer _fb;
 
    if (!renderer)
       return;
@@ -3482,7 +3492,7 @@ static void gl_renderer_upload_textures(
    glDisable(GL_BLEND);
 
    /* Bind the output framebuffer */
-   gl_framebuffer_init(&_fb, &renderer->fb_out);
+   gl_framebuffer_init(&renderer->fb_out_upload, &renderer->fb_out);
 
    if (!gl_draw_buffer_is_empty(renderer->image_load_buffer))
       gl_draw_buffer_draw(renderer->image_load_buffer, GL_TRIANGLE_STRIP);
@@ -3492,7 +3502,7 @@ static void gl_renderer_upload_textures(
 #ifdef DEBUG
    get_error("gl_renderer_upload_textures");
 #endif
-   glDeleteFramebuffers(1, &_fb.id);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
 
 static void get_variables(uint8_t *upscaling, bool *display_vram)
@@ -4776,6 +4786,8 @@ static void gl_renderer_free(gl_renderer *renderer)
    renderer->fb_feedback_texture.height = 0;
    renderer->fb_feedback_texture_failed = false;
 
+   gl_renderer_free_framebuffers(renderer);
+
    glDeleteTextures(1, &renderer->fb_out.id);
    renderer->fb_out.id     = 0;
    renderer->fb_out.width  = 0;
@@ -5210,6 +5222,8 @@ static bool retro_refresh_variables(gl_renderer *renderer)
       if (renderer->fb_out_fp16)
          texture_storage = GL_RGBA16F;
 
+      /* Release attachment references before replacing their textures. */
+      gl_renderer_free_framebuffers(renderer);
       glDeleteTextures(1, &renderer->fb_out.id);
       renderer->fb_out.id     = 0;
       renderer->fb_out.width  = 0;
@@ -6808,7 +6822,6 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
     * frame to make offscreen rendering kinda sorta work. Very messy
     * and slow. */
    {
-      gl_framebuffer _fb;
       gl_image_load_vertex slice[4] =
       {
          {   {   0,   0   }   },
@@ -6835,7 +6848,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
        * gl_draw_buffer_draw modifies either, so they are still off
        * here.  Two reflexive disables removed. */
 
-      gl_framebuffer_init(&_fb, &renderer->fb_texture);
+      gl_framebuffer_init(&renderer->fb_texture_mirror, &renderer->fb_texture);
 
       if (renderer->image_load_buffer->program)
       {
@@ -6846,7 +6859,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
       if (!gl_draw_buffer_is_empty(renderer->image_load_buffer))
          gl_draw_buffer_draw(renderer->image_load_buffer, GL_TRIANGLE_STRIP);
 
-      glDeleteFramebuffers(1, &_fb.id);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
    }
 
    /* The unconditional full-VRAM fb_out -> fb_texture copy above makes
@@ -7620,7 +7633,6 @@ void rhi_gl_load_image(
       bool mask_test, bool set_mask)
 {
    gl_renderer *renderer;
-   gl_framebuffer _fb;
    uint16_t top_left[2];
    uint16_t dimensions[2];
    uint16_t x_start;
@@ -7771,7 +7783,7 @@ void rhi_gl_load_image(
    glDisable(GL_BLEND);
 
    /* Bind the output framebuffer */
-   gl_framebuffer_init(&_fb, &renderer->fb_out);
+   gl_framebuffer_init(&renderer->fb_out_upload, &renderer->fb_out);
 
    if (!gl_draw_buffer_is_empty(renderer->image_load_buffer))
       gl_draw_buffer_draw(renderer->image_load_buffer, GL_TRIANGLE_STRIP);
@@ -7787,7 +7799,7 @@ void rhi_gl_load_image(
    get_error("rhi_gl_load_image");
 #endif
 
-   glDeleteFramebuffers(1, &_fb.id);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
    /* Diagnostic restore roundtrip: after a full-VRAM upload (the
     * savestate-restore path), read the framebuffer straight back and
@@ -8637,8 +8649,7 @@ void rhi_gl_fill_rect(
    /* This scope is intentional, just like in the Rust version */
    {
       /* Bind the out framebuffer */
-      gl_framebuffer _fb;
-      gl_framebuffer_init(&_fb, &renderer->fb_out);
+      gl_framebuffer_init(&renderer->fb_out_draw, &renderer->fb_out);
 
 #ifdef HAVE_OPENGLES3
       glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,
@@ -8661,7 +8672,7 @@ void rhi_gl_fill_rect(
       glClearStencil(0);
       glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-      glDeleteFramebuffers(1, &_fb.id);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
    }
 
    /* Reconfigure the draw area */
