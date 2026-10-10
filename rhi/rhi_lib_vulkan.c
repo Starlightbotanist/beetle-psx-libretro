@@ -17503,6 +17503,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       { CommandBufferVec cmds = { NULL, 0, 0 };
 
       VkSubmitInfo submit;
+      VkCommandBuffer single_cmd;
 
       SemaphoreVec waits[2]   = { { NULL, 0, 0 }, { NULL, 0, 0 } };
       SemaphoreVec signals[2] = { { NULL, 0, 0 }, { NULL, 0, 0 } };
@@ -17526,18 +17527,27 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       VkPipelineStageVec_clear(&data->wait_stages);
       sem_handle_vec_clear(&data->wait_semaphores);
 
-      { int _si; for (_si = 0; _si < submissions->count; _si++)
+      /* The usual one-buffer submission needs no temporary vector storage. */
+      if (submissions->count == 1)
+         single_cmd = commandbuffer_get_command_buffer(cbh_get(&submissions->items[0]));
+      else
       {
-         CommandBufferHandle *cmd = &submissions->items[_si];
-         VkCommandBuffer _cb = commandbuffer_get_command_buffer(cbh_get(cmd));
-         CommandBufferVec_push(&cmds, &_cb);
-      } }
+         int _si;
+         for (_si = 0; _si < submissions->count; _si++)
+         {
+            CommandBufferHandle *cmd = &submissions->items[_si];
+            VkCommandBuffer _cb = commandbuffer_get_command_buffer(cbh_get(cmd));
+            CommandBufferVec_push(&cmds, &_cb);
+         }
+      }
 
       /* Nonempty pending buffers form exactly one queue submission. */
       memset(&submit, 0, sizeof(submit));
       submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      submit.commandBufferCount = CommandBufferVec_size(&cmds);
-      submit.pCommandBuffers = CommandBufferVec_data(&cmds);
+      submit.commandBufferCount = submissions->count == 1 ?
+         1 : CommandBufferVec_size(&cmds);
+      submit.pCommandBuffers = submissions->count == 1 ?
+         &single_cmd : CommandBufferVec_data(&cmds);
 
       cleared_fence = fence ? fencemanager_request_cleared_fence(&self->managers.fence) : VK_NULL_HANDLE;
 
