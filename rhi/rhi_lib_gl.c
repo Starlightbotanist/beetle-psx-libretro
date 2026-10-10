@@ -6999,6 +6999,13 @@ void rhi_gl_set_draw_area(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
       return;
    }
 
+   /* Rewriting the same area does not change queued primitives. */
+   if (renderer->config.draw_area_top_left[0] == x0 &&
+       renderer->config.draw_area_top_left[1] == y0 &&
+       renderer->config.draw_area_bot_right[0] == x1 + 1 &&
+       renderer->config.draw_area_bot_right[1] == y1 + 1)
+      return;
+
    /* Finish drawing anything in the current area */
    if (!gl_draw_buffer_is_empty(renderer->command_buffer))
       gl_renderer_draw(renderer);
