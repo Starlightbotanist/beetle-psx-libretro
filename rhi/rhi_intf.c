@@ -650,6 +650,8 @@ void rhi_intf_set_draw_offset(int16_t x, int16_t y)
 void rhi_intf_set_draw_area(uint16_t x0, uint16_t y0,
                             uint16_t x1, uint16_t y1)
 {
+   uint16_t width  = (x1 >= x0) ? (uint16_t)(x1 - x0 + 1) : 0;
+   uint16_t height = (y1 >= y0) ? (uint16_t)(y1 - y0 + 1) : 0;
 #ifdef RHI_DUMP
    rhi_dump_set_draw_area(x0, y0, x1, y1);
 #endif
@@ -658,11 +660,16 @@ void rhi_intf_set_draw_area(uint16_t x0, uint16_t y0,
          (unsigned)x0, (unsigned)y0, (unsigned)x1, (unsigned)y1);
 #endif
 
-   tt_coh_dax = x0;
-   tt_coh_day = y0;
-   tt_coh_daw = (x1 >= x0) ? (uint16_t)(x1 - x0 + 1) : 0;
-   tt_coh_dah = (y1 >= y0) ? (uint16_t)(y1 - y0 + 1) : 0;
-   tt_coh_da_pending = true;
+   /* A repeated area is already dirty unless a clean operation re-armed it. */
+   if (tt_coh_dax != x0 || tt_coh_day != y0 ||
+       tt_coh_daw != width || tt_coh_dah != height)
+   {
+      tt_coh_dax = x0;
+      tt_coh_day = y0;
+      tt_coh_daw = width;
+      tt_coh_dah = height;
+      tt_coh_da_pending = true;
+   }
 
    switch (rhi_type)
    {
