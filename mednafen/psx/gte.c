@@ -30,6 +30,7 @@
 #include "gte.h"
 
 extern bool psx_gte_overclock;
+extern int psx_pgxp_fog;
 
 /* Notes:
 
@@ -1634,7 +1635,7 @@ static INLINE void DPC(uint32_t instr)
     * step, so the renderer's unsaturated mix would diverge from the console
     * at the very endpoints the feature promises to match. Byte-range differences cannot clamp here; the check is uniformity.
     * Skipping the cue degrades to the architectural post-fog bytes. */
-   if (sf)
+   if (sf && psx_pgxp_fog)
    {
       int fog_ok = 1;
       { int fi; for (fi = 0; fi < 3; fi++) {
@@ -1688,7 +1689,7 @@ static int32_t DCPL(uint32_t instr)
     * step, so the renderer's unsaturated mix would diverge from the console
     * at the very endpoints the feature promises to match. DCPL's lit term reaches the clamp with bright over-range IR.
     * Skipping the cue degrades to the architectural post-fog bytes. */
-   if (sf)
+   if (sf && psx_pgxp_fog)
    {
       int fog_ok = 1;
       { int fi; for (fi = 0; fi < 3; fi++) {
@@ -1743,7 +1744,7 @@ static int32_t DPCS(uint32_t instr)
     * step, so the renderer's unsaturated mix would diverge from the console
     * at the very endpoints the feature promises to match. Byte-range differences cannot clamp here; the check is uniformity.
     * Skipping the cue degrades to the architectural post-fog bytes. */
-   if (sf)
+   if (sf && psx_pgxp_fog)
    {
       int fog_ok = 1;
       { int fi; for (fi = 0; fi < 3; fi++) {
@@ -1802,7 +1803,7 @@ static int32_t INTPL(uint32_t instr)
    MAC_to_IR(lm);
    /* Same guards as the other cue ops; IR reaches i16 full range, so the
     * difference against FC genuinely can clamp here. */
-   if (sf)
+   if (sf && psx_pgxp_fog)
    {
       int fog_ok = 1;
       int32_t fog_ir[3];
