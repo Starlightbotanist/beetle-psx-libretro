@@ -444,6 +444,7 @@ static uint32_t color_stats[4]; /* attempts, hits, value miss, quant miss */
  * used no matter how bright it is. Buckets are on the peak channel relative
  * to the 255 ceiling, so bucket 0 is a colour that would clip slightly and
  * bucket 3 is one the GTE computed at more than twice white. */
+#if PGXP_DIAG
 static uint32_t color_over;          /* accepted words with any channel > 255 */
 static uint32_t color_over_bucket[4];/* (1,1.25] (1.25,1.5] (1.5,2] (2,inf) */
 static float    color_peak;          /* largest channel seen, 8-bit scale */
@@ -469,6 +470,10 @@ static void color_note_range(float r, float g, float b)
    else if (ratio <= 2.0f)  color_over_bucket[2]++;
    else                     color_over_bucket[3]++;
 }
+
+#else
+#define color_note_range(r, g, b) ((void)0)
+#endif
 
 /* Requantize a shadow channel exactly as gte.c's MAC_to_RGB_FIFO did:
  * MACn >> 4 is an arithmetic shift (floor), then Lm_C saturates to
@@ -560,6 +565,7 @@ int PGXP_GetFog(const uint32_t offset, const uint32_t* addr,
 
 void PGXP_GetColorRangeStats(uint32_t *over, uint32_t buckets[4], float *peak)
 {
+#if PGXP_DIAG
 	if (over)
 		*over = color_over;
 	if (buckets)
@@ -571,6 +577,14 @@ void PGXP_GetColorRangeStats(uint32_t *over, uint32_t buckets[4], float *peak)
 	}
 	if (peak)
 		*peak = color_peak;
+#else
+	if (over)
+		*over = 0;
+	if (buckets)
+		buckets[0] = buckets[1] = buckets[2] = buckets[3] = 0;
+	if (peak)
+		*peak = 0.0f;
+#endif
 }
 
 void PGXP_GetColorStats(uint32_t stats[4])
