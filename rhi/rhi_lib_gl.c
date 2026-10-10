@@ -2316,13 +2316,17 @@ static uint64_t gl_vram_sync_tile_mask(unsigned x, unsigned y,
    unsigned local_x = x0 - tile_x;
    unsigned row_width = x1 - x0;
    uint64_t row_mask = ((1u << row_width) - 1u) << local_x;
-   uint64_t mask = 0;
-   unsigned py;
+   unsigned rows = y1 - y0;
+   unsigned shift = (y0 - tile_y) * GL_VRAM_SYNC_TILE_SIZE;
+   uint64_t row_bits;
 
-   for (py = y0; py < y1; py++)
-      mask |= row_mask << ((py - tile_y) * GL_VRAM_SYNC_TILE_SIZE);
+   if (!rows)
+      return 0;
 
-   return mask;
+   /* Replicate the row byte, then retain only the intersecting rows.
+    * rows is 1..8, so neither shift can reach the 64-bit type width. */
+   row_bits = (UINT64_MAX >> ((GL_VRAM_SYNC_TILE_SIZE - rows) * 8)) << shift;
+   return (row_mask * UINT64_C(0x0101010101010101)) & row_bits;
 }
 
 static bool gl_vram_sync_rect_is_dirty(gl_renderer *renderer,
@@ -2592,25 +2596,35 @@ static void gl_vram_sync_mark_rect(gl_renderer *renderer,
          unsigned write_y1 = y + h;
          unsigned wi;
 
-         /* Preserve provenance for neighboring pixels. A newer primitive
-          * supersedes only the pixels it actually covers. */
-         for (wi = 0; wi < GL_VRAM_SYNC_WRITERS_PER_TILE; wi++)
+         if (mask == UINT64_MAX)
          {
-            renderer->vram_sync.tiles[ty][tx]
-                  .writers[wi].pixel_mask &= ~mask;
-            if (!renderer->vram_sync.tiles[ty][tx]
-                     .writers[wi].pixel_mask &&
-                slot == GL_VRAM_SYNC_WRITERS_PER_TILE)
-               slot = wi;
-            if (renderer->vram_sync.tiles[ty][tx]
-                     .writers[wi].sequence < oldest_sequence)
+            /* Every older pixel is superseded; slot zero is the first empty
+             * slot regardless of the writers' previous sequence numbers. */
+            slot = 0;
+            for (wi = 0; wi < GL_VRAM_SYNC_WRITERS_PER_TILE; wi++)
+               renderer->vram_sync.tiles[ty][tx].writers[wi].pixel_mask = 0;
+         }
+         else
+         {
+            /* Preserve provenance for neighboring pixels. A newer primitive
+             * supersedes only the pixels it actually covers. */
+            for (wi = 0; wi < GL_VRAM_SYNC_WRITERS_PER_TILE; wi++)
             {
-               oldest_sequence = renderer->vram_sync.tiles[ty][tx]
-                     .writers[wi].sequence;
-               oldest_slot = wi;
+               renderer->vram_sync.tiles[ty][tx]
+                     .writers[wi].pixel_mask &= ~mask;
+               if (!renderer->vram_sync.tiles[ty][tx]
+                        .writers[wi].pixel_mask &&
+                   slot == GL_VRAM_SYNC_WRITERS_PER_TILE)
+                  slot = wi;
+               if (renderer->vram_sync.tiles[ty][tx]
+                        .writers[wi].sequence < oldest_sequence)
+               {
+                  oldest_sequence = renderer->vram_sync.tiles[ty][tx]
+                        .writers[wi].sequence;
+                  oldest_slot = wi;
+               }
             }
          }
-
          /* A tile can contain more independent writers than the fixed-size
           * provenance list. Merge the oldest record into the new one rather
           * than losing dirty pixels. The resulting producer rectangle is
