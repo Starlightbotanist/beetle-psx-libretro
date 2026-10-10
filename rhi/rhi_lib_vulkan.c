@@ -10209,12 +10209,47 @@ static int renderer_primitive_info_qsort_cmp(const void *pa, const void *pb)
       (a->triangle_index > b->triangle_index);
 }
 
+/* Submission queues often have one batch state and increasing triangle
+ * indices, so their required descending order is a simple reversal. Check
+ * the complete comparator order; mixed orders retain the existing sort. */
+static void renderer_sort_primitives(PrimitiveInfo *items, size_t count)
+{
+   size_t i;
+   int direction = 0;
+
+   for (i = 1; i < count; i++)
+   {
+      int order = renderer_primitive_info_qsort_cmp(&items[i - 1], &items[i]);
+      int step = order < 0 ? -1 : order > 0 ? 1 : 0;
+
+      if (step)
+      {
+         if (direction && direction != step)
+         {
+            qsort(items, count, sizeof(*items), renderer_primitive_info_qsort_cmp);
+            return;
+         }
+         direction = step;
+      }
+   }
+
+   if (direction > 0)
+   {
+      for (i = 0; i < count / 2; i++)
+      {
+         PrimitiveInfo temporary = items[i];
+         items[i] = items[count - 1 - i];
+         items[count - 1 - i] = temporary;
+      }
+   }
+}
+
 static void renderer_dispatch(Renderer *self,
       const BufferVertexVec *vertices,
       PrimitiveInfoVec *scissors,
       bool textured){
    unsigned to_draw;
-   qsort(PrimitiveInfoVec_data(scissors), PrimitiveInfoVec_size(scissors), sizeof(PrimitiveInfo), renderer_primitive_info_qsort_cmp);
+   renderer_sort_primitives(PrimitiveInfoVec_data(scissors), PrimitiveInfoVec_size(scissors));
 
    /* Render flat-shaded primitives. */
    { BufferVertex *vert = (BufferVertex *)(
