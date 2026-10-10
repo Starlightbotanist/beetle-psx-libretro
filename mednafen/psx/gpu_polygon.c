@@ -717,6 +717,204 @@ static INLINE int DrawSpanVec_NT(PS_GPU *gpu, int y, int32_t x, int32_t w,
 }
 #endif /* SSE2 || NEON */
 
+/* A batch can gather texels before writing only if its eight destination
+ * pixels cannot feed a cache-line fill in that batch. Check every potential
+ * four-word fill, including read-ahead; fall back before doing any fetch.
+ * Completed earlier batches have already committed their writes. */
+#if (defined(__SSE2__) || defined(GPU_HAVE_NEON)) && !defined(PSX_MEASURE_MODULATE)
+#if defined(__SSE2__)
+static INLINE __m128i SpanColor8(uint32_t base, uint32_t delta)
+{
+   const uint32_t d2 = delta + delta;
+   const __m128i lo = _mm_add_epi32(_mm_set1_epi32((int)base),
+         _mm_setr_epi32(0, (int)delta, (int)d2, (int)(d2 + delta)));
+   const __m128i hi = _mm_add_epi32(lo, _mm_set1_epi32((int)(d2 + d2)));
+   return _mm_packs_epi32(_mm_srli_epi32(lo, 24), _mm_srli_epi32(hi, 24));
+}
+
+static INLINE __m128i SpanModulate8(__m128i texel, __m128i color, __m128i dither)
+{
+   const __m128i product = _mm_mullo_epi16(texel, color);
+   const __m128i scaled = _mm_srai_epi16(_mm_add_epi16(product, dither), 7);
+   return _mm_min_epi16(_mm_max_epi16(scaled, _mm_setzero_si128()), _mm_set1_epi16(31));
+}
+
+/* Channels are unpacked to 0..31, so sums fit signed 16-bit lanes.
+ * Average rounds down; subtraction saturates at zero; additions clamp at 31. */
+static INLINE __m128i SpanBlendChannel8(__m128i fore, __m128i back, int blend)
+{
+   if (blend == BLEND_MODE_AVERAGE)
+      return _mm_srli_epi16(_mm_add_epi16(fore, back), 1);
+   if (blend == BLEND_MODE_SUBTRACT)
+      return _mm_subs_epu16(back, fore);
+   if (blend == BLEND_MODE_ADD_FOURTH)
+      fore = _mm_srli_epi16(fore, 2);
+   return _mm_min_epi16(_mm_add_epi16(fore, back), _mm_set1_epi16(31));
+}
+#else
+static INLINE uint16x8_t SpanColor8(uint32_t base, uint32_t delta)
+{
+   const uint32_t d2 = delta + delta;
+   const uint32_t offsets[4] = {0, delta, d2, d2 + delta};
+   const uint32x4_t lo = vaddq_u32(vdupq_n_u32(base), vld1q_u32(offsets));
+   const uint32x4_t hi = vaddq_u32(lo, vdupq_n_u32(d2 + d2));
+   return vcombine_u16(vmovn_u32(vshrq_n_u32(lo, 24)), vmovn_u32(vshrq_n_u32(hi, 24)));
+}
+
+static INLINE uint16x8_t SpanModulate8(uint16x8_t texel, uint16x8_t color, int16x8_t dither)
+{
+   const uint16x8_t product = vmulq_u16(texel, color);
+   const int16x8_t scaled = vshrq_n_s16(vaddq_s16(vreinterpretq_s16_u16(product), dither), 7);
+   return vreinterpretq_u16_s16(vminq_s16(vmaxq_s16(scaled, vdupq_n_s16(0)), vdupq_n_s16(31)));
+}
+
+static INLINE uint16x8_t SpanBlendChannel8(uint16x8_t fore, uint16x8_t back, int blend)
+{
+   if (blend == BLEND_MODE_AVERAGE)
+      return vshrq_n_u16(vaddq_u16(fore, back), 1);
+   if (blend == BLEND_MODE_SUBTRACT)
+      return vqsubq_u16(back, fore);
+   if (blend == BLEND_MODE_ADD_FOURTH)
+      fore = vshrq_n_u16(fore, 2);
+   return vminq_u16(vaddq_u16(fore, back), vdupq_n_u16(31));
+}
+#endif
+
+/* Native affine textured spans, including blending and destination masks.
+ * GetTexel still runs in pixel order and owns every cache miss and cycle
+ * charge. The caller advances its interpolants by the returned pixel count. */
+#define DEFINE_DrawSpanVec_T(MO) \
+static INLINE int DrawSpanVec_T##MO(PS_GPU *gpu, int y, int32_t x, int32_t w, \
+      const i_group *ig, const i_deltas *idl, const int gouraud, const int modulate, const int blend, const int maskeval) \
+{ \
+   uint16_t *row; \
+   uint32_t u = ig->u, v = ig->v, r = ig->r, g = ig->g, b = ig->b; \
+   const uint32_t dr = gouraud ? idl->dr_dx : 0; \
+   const uint32_t dg = gouraud ? idl->dg_dx : 0; \
+   const uint32_t db = gouraud ? idl->db_dx : 0; \
+   const unsigned ty = (unsigned)y & 511; \
+   const bool may_alias = ty >= gpu->TexPageY && ty < gpu->TexPageY + 256; \
+   int16_t offsets[8]; \
+   int lane; \
+   int32_t done = 0; \
+   if (gpu->upscale_shift || gpu->dither_upscale_shift || w < 8) \
+      return 0; \
+   row = &gpu->vram[ty << 10]; \
+   for (lane = 0; lane < 8; lane++) \
+      offsets[lane] = modulate && DitherEnabled(gpu) \
+            ? dither_table[ty & 3][(x + lane) & 3] * 16 : 0; \
+   for (; done + 8 <= w; done += 8) \
+   { \
+      uint16_t texels[8]; \
+      if (may_alias) \
+      { \
+         uint32_t check_u = u, check_v = v; \
+         for (lane = 0; lane < 8; lane++) \
+         { \
+            const uint32_t tex_y = ((check_v >> 24) & gpu->SUCV.TWY_AND) + gpu->SUCV.TWY_ADD; \
+            const uint32_t tex_u = ((check_u >> 24) & gpu->SUCV.TWX_AND) + gpu->SUCV.TWX_ADD; \
+            const uint32_t cache_x = ((tex_u >> (2 - (MO))) & 1023) & ~3U; \
+            if (tex_y == ty && cache_x < (unsigned)(x + done + 8) && cache_x + 4 > (unsigned)(x + done)) \
+               return done; \
+            check_u += idl->du_dx; \
+            check_v += idl->dv_dx; \
+         } \
+      } \
+      for (lane = 0; lane < 8; lane++) \
+      { \
+         texels[lane] = GetTexel_TM##MO(gpu, u >> 24, v >> 24); \
+         u += idl->du_dx; \
+         v += idl->dv_dx; \
+      } \
+      SPAN_TEXTURE_VECTOR_STORE(row + x + done, texels, offsets, r, g, b, dr, dg, db, modulate, gpu->MaskSetOR, blend, maskeval); \
+      r += dr * 8; \
+      g += dg * 8; \
+      b += db * 8; \
+   } \
+   return done; \
+}
+
+#if defined(__SSE2__)
+#define SPAN_TEXTURE_VECTOR_STORE(destination, texels, offsets, r, g, b, dr, dg, db, modulate, mask, blend, maskeval) \
+{ \
+   const __m128i tex = _mm_loadu_si128((const __m128i *)(texels)); \
+   __m128i pix = tex; \
+   const __m128i bg = _mm_loadu_si128((const __m128i *)(destination)); \
+   __m128i transparent = _mm_cmpeq_epi16(tex, _mm_setzero_si128()); \
+   if (modulate) \
+   { \
+      const __m128i d = _mm_loadu_si128((const __m128i *)(offsets)); \
+      const __m128i m = _mm_set1_epi16(31); \
+      const __m128i pr = SpanModulate8(_mm_and_si128(tex, m), SpanColor8(r, dr), d); \
+      const __m128i pg = SpanModulate8(_mm_and_si128(_mm_srli_epi16(tex, 5), m), SpanColor8(g, dg), d); \
+      const __m128i pb = SpanModulate8(_mm_and_si128(_mm_srli_epi16(tex, 10), m), SpanColor8(b, db), d); \
+      pix = _mm_or_si128(_mm_and_si128(tex, _mm_set1_epi16((short)0x8000)), \
+            _mm_or_si128(pr, _mm_or_si128(_mm_slli_epi16(pg, 5), _mm_slli_epi16(pb, 10)))); \
+   } \
+   if ((blend) >= 0) \
+   { \
+      const __m128i m = _mm_set1_epi16(31); \
+      const __m128i pr = SpanBlendChannel8(_mm_and_si128(pix, m), _mm_and_si128(bg, m), blend); \
+      const __m128i pg = SpanBlendChannel8(_mm_and_si128(_mm_srli_epi16(pix, 5), m), _mm_and_si128(_mm_srli_epi16(bg, 5), m), blend); \
+      const __m128i pb = SpanBlendChannel8(_mm_and_si128(_mm_srli_epi16(pix, 10), m), _mm_and_si128(_mm_srli_epi16(bg, 10), m), blend); \
+      const __m128i mixed = _mm_or_si128(_mm_set1_epi16((short)0x8000), \
+            _mm_or_si128(pr, _mm_or_si128(_mm_slli_epi16(pg, 5), _mm_slli_epi16(pb, 10)))); \
+      const __m128i alpha = _mm_srai_epi16(tex, 15); \
+      pix = _mm_or_si128(_mm_and_si128(alpha, mixed), _mm_andnot_si128(alpha, pix)); \
+   } \
+   pix = _mm_or_si128(pix, _mm_set1_epi16((short)(mask))); \
+   if (maskeval) \
+      transparent = _mm_or_si128(transparent, _mm_srai_epi16(bg, 15)); \
+   pix = _mm_or_si128(_mm_and_si128(transparent, bg), _mm_andnot_si128(transparent, pix)); \
+   _mm_storeu_si128((__m128i *)(destination), pix); \
+}
+#else
+#define SPAN_TEXTURE_VECTOR_STORE(destination, texels, offsets, r, g, b, dr, dg, db, modulate, mask, blend, maskeval) \
+{ \
+   const uint16x8_t tex = vld1q_u16(texels); \
+   uint16x8_t pix = tex; \
+   const uint16x8_t bg = vld1q_u16(destination); \
+   uint16x8_t transparent = vceqq_u16(tex, vdupq_n_u16(0)); \
+   if (modulate) \
+   { \
+      const int16x8_t d = vld1q_s16(offsets); \
+      const uint16x8_t m = vdupq_n_u16(31); \
+      const uint16x8_t pr = SpanModulate8(vandq_u16(tex, m), SpanColor8(r, dr), d); \
+      const uint16x8_t pg = SpanModulate8(vandq_u16(vshrq_n_u16(tex, 5), m), SpanColor8(g, dg), d); \
+      const uint16x8_t pb = SpanModulate8(vandq_u16(vshrq_n_u16(tex, 10), m), SpanColor8(b, db), d); \
+      pix = vorrq_u16(vandq_u16(tex, vdupq_n_u16(0x8000)), \
+            vorrq_u16(pr, vorrq_u16(vshlq_n_u16(pg, 5), vshlq_n_u16(pb, 10)))); \
+   } \
+   if ((blend) >= 0) \
+   { \
+      const uint16x8_t m = vdupq_n_u16(31); \
+      const uint16x8_t pr = SpanBlendChannel8(vandq_u16(pix, m), vandq_u16(bg, m), blend); \
+      const uint16x8_t pg = SpanBlendChannel8(vandq_u16(vshrq_n_u16(pix, 5), m), vandq_u16(vshrq_n_u16(bg, 5), m), blend); \
+      const uint16x8_t pb = SpanBlendChannel8(vandq_u16(vshrq_n_u16(pix, 10), m), vandq_u16(vshrq_n_u16(bg, 10), m), blend); \
+      const uint16x8_t mixed = vorrq_u16(vdupq_n_u16(0x8000), \
+            vorrq_u16(pr, vorrq_u16(vshlq_n_u16(pg, 5), vshlq_n_u16(pb, 10)))); \
+      const uint16x8_t alpha = vceqq_u16(vandq_u16(tex, vdupq_n_u16(0x8000)), vdupq_n_u16(0x8000)); \
+      pix = vbslq_u16(alpha, mixed, pix); \
+   } \
+   pix = vorrq_u16(pix, vdupq_n_u16(mask)); \
+   if (maskeval) \
+      transparent = vorrq_u16(transparent, vcgeq_u16(bg, vdupq_n_u16(0x8000))); \
+   vst1q_u16(destination, vbslq_u16(transparent, bg, pix)); \
+}
+#endif
+
+DEFINE_DrawSpanVec_T(0)
+DEFINE_DrawSpanVec_T(1)
+DEFINE_DrawSpanVec_T(2)
+#undef DEFINE_DrawSpanVec_T
+#undef SPAN_TEXTURE_VECTOR_STORE
+#else
+#define DrawSpanVec_T0(gpu, y, x, w, ig, idl, gouraud, modulate, blend, maskeval) 0
+#define DrawSpanVec_T1(gpu, y, x, w, ig, idl, gouraud, modulate, blend, maskeval) 0
+#define DrawSpanVec_T2(gpu, y, x, w, ig, idl, gouraud, modulate, blend, maskeval) 0
+#endif
+
+
 /* The vectorised UV recovery needs a true IEEE single-precision divide so the
  * recovered coordinates are bit-identical to the scalar 1.0f / inv_w.  SSE2 has
  * _mm_div_ps and AArch64 NEON has vdivq_f32; 32-bit ARMv7 NEON has no vector
@@ -952,6 +1150,18 @@ static INLINE void DrawSpan_##SUFFIX(PS_GPU *gpu, int y, const int32_t x_start, 
          } \
          x += _vn; \
          w -= _vn; \
+         if (w <= 0) \
+            return; \
+      } \
+   } \
+   if ((TEXTURED_LIT) && !pct) \
+   { \
+      int32_t consumed = DrawSpanVec_T##MO_LIT(gpu, y, x, w, &ig, idl, (GOURAUD_LIT), (TM_LIT), (BM_VAL), (ME_LIT)); \
+      if (consumed > 0) \
+      { \
+         AddIDeltas_DX_g##GOURAUD_LIT##_t##TEXTURED_LIT(&ig, idl, consumed); \
+         x += consumed; \
+         w -= consumed; \
          if (w <= 0) \
             return; \
       } \
