@@ -7526,8 +7526,11 @@ static void renderer_ssaa_framebuffer(Renderer *self)
    TTRect *rect = &self->render_state.display_fb_rect;
    unsigned left = rect->x / BLOCK_WIDTH;
    unsigned top = rect->y / BLOCK_HEIGHT;
-   unsigned right = (rect->x + rect->width + BLOCK_WIDTH - 1) / BLOCK_WIDTH;
-   unsigned bottom = (rect->y + rect->height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT;
+   /* Resolve each wrapped VRAM block once, even for oversized display ranges. */
+   unsigned right = min_((rect->x + rect->width + BLOCK_WIDTH - 1) / BLOCK_WIDTH,
+         left + FB_WIDTH / BLOCK_WIDTH);
+   unsigned bottom = min_((rect->y + rect->height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT,
+         top + FB_HEIGHT / BLOCK_HEIGHT);
 
    unsigned resolves_count = (bottom > top && right > left) ? (bottom - top) * (right - left) : 0;
    unsigned x = left;
