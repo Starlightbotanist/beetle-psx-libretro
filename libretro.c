@@ -1320,14 +1320,14 @@ static struct
    };
 } SysControl;
 
-static unsigned DMACycleSteal = 0;   // Doesn't need to be saved in save states, since it's calculated in the ForceEventUpdates() call chain.
+unsigned psx_dma_cycle_steal = 0;   // Doesn't need to be saved in save states, since it's calculated in the ForceEventUpdates() call chain.
 
 void PSX_SetDMACycleSteal(unsigned stealage)
 {
    if (stealage > 200) // Due to 8-bit limitations in the CPU core.
       stealage = 200;
 
-   DMACycleSteal = stealage;
+   psx_dma_cycle_steal = stealage;
 }
 
 /* Event stuff */
@@ -1610,9 +1610,8 @@ void PSX_RequestMLExit(void)
  * exhaustive boundary sweep.  Remember to update MemPeek()/MemPoke()
  * and keep these decodes in sync when address decoding changes. */
 
-void MDFN_FASTCALL PSX_MemWrite8(int32_t timestamp, uint32_t A, uint32_t V)
+void MDFN_FASTCALL PSX_MemWrite8Slow(int32_t timestamp, uint32_t A, uint32_t V)
 {
-   if(A < 0x00800000)                       { MASMEM_WriteU8(MainRAM, A & 0x1FFFFF, V); return; }
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
       PSX_EventHandler(timestamp);
@@ -1633,9 +1632,8 @@ void MDFN_FASTCALL PSX_MemWrite8(int32_t timestamp, uint32_t A, uint32_t V)
    if(A == 0xFFFE0130)                      CPU_SetBIU(PSX_CPU, V);
 }
 
-void MDFN_FASTCALL PSX_MemWrite16(int32_t timestamp, uint32_t A, uint32_t V)
+void MDFN_FASTCALL PSX_MemWrite16Slow(int32_t timestamp, uint32_t A, uint32_t V)
 {
-   if(A < 0x00800000)                       { MASMEM_WriteU16(MainRAM, A & 0x1FFFFF, V); return; }
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
       PSX_EventHandler(timestamp);
@@ -1656,9 +1654,8 @@ void MDFN_FASTCALL PSX_MemWrite16(int32_t timestamp, uint32_t A, uint32_t V)
    if(A == 0xFFFE0130)                      CPU_SetBIU(PSX_CPU, V);
 }
 
-void MDFN_FASTCALL PSX_MemWrite24(int32_t timestamp, uint32_t A, uint32_t V)
+void MDFN_FASTCALL PSX_MemWrite24Slow(int32_t timestamp, uint32_t A, uint32_t V)
 {
-   if(A < 0x00800000)                       { MASMEM_WriteU24(MainRAM, A & 0x1FFFFF, V); return; }
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
       PSX_EventHandler(timestamp);
@@ -1679,9 +1676,8 @@ void MDFN_FASTCALL PSX_MemWrite24(int32_t timestamp, uint32_t A, uint32_t V)
    if(A == 0xFFFE0130)                      CPU_SetBIU(PSX_CPU, V);
 }
 
-void MDFN_FASTCALL PSX_MemWrite32(int32_t timestamp, uint32_t A, uint32_t V)
+void MDFN_FASTCALL PSX_MemWrite32Slow(int32_t timestamp, uint32_t A, uint32_t V)
 {
-   if(A < 0x00800000)                       { MASMEM_WriteU32(MainRAM, A & 0x1FFFFF, V); return; }
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))   return;
    if(timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
       PSX_EventHandler(timestamp);
@@ -1704,16 +1700,10 @@ void MDFN_FASTCALL PSX_MemWrite32(int32_t timestamp, uint32_t A, uint32_t V)
 
 /* PSX_MemRead{8,16,24,32}: signatures take int32_t *timestamp;
  * cpu.c calls these from its ReadMemory_uN helpers. */
-uint8_t MDFN_FASTCALL PSX_MemRead8(int32_t *timestamp, uint32_t A)
+uint8_t MDFN_FASTCALL PSX_MemRead8Slow(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
-   *timestamp += DMACycleSteal;
-   if(A < 0x00800000)
-   {
-      if (!psx_gte_overclock)
-         *timestamp += 3;
-      return MASMEM_ReadU8(MainRAM, A & 0x1FFFFF);
-   }
+   *timestamp += psx_dma_cycle_steal;
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
       return MASMEM_ReadU8(BIOSROM, A & bios_addr_mask);
    if(*timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
@@ -1754,16 +1744,10 @@ uint8_t MDFN_FASTCALL PSX_MemRead8(int32_t *timestamp, uint32_t A)
    return 0;
 }
 
-uint16_t MDFN_FASTCALL PSX_MemRead16(int32_t *timestamp, uint32_t A)
+uint16_t MDFN_FASTCALL PSX_MemRead16Slow(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
-   *timestamp += DMACycleSteal;
-   if(A < 0x00800000)
-   {
-      if (!psx_gte_overclock)
-         *timestamp += 3;
-      return MASMEM_ReadU16(MainRAM, A & 0x1FFFFF);
-   }
+   *timestamp += psx_dma_cycle_steal;
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
       return MASMEM_ReadU16(BIOSROM, A & bios_addr_mask);
    if(*timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
@@ -1813,16 +1797,10 @@ uint16_t MDFN_FASTCALL PSX_MemRead16(int32_t *timestamp, uint32_t A)
    return 0;
 }
 
-uint32_t MDFN_FASTCALL PSX_MemRead24(int32_t *timestamp, uint32_t A)
+uint32_t MDFN_FASTCALL PSX_MemRead24Slow(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
-   *timestamp += DMACycleSteal;
-   if(A < 0x00800000)
-   {
-      if (!psx_gte_overclock)
-         *timestamp += 3;
-      return MASMEM_ReadU24(MainRAM, A & 0x1FFFFF);
-   }
+   *timestamp += psx_dma_cycle_steal;
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
       return MASMEM_ReadU24(BIOSROM, A & bios_addr_mask);
    if(*timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)
@@ -1866,16 +1844,10 @@ uint32_t MDFN_FASTCALL PSX_MemRead24(int32_t *timestamp, uint32_t A)
    return 0;
 }
 
-uint32_t MDFN_FASTCALL PSX_MemRead32(int32_t *timestamp, uint32_t A)
+uint32_t MDFN_FASTCALL PSX_MemRead32Slow(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
-   *timestamp += DMACycleSteal;
-   if(A < 0x00800000)
-   {
-      if (!psx_gte_overclock)
-         *timestamp += 3;
-      return MASMEM_ReadU32(MainRAM, A & 0x1FFFFF);
-   }
+   *timestamp += psx_dma_cycle_steal;
    if(A >= 0x1FC00000 && A <= (0x1FC00000 + bios_addr_mask))
       return MASMEM_ReadU32(BIOSROM, A & bios_addr_mask);
    if(*timestamp >= events[PSX_EVENT__SYNFIRST].next->event_time)

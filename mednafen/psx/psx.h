@@ -18,10 +18,10 @@
 
 bool MDFN_FASTCALL PSX_EventHandler(const int32_t timestamp);
 
-void MDFN_FASTCALL PSX_MemWrite8 (int32_t timestamp, uint32_t A, uint32_t V);
-void MDFN_FASTCALL PSX_MemWrite16(int32_t timestamp, uint32_t A, uint32_t V);
-void MDFN_FASTCALL PSX_MemWrite24(int32_t timestamp, uint32_t A, uint32_t V);
-void MDFN_FASTCALL PSX_MemWrite32(int32_t timestamp, uint32_t A, uint32_t V);
+void MDFN_FASTCALL PSX_MemWrite8Slow (int32_t timestamp, uint32_t A, uint32_t V);
+void MDFN_FASTCALL PSX_MemWrite16Slow(int32_t timestamp, uint32_t A, uint32_t V);
+void MDFN_FASTCALL PSX_MemWrite24Slow(int32_t timestamp, uint32_t A, uint32_t V);
+void MDFN_FASTCALL PSX_MemWrite32Slow(int32_t timestamp, uint32_t A, uint32_t V);
 
 uint8_t  PSX_MemPeek8 (uint32_t A);
 uint16_t PSX_MemPeek16(uint32_t A);
@@ -36,10 +36,10 @@ void ForceEventUpdates(const int32_t timestamp);
 
 uint32_t PSX_GetRandU32(uint32_t mina, uint32_t maxa);
 
-uint8_t  MDFN_FASTCALL PSX_MemRead8 (int32_t *timestamp, uint32_t A);
-uint16_t MDFN_FASTCALL PSX_MemRead16(int32_t *timestamp, uint32_t A);
-uint32_t MDFN_FASTCALL PSX_MemRead24(int32_t *timestamp, uint32_t A);
-uint32_t MDFN_FASTCALL PSX_MemRead32(int32_t *timestamp, uint32_t A);
+uint8_t  MDFN_FASTCALL PSX_MemRead8Slow (int32_t *timestamp, uint32_t A);
+uint16_t MDFN_FASTCALL PSX_MemRead16Slow(int32_t *timestamp, uint32_t A);
+uint32_t MDFN_FASTCALL PSX_MemRead24Slow(int32_t *timestamp, uint32_t A);
+uint32_t MDFN_FASTCALL PSX_MemRead32Slow(int32_t *timestamp, uint32_t A);
 
 
 extern PS_CPU *PSX_CPU;
@@ -47,6 +47,50 @@ extern PS_CPU *PSX_CPU;
 extern MultiAccessSizeMem *BIOSROM;
 extern MultiAccessSizeMem *MainRAM;
 extern MultiAccessSizeMem *ScratchRAM;
+
+/* The CPU's common RAM accesses stay inline. Hardware/BIOS/PIO accesses retain
+ * their existing dispatch and event synchronization in the Slow functions. */
+extern unsigned psx_dma_cycle_steal;
+extern bool psx_gte_overclock;
+
+static INLINE void PSX_ReadMainRAMTiming(int32_t *timestamp)
+{
+   *timestamp += psx_dma_cycle_steal;
+   if (!psx_gte_overclock)
+      *timestamp += 3;
+}
+
+#define DEFINE_PSX_RAM_READ(size, type) \
+static INLINE type MDFN_FASTCALL PSX_MemRead##size(int32_t *timestamp, uint32_t A) \
+{ \
+   if (MDFN_LIKELY(A < 0x00800000)) \
+   { \
+      PSX_ReadMainRAMTiming(timestamp); \
+      return MASMEM_ReadU##size(MainRAM, A & 0x1FFFFF); \
+   } \
+   return PSX_MemRead##size##Slow(timestamp, A); \
+}
+
+DEFINE_PSX_RAM_READ(8, uint8_t)
+DEFINE_PSX_RAM_READ(16, uint16_t)
+DEFINE_PSX_RAM_READ(24, uint32_t)
+DEFINE_PSX_RAM_READ(32, uint32_t)
+#undef DEFINE_PSX_RAM_READ
+
+#define DEFINE_PSX_RAM_WRITE(size) \
+static INLINE void MDFN_FASTCALL PSX_MemWrite##size(int32_t timestamp, uint32_t A, uint32_t V) \
+{ \
+   if (MDFN_LIKELY(A < 0x00800000)) \
+      MASMEM_WriteU##size(MainRAM, A & 0x1FFFFF, V); \
+   else \
+      PSX_MemWrite##size##Slow(timestamp, A, V); \
+}
+
+DEFINE_PSX_RAM_WRITE(8)
+DEFINE_PSX_RAM_WRITE(16)
+DEFINE_PSX_RAM_WRITE(24)
+DEFINE_PSX_RAM_WRITE(32)
+#undef DEFINE_PSX_RAM_WRITE
 
 extern unsigned psx_gpu_overclock_shift;
 
