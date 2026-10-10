@@ -3134,15 +3134,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
    {
       glUseProgram(renderer->command_buffer->program->id);
       glUniform2i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "offset"), (GLint)x, (GLint)y);
-      /* We use texture unit 0 */
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
-      /* HD replacement texture lives on unit 1 */
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "hd_texture"), 1);
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "palette_texture"), 2);
       glActiveTexture(GL_TEXTURE2);
       glBindTexture(GL_TEXTURE_2D, renderer->palette_texture.id);
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
-               "fb_feedback_texture"), 3);
       glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
                "feedback_upscaling"), renderer->fb_feedback_texture.id ?
                renderer->internal_upscaling : 1);
@@ -3786,6 +3779,12 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
       uint32_t fixed_point_modulation = !psx_pgxp_color;
 
       glUseProgram(command_buffer->program->id);
+      /* Sampler units remain fixed for this linked primitive program. */
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "fb_texture"), 0);
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "hd_texture"), 1);
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "palette_texture"), 2);
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms,
+               "fb_feedback_texture"), 3);
       glUniform1ui(gl_uniform_map_get(&command_buffer->program->uniforms, "dither_scaling"), dither_scaling);
       glUniform1ui(gl_uniform_map_get(&command_buffer->program->uniforms,
                "fixed_point_modulation"), fixed_point_modulation);
