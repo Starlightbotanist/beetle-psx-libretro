@@ -6405,6 +6405,9 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          int x1,
          int x2)
    {
+      if (self->render_state.horiz_start != x1 || self->render_state.horiz_end != x2)
+         ih_reset(&self->last_scanout);
+
       self->render_state.horiz_start = x1;
       self->render_state.horiz_end = x2;
    }
@@ -6412,6 +6415,9 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          int y1,
          int y2)
    {
+      if (self->render_state.vert_start != y1 || self->render_state.vert_end != y2)
+         ih_reset(&self->last_scanout);
+
       self->render_state.vert_start = y1;
       self->render_state.vert_end = y2;
    }
