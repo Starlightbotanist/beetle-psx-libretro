@@ -981,6 +981,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
    #define REDISPATCH \
 	if(MDFN_UNLIKELY(timestamp >= next_event_ts)) \
 	 goto RunSliceExit; \
+	cpu_last_check_ts = timestamp; \
 	GPR[0] = 0; \
 	if(MDFN_UNLIKELY(PC & 0x3)) \
 	{ \
