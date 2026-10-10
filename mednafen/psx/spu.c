@@ -1370,7 +1370,11 @@ static INLINE void SPU_RunNoise(void)
          SPU_RunDecoder(voice);
 
 
-         if(Noise_Mode & (1 << voice_num))
+         /* A zero envelope makes interpolation inaudible. Keep decoding and
+          * all voice clocks running for IRQ, ENDX and later envelope changes. */
+         if(!voice->ADSR.EnvLevel)
+            voice_pvs = 0;
+         else if(Noise_Mode & (1 << voice_num))
             voice_pvs = (int16_t)LFSR;
          else
          {
