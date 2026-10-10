@@ -7627,7 +7627,9 @@ static TTRect renderer_compute_vram_framebuffer_rect(Renderer *self)
       break;
    }
 
-   fb_width = (unsigned) (self->render_state.horiz_end - self->render_state.horiz_start);
+   /* Reversed horizontal ranges are blank, not a wrapped unsigned width. */
+   fb_width = self->render_state.horiz_end > self->render_state.horiz_start ?
+         (unsigned) (self->render_state.horiz_end - self->render_state.horiz_start) : 0;
    fb_width /= clock_div;
    fb_width = (fb_width + 2) & ~3;
 
