@@ -882,7 +882,8 @@ void rhi_intf_push_quad(
    bool mask_test,
    bool set_mask,
    bool is_sprite,
-   bool may_be_2d)
+   bool may_be_2d,
+   uint16_t uv_offset_u, uint16_t uv_offset_v)
 {
    /* Sprites are never dithered on hardware (the software renderer
     * uses the zero dither offset for them); resolve that once here so
@@ -920,7 +921,7 @@ void rhi_intf_push_quad(
                texture_blend_mode,
                depth_shift,
                quad_dither,
-               blend_mode, mask_test, set_mask);
+               blend_mode, mask_test, set_mask, uv_offset_u, uv_offset_v);
 #endif
          break;
       case RHI_VULKAN:
