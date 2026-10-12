@@ -1547,8 +1547,10 @@ static void gl_draw_buffer_map_no_bind(gl_draw_buffer *drawbuffer)
    GLintptr offset_bytes;
    void *m                = NULL;
    size_t element_size    = drawbuffer->element_size;
+   size_t map_start       = drawbuffer->map_start;
    GLsizeiptr buffer_size = drawbuffer->capacity * element_size;
-   GLbitfield map_flags   = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT;
+   GLbitfield map_flags   = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT |
+         GL_MAP_UNSYNCHRONIZED_BIT;
 
    glBindBuffer(GL_ARRAY_BUFFER, drawbuffer->id);
 
@@ -1557,18 +1559,18 @@ static void gl_draw_buffer_map_no_bind(gl_draw_buffer *drawbuffer)
 
    /* We don't have enough room left to remap 'capacity',
     * start back from the beginning of the buffer. */
-   if (drawbuffer->map_start > 2 * drawbuffer->capacity)
+   if (map_start > 2 * drawbuffer->capacity)
    {
-      drawbuffer->map_start = 0;
+      map_start = 0;
       /* At the wrap the mapped window lands back on vertex data whose
        * draws may still be in flight on a deeply pipelined driver. A
        * non-UNSYNCHRONIZED map is required to be safe there - the
        * implementation must either wait for the pending reads or
        * rename the range - so on a conforming driver this is a stall,
-       * not a hazard. Orphan the whole buffer instead: the driver
-       * hands back fresh storage while pending draws keep the old one,
-       * removing both the stall and any reliance on the driver getting
-       * the overlap of INVALIDATE_RANGE with in-flight reads right. */
+       * not a hazard. Request whole-buffer invalidation so the driver
+       * can supply fresh storage while pending draws keep the old one.
+       * Invalidation is only a hint; omitting UNSYNCHRONIZED also makes
+       * the map safe when the driver reuses storage and must wait. */
       map_flags = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT;
       if (GL_DIAG_ON())
       {
@@ -1581,7 +1583,12 @@ static void gl_draw_buffer_map_no_bind(gl_draw_buffer *drawbuffer)
       }
    }
 
-   offset_bytes = drawbuffer->map_start * element_size;
+   /* Each successful draw advances past all vertices it consumed. Until
+    * wrap, this range cannot overlap queued reads and needs no implicit
+    * synchronization. At wrap, omit UNSYNCHRONIZED and invalidate storage.
+    * Commit the new cursor only after mapping succeeds, so a failed wrap
+    * still retries with the safe storage-invalidation flags. */
+   offset_bytes = map_start * element_size;
 
    m = glMapBufferRange(GL_ARRAY_BUFFER,
          offset_bytes,
@@ -1607,7 +1614,10 @@ static void gl_draw_buffer_map_no_bind(gl_draw_buffer *drawbuffer)
       }
    }
    else
+   {
+      drawbuffer->map_start = map_start;
       gl_map_failures = 0;
+   }
 
    drawbuffer->map = m;
 }
