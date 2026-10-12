@@ -166,8 +166,7 @@ void main()
 	                              registers.expand_gamut, registers.shoulder,
 	                              registers.sdr_eotf, registers.src_primaries), 1.0);
 #else
-	/* After the dither, not before: the console emits a dithered 15-bit signal
-	 * and the primaries belong to the phosphors that receive it. */
+	/* Apply source primaries after any optional scanout dithering. */
 	FragColor = vec4(sdr_apply_src_primaries(rgb, registers.sdr_eotf,
 	                                         registers.src_primaries), 1.0);
 #endif

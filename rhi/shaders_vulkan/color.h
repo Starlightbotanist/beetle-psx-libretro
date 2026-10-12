@@ -10,9 +10,9 @@ highp vec3 psx_color8(highp vec3 color)
 	return floor(color8);
 }
 
-/* Select RGB5 codes before choosing their storage encoding: VRAM expands
- * n as n << 3, whereas the display's RGB5 UNORM target represents n / 31.
- * Dithering is a signed offset in byte units, applied before RGB5 reduction. */
+/* Select native RGB5 codes; VRAM expands each code as n << 3. Dithering
+ * is a signed offset in byte units, applied before RGB5 reduction. The legacy
+ * scanout approximation has its own presentation formula in dither.h. */
 highp vec3 psx_color5(highp vec3 color, highp float offset)
 {
 	precise highp vec3 color8 = color * 255.0;
