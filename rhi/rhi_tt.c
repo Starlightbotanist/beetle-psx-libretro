@@ -15,6 +15,7 @@
  * ============================================================ */
 
 #include <assert.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -990,6 +991,9 @@ static void rect_tracker_clear(struct RectTracker *self, SRect rect)
    static INLINE void fusionrects_move(struct FusionRects *dst,
          struct FusionRects *src)
    {
+      if (dst == src)
+         return;
+      ownedrects_destroy(&dst->rects);
       ownedrects_move(&dst->rects, &src->rects);
       dst->vram_rect = src->vram_rect;
       dst->scaleX = src->scaleX;
@@ -1102,20 +1106,30 @@ static void fp_destroy(FusedPage *p) {
       int cap;
    };
 
-   static void fused_page_vec_grow(struct FusedPageVec *v, int ncap)
+   static bool fused_page_vec_grow(struct FusedPageVec *v, int ncap)
    {
-      FusedPage *nitems = (FusedPage *)malloc((size_t)ncap * sizeof(FusedPage));
-      int i;
-      if (!nitems)
-         return; /* OOM: leave the vector unchanged */
-      for (i = 0; i < v->count; i++) {
-         fp_init_raw(&nitems[i]);
-         fp_copy(&nitems[i], &v->items[i]);
-         fp_destroy(&v->items[i]);
+      FusedPage *items = (FusedPage *)malloc((size_t)ncap * sizeof(*items));
+      int i, j;
+      if (!items)
+         return false;
+      for (i = 0; i < v->count; i++)
+      {
+         fp_init_raw(&items[i]);
+         fp_copy(&items[i], &v->items[i]);
+         if (items[i].fusion.rects.v.count != v->items[i].fusion.rects.v.count)
+         {
+            for (j = 0; j <= i; j++)
+               fp_destroy(&items[j]);
+            free(items);
+            return false;
+         }
       }
+      for (i = 0; i < v->count; i++)
+         fp_destroy(&v->items[i]);
       free(v->items);
-      v->items = nitems;
+      v->items = items;
       v->cap = ncap;
+      return true;
    }
 static void fused_page_vec_init_empty(struct FusedPageVec *v)
    {
@@ -1129,13 +1143,23 @@ static void fused_page_vec_deinit(struct FusedPageVec *v)
       free(v->items);
       v->items = NULL; v->count = 0; v->cap = 0;
    }
-static void fused_page_vec_push(struct FusedPageVec *v, const FusedPage *e)
+static bool fused_page_vec_push(struct FusedPageVec *v, const FusedPage *e)
    {
       if (v->count >= v->cap)
-         fused_page_vec_grow(v, v->cap ? v->cap * 2 : 8);
+      {
+         if (v->cap > INT_MAX / 2 ||
+             !fused_page_vec_grow(v, v->cap ? v->cap * 2 : 8))
+            return false;
+      }
       fp_init_raw(&v->items[v->count]);
       fp_copy(&v->items[v->count], e);
+      if (v->items[v->count].fusion.rects.v.count != e->fusion.rects.v.count)
+      {
+         fp_destroy(&v->items[v->count]);
+         return false;
+      }
       v->count++;
+      return true;
    }
 static int fused_page_vec_size(const struct FusedPageVec *v) { return v->count; }
 static FusedPage *fused_page_vec_at(struct FusedPageVec *v, int i) { return &v->items[i]; }
@@ -6877,7 +6901,13 @@ static int64_t page_bytes(FusionRects *fusion)
       page.bytes = ih_is_valid(&page.texture)
          ? (size_t)tt_img_width(ih_get(&page.texture)) * (size_t)tt_img_height(ih_get(&page.texture)) * 4u
          : 0;
-      fused_page_vec_push(&self->pages, &page);
+      if (!fused_page_vec_push(&self->pages, &page))
+      {
+         fp_destroy(&page);
+         return hd_handle_make_none();
+      }
+      /* push copies both owning members; release the construction references. */
+      fp_destroy(&page);
       return hd_handle_make_fused(fused_page_vec_size(&self->pages) - 1);
    }
    static void fused_pages_mark_dirty(struct FusedPages *self, TTRect rect) {

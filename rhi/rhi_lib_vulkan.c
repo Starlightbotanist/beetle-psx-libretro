@@ -10674,7 +10674,7 @@ static TTGpuImage *vk_tt_page_begin(void *ctx, TTGpuImage *reuse,
       commandbuffer_image_barrier(cbh_get(cmd), page,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
    }
    else
@@ -10685,6 +10685,11 @@ static TTGpuImage *vk_tt_page_begin(void *ctx, TTGpuImage *reuse,
       page = ih_get(&h);
    }
    commandbuffer_clear_image(cbh_get(cmd), page, &fallthrough);
+   /* The clear writes every mip. Order it before the compositing blits. */
+   commandbuffer_image_barrier(cbh_get(cmd), page,
+         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
    return (TTGpuImage *)page;
 }
 
@@ -10707,8 +10712,8 @@ static void vk_tt_page_blit(void *ctx, TTGpuImage *page_in, TTGpuImage *src_in,
    commandbuffer_image_barrier(cbh_get(cmd), src,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0);
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
 
    for (dstLevel = 0; dstLevel < mip_levels; dstLevel++) {
       int srcLevel = max_(0, dstLevel - b->full_res_levels);
@@ -10733,8 +10738,8 @@ static void vk_tt_page_blit(void *ctx, TTGpuImage *page_in, TTGpuImage *src_in,
    commandbuffer_image_barrier(cbh_get(cmd), src,
          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0);
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 }
 
 static void vk_tt_page_end(void *ctx, TTGpuImage *page_in)
@@ -10745,8 +10750,8 @@ static void vk_tt_page_end(void *ctx, TTGpuImage *page_in)
    commandbuffer_image_barrier(cbh_get(cmd), (Image *)page_in,
          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0);
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 }
 
 static TTGpuBackend vk_tt_make_backend(Renderer *self)
