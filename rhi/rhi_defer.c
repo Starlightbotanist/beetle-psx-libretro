@@ -11,6 +11,9 @@
  */
 
 #include "rhi_defer.h"
+#if defined(TEXTURE_DUMPING_ENABLED)
+#include "rhi_tt.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -66,10 +69,31 @@ static rhi_defer_op_t *rhi_defer_alloc_slot(rhi_defer_queue_t *q,
    return slot;
 }
 
+static void rhi_defer_release_states(rhi_defer_queue_t *q)
+{
+#if defined(TEXTURE_DUMPING_ENABLED)
+   size_t i;
+   for (i = 0; i < q->count; i++)
+      if (q->ops[i].kind == RHI_DEFER_TEXTURE_STATE)
+         tts_free(q->ops[i].u.texture_state);
+#endif
+}
+
+bool rhi_defer_push_texture_state(rhi_defer_queue_t *q,
+      struct TextureTrackerSaveState *state)
+{
+   rhi_defer_op_t *op = rhi_defer_alloc_slot(q, RHI_DEFER_TEXTURE_STATE);
+   if (!op)
+      return false;
+   op->u.texture_state = state;
+   return true;
+}
+
 void rhi_defer_clear(rhi_defer_queue_t *q)
 {
    if (!q)
       return;
+   rhi_defer_release_states(q);
    free(q->ops);
    q->ops      = NULL;
    q->count    = 0;
@@ -81,7 +105,7 @@ size_t rhi_defer_count(const rhi_defer_queue_t *q)
    return q ? q->count : 0;
 }
 
-void rhi_defer_drain(rhi_defer_queue_t *q,
+bool rhi_defer_drain(rhi_defer_queue_t *q,
                      rhi_defer_dispatch_fn dispatch,
                      void *user)
 {
@@ -89,7 +113,7 @@ void rhi_defer_drain(rhi_defer_queue_t *q,
    size_t n;
 
    if (!q || !dispatch)
-      return;
+      return false;
 
    /* Snapshot the count so we replay exactly what was queued at entry.
     * If a dispatcher implementation accidentally re-enters the entry
@@ -100,7 +124,8 @@ void rhi_defer_drain(rhi_defer_queue_t *q,
     * to do this. */
    n = q->count;
    for (i = 0; i < n; ++i)
-      dispatch(user, &q->ops[i]);
+      if (!dispatch(user, &q->ops[i]))
+         return false; /* Keep the complete replay for a successful reset. */
 
    /* Reset to empty but keep the backing storage around if it's small;
     * if it's grown large from an unusual workload, free it so we don't
@@ -111,8 +136,10 @@ void rhi_defer_drain(rhi_defer_queue_t *q,
    }
    else
    {
+      rhi_defer_release_states(q);
       q->count = 0;
    }
+   return true;
 }
 
 /* ---- per-op push helpers --------------------------------------------- */

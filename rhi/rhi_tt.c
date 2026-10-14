@@ -2570,10 +2570,10 @@ static void RestorableRectSaveStateVec_free_storage(struct RestorableRectSaveSta
    static void texture_tracker_init(struct TextureTracker *self);
    static void texture_tracker_fini(struct TextureTracker *self);
 
-   void texture_tracker_save_state(struct TextureTracker *self,
-         TextureTrackerSaveState *out);
-   void texture_tracker_load_state(struct TextureTracker *self,
-         const TextureTrackerSaveState *state);
+   bool texture_tracker_save_state(struct TextureTracker *self,
+         TextureTrackerSaveState *out, const uint16_t *saved_vram);
+   bool texture_tracker_load_state(struct TextureTracker *self,
+         const TextureTrackerSaveState *state, const uint16_t *fallback_vram);
 
    void texture_tracker_upload(struct TextureTracker *self,
          TTRect rect,
@@ -5454,6 +5454,15 @@ static bool is_power_of_two(int n) {
    static void texture_tracker_mirror_store(struct TextureTracker *self, TTRect rect, const uint16_t *vram) {
       unsigned j, i;
       texture_tracker_invalidate_page_hashes(self, rect);
+      if (rect.x == 0 && rect.y == 0 &&
+          rect.width == FB_WIDTH && rect.height == FB_HEIGHT)
+      {
+         /* State capture/restore covers contiguous native VRAM. Partial and
+          * wrapping uploads keep the per-coordinate path below. */
+         if (self->vram_mirror != vram)
+            memcpy(self->vram_mirror, vram, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+         return;
+      }
       for (j = rect.y; j < rect.y + rect.height; j++) {
          unsigned my = j & (FB_HEIGHT - 1);
          for (i = rect.x; i < rect.x + rect.width; i++) {
@@ -6998,11 +7007,49 @@ static int64_t page_bytes(FusionRects *fusion)
 
    /* Allocate a new upload (refcount 1) that is a deep copy of to_copy with the
     * HD textures map cleared. Replaces the old by-value copy initialiser flow. */
-   static TextureUpload *texture_upload_new_copy_without_handles(const TextureUpload *to_copy) {
-      TextureUpload *copy = texture_upload_new();
-      texture_upload_copy_contents(copy, to_copy);
-      hd_tex_map_clear(&copy->textures);
+   static TextureUpload *texture_upload_new_copy_without_handles(const TextureUpload *source)
+   {
+      TextureUpload *copy = (TextureUpload *)malloc(sizeof(*copy));
+      if (!copy)
+         return NULL;
+      if (source->image_count < 0 || source->dumped_modes_count < 0 ||
+          (source->image_count && !source->image) ||
+          (source->dumped_modes_count && !source->dumped_modes))
+      {
+         free(copy);
+         return NULL;
+      }
+      texture_upload_init(copy);
+      copy->refcount = 1;
+      copy->dumpable = source->dumpable;
+      copy->width = source->width;
+      copy->height = source->height;
+      copy->hash = source->hash;
+      copy->image_count = source->image_count;
+      copy->dumped_modes_count = source->dumped_modes_count;
+      copy->dumped_modes_cap = source->dumped_modes_count;
+      if (source->image_count)
+      {
+         copy->image = (uint16_t *)malloc((size_t)source->image_count * sizeof(uint16_t));
+         if (!copy->image)
+            goto failed;
+         memcpy(copy->image, source->image, (size_t)source->image_count * sizeof(uint16_t));
+      }
+      if (source->dumped_modes_count)
+      {
+         copy->dumped_modes = (DumpedMode *)malloc((size_t)source->dumped_modes_count * sizeof(DumpedMode));
+         if (!copy->dumped_modes)
+            goto failed;
+         memcpy(copy->dumped_modes, source->dumped_modes,
+               (size_t)source->dumped_modes_count * sizeof(DumpedMode));
+      }
+      /* Only CPU data crosses a context boundary. The destination tracker
+       * reloads HD images through its own backend and cache. */
       return copy;
+
+failed:
+      texture_upload_release(copy);
+      return NULL;
    }
 
    /* Transient hash -> upload-pointer lookup used only while loading a save
@@ -7013,13 +7060,24 @@ static int64_t page_bytes(FusionRects *fusion)
    struct UploadPtrEntry { uint32_t key; TextureUpload *val; };
    POD_VEC_DECLARE(UploadPtrVec, UploadPtrEntry);
 
-   static TextureRectSaveState to_save_state(const TextureRect *t,
-         UploadOwningMap *uploads){
-      uint32_t hash = t->upload->hash;
+   static bool to_save_state(const TextureRect *texture,
+         UploadOwningMap *uploads, TextureRectSaveState *out)
+   {
+      uint32_t hash = texture->upload->hash;
       if (!uploadmap_contains(uploads, hash))
-         uploadmap_insert(uploads, hash, texture_upload_new_copy_without_handles(t->upload));
-      { TextureRectSaveState _ss; _ss.upload_hash = t->upload->hash; _ss.offset_x = t->offset_x;
-        _ss.offset_y = t->offset_y; _ss.vram_rect = t->vram_rect; return _ss; }
+      {
+         TextureUpload *copy = texture_upload_new_copy_without_handles(texture->upload);
+         if (!copy)
+            return false;
+         /* Snapshot construction reserves one slot per referenced rectangle,
+          * so insertion cannot allocate after the upload has been copied. */
+         uploadmap_insert(uploads, hash, copy);
+      }
+      out->upload_hash = hash;
+      out->offset_x = texture->offset_x;
+      out->offset_y = texture->offset_y;
+      out->vram_rect = texture->vram_rect;
+      return true;
    }
 
    static TextureRect from_save_state(const TextureRectSaveState *t,
@@ -7038,121 +7096,549 @@ static int64_t page_bytes(FusionRects *fusion)
         _tr.vram_rect = t->vram_rect; return _tr; }
    }
 
-   void texture_tracker_save_state(struct TextureTracker *self,
-         TextureTrackerSaveState *out)
+   /* Checked allocation shared by the snapshot and its serialized form. A
+    * zero count has no storage; callers distinguish it from allocation failure. */
+   static void *tt_state_alloc(size_t count, size_t element_size)
+   {
+      if (!count || count > SIZE_MAX / element_size)
+         return NULL;
+      return calloc(count, element_size);
+   }
+
+   bool texture_tracker_save_state(struct TextureTracker *self,
+         TextureTrackerSaveState *out, const uint16_t *saved_vram)
    {
       TextureTrackerSaveState state;
+      size_t references = 0;
+      int active = 0;
+      int i, j;
       tts_init(&state);
-
-      { int _ti; for (_ti = 0; _ti < self->tracker.textures.count; _ti++)
+      for (i = 0; i < self->tracker.textures.count; i++)
+         if (self->tracker.textures.a[i].alive)
+            active++;
+      references = (size_t)active;
+      for (i = 0; i < self->restorable_rects.count; i++)
       {
-         EnduringTextureRect *r = &self->tracker.textures.a[_ti];
-         if (r->alive)
-         {
-            TextureRectSaveState _ss = to_save_state(&r->texture_rect, &state.uploads);
-            TextureRectSaveStateVec_push(&state.rects, &_ss);
-         }
-      } }
+         size_t count = (size_t)self->restorable_rects.items[i].to_restore.v.count;
+         if (count > INT_MAX - references)
+            goto failed;
+         references += count;
+      }
+      state.rects.items = (TextureRectSaveState *)tt_state_alloc(active, sizeof(*state.rects.items));
+      state.restorable.items = (RestorableRectSaveState *)tt_state_alloc(
+            self->restorable_rects.count, sizeof(*state.restorable.items));
+      state.uploads.items = (UploadOwningMapEntry *)tt_state_alloc(references, sizeof(*state.uploads.items));
+      if ((active && !state.rects.items) ||
+          (self->restorable_rects.count && !state.restorable.items) ||
+          (references && !state.uploads.items))
+         goto failed;
+      state.rects.cap = active;
+      state.restorable.cap = self->restorable_rects.count;
+      state.restorable.count = self->restorable_rects.count;
+      state.uploads.cap = (int)references;
+      for (i = 0; i < self->tracker.textures.count; i++)
       {
-      int _sri;
-      for (_sri = 0; _sri < rrvec_size(&self->restorable_rects); _sri++)
+         const EnduringTextureRect *rect = &self->tracker.textures.a[i];
+         if (rect->alive)
+         {
+            if (!to_save_state(&rect->texture_rect, &state.uploads,
+                     &state.rects.items[state.rects.count]))
+               goto failed;
+            state.rects.count++;
+         }
+      }
+      for (i = 0; i < self->restorable_rects.count; i++)
       {
-         RestorableRect *r = &self->restorable_rects.items[_sri];
-         RestorableRectSaveState saved;
-         rrss_init(&saved);
-         saved.hash = r->hash;
-         saved.rect = r->rect;
+         const RestorableRect *source = &self->restorable_rects.items[i];
+         RestorableRectSaveState *saved = &state.restorable.items[i];
+         saved->rect = source->rect;
+         saved->hash = source->hash;
+         saved->to_restore.items = (TextureRectSaveState *)tt_state_alloc(
+               source->to_restore.v.count, sizeof(*saved->to_restore.items));
+         if (source->to_restore.v.count && !saved->to_restore.items)
+            goto failed;
+         saved->to_restore.cap = source->to_restore.v.count;
+         for (j = 0; j < source->to_restore.v.count; j++)
          {
-         int _rti;
-         for (_rti = 0; _rti < ownedrects_size(&r->to_restore); _rti++)
-         {
-            TextureRect *t = &r->to_restore.v.items[_rti];
-            TextureRectSaveState _ss = to_save_state(t, &state.uploads);
-            TextureRectSaveStateVec_push(&saved.to_restore, &_ss);
+            if (!to_save_state(&source->to_restore.v.items[j], &state.uploads,
+                     &saved->to_restore.items[j]))
+               goto failed;
+            saved->to_restore.count++;
          }
-         }
-         RestorableRectSaveStateVec_push_move(&state.restorable, &saved);
       }
+      /* GPU.vram is already in the main GPU state. Omit only an exactly
+       * identical mirror; upload identities and all rect history still travel
+       * independently. Context snapshots pass NULL and keep their own copy. */
+      if (self->vram_mirror && (!saved_vram || memcmp(self->vram_mirror,
+                  saved_vram, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t))))
+      {
+         state.vram_mirror = (uint16_t *)tt_state_alloc(FB_WIDTH * FB_HEIGHT, sizeof(uint16_t));
+         if (!state.vram_mirror)
+            goto failed;
+         memcpy(state.vram_mirror, self->vram_mirror, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
       }
-
-      /* The VRAM mirror travels with the rects: see TextureTrackerSaveState. */
-      if (self->vram_mirror != NULL) {
-         state.vram_mirror = (uint16_t*)malloc((size_t)FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
-         if (state.vram_mirror != NULL)
-            memcpy(state.vram_mirror, self->vram_mirror, (size_t)FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
-      }
-
       tts_move(out, &state);
       tts_destroy(&state);
+      return true;
+
+failed:
+      tts_destroy(&state);
+      return false;
    }
 
-
-   void texture_tracker_load_state(struct TextureTracker *self,
-         const TextureTrackerSaveState *state)
+   bool texture_tracker_load_state(struct TextureTracker *self,
+         const TextureTrackerSaveState *state, const uint16_t *fallback_vram)
    {
+      TextureTrackerSaveState empty;
+      RectTracker tracker;
+      RestorableRectVec restorable = { NULL, 0, 0 };
       UploadPtrVec uploads = { NULL, 0, 0 };
-      { int e; for (e = 0; e < state->uploads.count; e++) {
-         TextureUpload *ptr = texture_upload_new(); /* owns +1 */
-         texture_upload_copy_contents(ptr, state->uploads.items[e].val); /* deep-copy contents (refcount untouched) */
-         { UploadPtrEntry pe = { state->uploads.items[e].key, ptr };
-         UploadPtrVec_push(&uploads, &pe);
-         }
-      } }
-
+      TTRect full = { 0, 0, FB_WIDTH, FB_HEIGHT };
+      bool success = false;
+      const uint16_t *mirror;
+      int i, j;
+      if (!state)
       {
-         TTRect _crr;
-         _crr.x = 0;
-         _crr.y = 0;
-         _crr.width = FB_WIDTH;
-         _crr.height = FB_HEIGHT;
-         texture_tracker_clearRegion(self, _crr, 0);
+         /* An old state has native VRAM but no upload history. Discard all
+          * prior associations, including readback-restoration candidates. */
+         tts_init(&empty);
+         empty.vram_mirror = (uint16_t *)fallback_vram; /* borrowed, read only */
+         state = &empty;
       }
-      enduring_arr_clear(&self->tracker.textures); /* load_state should only be called right after creating this TextureTracker, so this ought to be empty already anyway */
+      mirror = state->vram_mirror ? state->vram_mirror : fallback_vram;
+      rect_tracker_init(&tracker);
+      uploads.items = (UploadPtrEntry *)tt_state_alloc(state->uploads.count, sizeof(*uploads.items));
+      tracker.textures.a = (EnduringTextureRect *)tt_state_alloc(state->rects.count, sizeof(*tracker.textures.a));
+      restorable.items = (RestorableRect *)tt_state_alloc(state->restorable.count, sizeof(*restorable.items));
+      if ((state->uploads.count && !uploads.items) ||
+          (state->rects.count && !tracker.textures.a) ||
+          (state->restorable.count && !restorable.items))
+         goto done;
+      uploads.cap = state->uploads.count;
+      tracker.textures.cap = state->rects.count;
+      restorable.cap = state->restorable.count;
+      restorable.count = state->restorable.count;
+      for (i = 0; i < state->uploads.count; i++)
       {
-         int _i;
-         for (_i = 0; _i < TextureRectSaveStateVec_size(&state->rects); _i++)
-            rect_tracker_place(&self->tracker, from_save_state(TextureRectSaveStateVec_at((struct TextureRectSaveStateVec *)&state->rects, _i), &uploads));
+         TextureUpload *copy = texture_upload_new_copy_without_handles(state->uploads.items[i].val);
+         if (!copy)
+            goto done;
+         uploads.items[uploads.count].key = state->uploads.items[i].key;
+         uploads.items[uploads.count++].val = copy;
       }
-      rrvec_clear(&self->restorable_rects);
+      for (i = 0; i < state->rects.count; i++)
       {
-         int _i;
-         for (_i = 0; _i < RestorableRectSaveStateVec_size(&state->restorable); _i++)
+         TextureRect rect = from_save_state(&state->rects.items[i], &uploads);
+         if (!rect.upload)
+            goto done;
+         texture_rect_retain(&rect);
+         tracker.textures.a[tracker.textures.count].texture_rect = rect;
+         tracker.textures.a[tracker.textures.count++].alive = true;
+      }
+      for (i = 0; i < state->restorable.count; i++)
+      {
+         const RestorableRectSaveState *saved = &state->restorable.items[i];
+         RestorableRect *rect = &restorable.items[i];
+         rect->rect = saved->rect;
+         rect->hash = saved->hash;
+         rect->to_restore.v.items = (TextureRect *)tt_state_alloc(
+               saved->to_restore.count, sizeof(*rect->to_restore.v.items));
+         if (saved->to_restore.count && !rect->to_restore.v.items)
+            goto done;
+         rect->to_restore.v.cap = saved->to_restore.count;
+         for (j = 0; j < saved->to_restore.count; j++)
          {
-            int _j;
-            RestorableRectSaveState *r = RestorableRectSaveStateVec_at((struct RestorableRectSaveStateVec *)&state->restorable, _i);
-            RestorableRect loaded;
-            restorablerect_init(&loaded);
-            loaded.hash = r->hash;
-            loaded.rect = r->rect;
-            for (_j = 0; _j < TextureRectSaveStateVec_size(&r->to_restore); _j++)
-               ownedrects_push(&loaded.to_restore, from_save_state(TextureRectSaveStateVec_at(&r->to_restore, _j), &uploads));
-            rrvec_push(&self->restorable_rects, &loaded);
-            restorablerect_destroy(&loaded);
+            TextureRect texture = from_save_state(&saved->to_restore.items[j], &uploads);
+            if (!texture.upload)
+               goto done;
+            texture_rect_retain(&texture);
+            rect->to_restore.v.items[rect->to_restore.v.count++] = texture;
          }
       }
-      /* Put the VRAM mirror back (the clearRegion above zeroed it):
-       * page-aligned replacements and CLUTs read outside a tracked upload
-       * hash from it. mirror_store also drops any memoised page hash. */
-      if (state->vram_mirror != NULL && self->vram_mirror != NULL) {
-         TTRect _full = { 0, 0, FB_WIDTH, FB_HEIGHT };
-         texture_tracker_mirror_store(self, _full, state->vram_mirror);
-         texture_tracker_clear_palette_cache(self, _full);
-      }
-      /* Need to reload the hd textures, too */
+      /* Reserve the exact spatial-grid capacity before replacing live state.
+       * Rebuilding the grid below therefore cannot fail partway through. */
+      for (i = 0; i < tracker.textures.count; i++)
       {
-         int e;
-         for (e = 0; e < state->uploads.count; e++)
-            texture_tracker_load_hd_texture(self, state->uploads.items[e].key);
+         CellBounds bounds = cellBounds(tracker.textures.a[i].texture_rect.vram_rect);
+         int x, y;
+         for (y = bounds.lowY; y < bounds.highY; y++)
+            for (x = bounds.lowX; x < bounds.highX; x++)
+               tracker.lookup_grid.cells[y * LOOKUP_GRID_COLUMNS + x].cap++;
       }
-      /* Drop the map's construction refs; the placed/restorable TextureRects
-       * now hold their own references to each upload. */
+      for (i = 0; i < LOOKUP_GRID_COLUMNS * LOOKUP_GRID_ROWS; i++)
       {
-         int i;
-         for (i = 0; i < uploads.count; i++)
-            texture_upload_release(uploads.items[i].val);
+         Cell *cell = &tracker.lookup_grid.cells[i];
+         cell->entries = (LookupEntry *)tt_state_alloc(cell->cap, sizeof(*cell->entries));
+         if (cell->cap && !cell->entries)
+            goto done;
       }
+      rect_tracker_rebuild_lookup_grid(&tracker);
+
+      rect_tracker_deinit(&self->tracker);
+      self->tracker = tracker;
+      rect_tracker_init(&tracker);
+      rrvec_clear(&self->restorable_rects);
+      free(self->restorable_rects.items);
+      self->restorable_rects = restorable;
+      memset(&restorable, 0, sizeof(restorable));
+      fused_pages_mark_dead(&self->fused_pages, full);
+      handle_lru_cache_clear(&self->handle_cache);
+      for (i = 0; i < self->page_bindings_count; i++)
+         ih_reset(&self->page_bindings[i].texture);
+      self->page_bindings_count = 0;
+      self->cached_palette_hashes_count = 0;
+      self->cached_page_bounds_count = 0;
+      texture_tracker_invalidate_page_hashes(self, full);
+      if (mirror && self->vram_mirror)
+         texture_tracker_mirror_store(self, full, mirror);
+      for (i = 0; i < state->uploads.count; i++)
+         texture_tracker_load_hd_texture(self, state->uploads.items[i].key);
+      success = true;
+
+done:
+      rect_tracker_deinit(&tracker);
+      rrvec_clear(&restorable);
+      free(restorable.items);
+      for (i = 0; i < uploads.count; i++)
+         texture_upload_release(uploads.items[i].val);
       UploadPtrVec_free_storage(&uploads);
+      return success;
    }
+/* Portable CPU-only tracker state. All integers are little-endian; neither
+ * native structure padding nor backend image handles enter the state file. */
+typedef struct
+{
+   uint8_t *write;
+   const uint8_t *read;
+   size_t remaining;
+} TTStateCursor;
+
+static bool tt_state_u32(TTStateCursor *cursor, uint32_t *value)
+{
+   unsigned i;
+   if (cursor->remaining < 4)
+      return false;
+   if (cursor->write)
+   {
+      for (i = 0; i < 4; i++)
+         cursor->write[i] = (uint8_t)(*value >> (8 * i));
+      cursor->write += 4;
+   }
+   else
+   {
+      *value = 0;
+      for (i = 0; i < 4; i++)
+         *value |= (uint32_t)cursor->read[i] << (8 * i);
+      cursor->read += 4;
+   }
+   cursor->remaining -= 4;
+   return true;
+}
+
+static bool tt_state_pixels(TTStateCursor *cursor, uint16_t *pixels, size_t count)
+{
+   size_t i;
+   if (count > cursor->remaining / 2)
+      return false;
+#ifndef MSB_FIRST
+   /* Native little-endian words already have the file representation. */
+   if (cursor->write)
+      memcpy(cursor->write, pixels, count * 2);
+   else
+      memcpy(pixels, cursor->read, count * 2);
+#else
+   for (i = 0; i < count; i++)
+   {
+      if (cursor->write)
+      {
+         cursor->write[2 * i] = (uint8_t)pixels[i];
+         cursor->write[2 * i + 1] = (uint8_t)(pixels[i] >> 8);
+      }
+      else
+         pixels[i] = (uint16_t)(cursor->read[2 * i] |
+               ((uint16_t)cursor->read[2 * i + 1] << 8));
+   }
+#endif
+   if (cursor->write)
+      cursor->write += count * 2;
+   else
+      cursor->read += count * 2;
+   cursor->remaining -= count * 2;
+   return true;
+}
+
+static bool tt_state_rect(TTStateCursor *cursor, TextureRectSaveState *rect)
+{
+   uint32_t fields[7];
+   unsigned i;
+   bool saving = cursor->write != NULL;
+   if (saving)
+   {
+      fields[0] = rect->upload_hash;
+      fields[1] = rect->offset_x;
+      fields[2] = rect->offset_y;
+      fields[3] = rect->vram_rect.x;
+      fields[4] = rect->vram_rect.y;
+      fields[5] = rect->vram_rect.width;
+      fields[6] = rect->vram_rect.height;
+   }
+   for (i = 0; i < 7; i++)
+      if (!tt_state_u32(cursor, &fields[i]))
+         return false;
+   if (!saving)
+   {
+      if (fields[1] >= FB_WIDTH || fields[2] >= FB_HEIGHT ||
+          fields[3] >= FB_WIDTH || fields[4] >= FB_HEIGHT ||
+          !fields[5] || fields[5] > FB_WIDTH ||
+          !fields[6] || fields[6] > FB_HEIGHT)
+         return false;
+      rect->upload_hash = fields[0];
+      rect->offset_x = fields[1];
+      rect->offset_y = fields[2];
+      rect->vram_rect.x = fields[3];
+      rect->vram_rect.y = fields[4];
+      rect->vram_rect.width = fields[5];
+      rect->vram_rect.height = fields[6];
+   }
+   return true;
+}
+
+static bool tt_state_rect_valid(const TextureTrackerSaveState *state,
+      const TextureRectSaveState *rect)
+{
+   int i;
+   for (i = 0; i < state->uploads.count; i++)
+      if (state->uploads.items[i].key == rect->upload_hash)
+      {
+         const TextureUpload *upload = state->uploads.items[i].val;
+         return rect->offset_x + rect->vram_rect.width <= upload->width &&
+                rect->offset_y + rect->vram_rect.height <= upload->height;
+      }
+   return false;
+}
+
+/* One walker defines the file format for both directions. The reader owns a
+ * separate snapshot until every count, extent and upload reference is valid. */
+static bool tt_state_transfer(TextureTrackerSaveState *state,
+      TTStateCursor *cursor)
+{
+   uint32_t magic = 0x54535454; /* TTST */
+   uint32_t counts[4];
+   bool saving = cursor->write != NULL;
+   int i, j;
+   if (!tt_state_u32(cursor, &magic) || magic != 0x54535454)
+      return false;
+   if (saving)
+   {
+      counts[0] = state->uploads.count;
+      counts[1] = state->rects.count;
+      counts[2] = state->restorable.count;
+      counts[3] = state->vram_mirror != NULL;
+   }
+   for (i = 0; i < 4; i++)
+      if (!tt_state_u32(cursor, &counts[i]))
+         return false;
+   if (!saving)
+   {
+      /* Minimum record sizes bound allocations by the actual payload. */
+      if (counts[0] > cursor->remaining / 24 ||
+          counts[1] > cursor->remaining / 28 ||
+          counts[2] > cursor->remaining / 24 || counts[3] > 1 ||
+          counts[0] > INT_MAX || counts[1] > INT_MAX || counts[2] > INT_MAX)
+         return false;
+      state->uploads.items = (UploadOwningMapEntry *)tt_state_alloc(counts[0], sizeof(*state->uploads.items));
+      state->rects.items = (TextureRectSaveState *)tt_state_alloc(counts[1], sizeof(*state->rects.items));
+      state->restorable.items = (RestorableRectSaveState *)tt_state_alloc(counts[2], sizeof(*state->restorable.items));
+      if ((counts[0] && !state->uploads.items) ||
+          (counts[1] && !state->rects.items) ||
+          (counts[2] && !state->restorable.items))
+         return false;
+      state->uploads.cap = counts[0];
+      state->rects.cap = state->rects.count = counts[1];
+      state->restorable.cap = state->restorable.count = counts[2];
+   }
+   for (i = 0; i < (int)counts[0]; i++)
+   {
+      TextureUpload *upload = NULL;
+      uint32_t fields[6];
+      if (saving)
+      {
+         upload = state->uploads.items[i].val;
+         fields[0] = upload->hash;
+         fields[1] = upload->width;
+         fields[2] = upload->height;
+         fields[3] = upload->dumpable;
+         fields[4] = upload->image_count;
+         fields[5] = upload->dumped_modes_count;
+      }
+      for (j = 0; j < 6; j++)
+         if (!tt_state_u32(cursor, &fields[j]))
+            return false;
+      if (!saving)
+      {
+         if (!fields[1] || fields[1] > FB_WIDTH ||
+             !fields[2] || fields[2] > FB_HEIGHT || fields[3] > 1 ||
+             fields[4] != fields[1] * fields[2] ||
+             fields[4] > cursor->remaining / 2 ||
+             fields[5] > (cursor->remaining - fields[4] * 2) / 8 ||
+             uploadmap_contains(&state->uploads, fields[0]))
+            return false;
+         upload = (TextureUpload *)malloc(sizeof(*upload));
+         if (!upload)
+            return false;
+         texture_upload_init(upload);
+         upload->refcount = 1;
+         uploadmap_insert(&state->uploads, fields[0], upload);
+         upload->hash = fields[0];
+         upload->width = fields[1];
+         upload->height = fields[2];
+         upload->dumpable = fields[3] != 0;
+         upload->image_count = fields[4];
+         upload->dumped_modes_count = upload->dumped_modes_cap = fields[5];
+         upload->image = (uint16_t *)tt_state_alloc(fields[4], sizeof(uint16_t));
+         upload->dumped_modes = (DumpedMode *)tt_state_alloc(fields[5], sizeof(DumpedMode));
+         if (!upload->image || (fields[5] && !upload->dumped_modes))
+            return false;
+      }
+      if (!tt_state_pixels(cursor, upload->image, upload->image_count))
+         return false;
+      for (j = 0; j < upload->dumped_modes_count; j++)
+      {
+         uint32_t mode = saving ? upload->dumped_modes[j].mode : 0;
+         if (!tt_state_u32(cursor, &mode) || mode > TextureMode_ABGR1555 ||
+             !tt_state_u32(cursor, &upload->dumped_modes[j].palette_hash))
+            return false;
+         if (!saving)
+            upload->dumped_modes[j].mode = (TextureMode)mode;
+      }
+   }
+   for (i = 0; i < state->rects.count; i++)
+      if (!tt_state_rect(cursor, &state->rects.items[i]) ||
+          (!saving && !tt_state_rect_valid(state, &state->rects.items[i])))
+         return false;
+   for (i = 0; i < state->restorable.count; i++)
+   {
+      RestorableRectSaveState *rect = &state->restorable.items[i];
+      uint32_t fields[6];
+      if (saving)
+      {
+         fields[0] = rect->rect.x; fields[1] = rect->rect.y;
+         fields[2] = rect->rect.width; fields[3] = rect->rect.height;
+         fields[4] = rect->hash; fields[5] = rect->to_restore.count;
+      }
+      for (j = 0; j < 6; j++)
+         if (!tt_state_u32(cursor, &fields[j]))
+            return false;
+      if (!saving)
+      {
+         if (fields[0] >= FB_WIDTH || fields[1] >= FB_HEIGHT ||
+             !fields[2] || fields[2] > FB_WIDTH ||
+             !fields[3] || fields[3] > FB_HEIGHT ||
+             fields[5] > cursor->remaining / 28 || fields[5] > INT_MAX)
+            return false;
+         rect->rect = make_rect(fields[0], fields[1], fields[2], fields[3]);
+         rect->hash = fields[4];
+         rect->to_restore.items = (TextureRectSaveState *)tt_state_alloc(fields[5], sizeof(*rect->to_restore.items));
+         if (fields[5] && !rect->to_restore.items)
+            return false;
+         rect->to_restore.count = rect->to_restore.cap = fields[5];
+      }
+      for (j = 0; j < rect->to_restore.count; j++)
+         if (!tt_state_rect(cursor, &rect->to_restore.items[j]) ||
+             (!saving && !tt_state_rect_valid(state, &rect->to_restore.items[j])))
+            return false;
+   }
+   if (counts[3])
+   {
+      if (!saving)
+      {
+         state->vram_mirror = (uint16_t *)tt_state_alloc(FB_WIDTH * FB_HEIGHT, sizeof(uint16_t));
+         if (!state->vram_mirror)
+            return false;
+      }
+      if (!tt_state_pixels(cursor, state->vram_mirror, FB_WIDTH * FB_HEIGHT))
+         return false;
+   }
+   if (!saving && state->rects.count)
+   {
+      /* Live tracker rectangles never overlap. Check unwrapped coordinates:
+       * a legal upload may extend past VRAM's right/bottom edge. The largest
+       * legal coordinate fits this fixed 2048 x 1024 bit map. */
+      uint8_t *occupied = (uint8_t *)calloc(FB_WIDTH * FB_HEIGHT / 2, 1);
+      if (!occupied)
+         return false;
+      for (i = 0; i < state->rects.count; i++)
+      {
+         const SRect *rect = &state->rects.items[i].vram_rect;
+         int x, y;
+         for (y = rect->y; y < rect->y + rect->height; y++)
+            for (x = rect->x; x < rect->x + rect->width; x++)
+            {
+               unsigned bit = y * (FB_WIDTH * 2) + x;
+               if (occupied[bit >> 3] & (1u << (bit & 7)))
+               {
+                  free(occupied);
+                  return false;
+               }
+               occupied[bit >> 3] |= 1u << (bit & 7);
+            }
+      }
+      free(occupied);
+   }
+   return cursor->remaining == 0;
+}
+
+bool tts_serialize(TextureTrackerSaveState *state, uint8_t **data, uint32_t *size)
+{
+   TTStateCursor cursor;
+   uint64_t total = 20 + (uint64_t)state->rects.count * 28 +
+         (uint64_t)state->restorable.count * 24;
+   int i;
+   *data = NULL;
+   *size = 0;
+   for (i = 0; i < state->uploads.count; i++)
+   {
+      const TextureUpload *upload = state->uploads.items[i].val;
+      total += 24 + (uint64_t)upload->image_count * 2 +
+            (uint64_t)upload->dumped_modes_count * 8;
+   }
+   for (i = 0; i < state->restorable.count; i++)
+      total += (uint64_t)state->restorable.items[i].to_restore.count * 28;
+   if (state->vram_mirror)
+      total += FB_WIDTH * FB_HEIGHT * 2;
+   if (total > INT32_MAX || total > SIZE_MAX)
+      return false;
+   *data = (uint8_t *)malloc((size_t)total);
+   if (!*data)
+      return false;
+   cursor.write = *data;
+   cursor.read = NULL;
+   cursor.remaining = (size_t)total;
+   if (!tt_state_transfer(state, &cursor))
+   {
+      free(*data);
+      *data = NULL;
+      return false;
+   }
+   *size = (uint32_t)total;
+   return true;
+}
+
+TextureTrackerSaveState *tts_unserialize(const uint8_t *data, uint32_t size)
+{
+   TextureTrackerSaveState *state = tts_new();
+   TTStateCursor cursor;
+   cursor.write = NULL;
+   cursor.read = data;
+   cursor.remaining = size;
+   if (!state || !tt_state_transfer(state, &cursor))
+   {
+      tts_free(state);
+      return NULL;
+   }
+   return state;
+}
+
    /* End of Save State
     * ======================================== */
    static bool dbg_hotkey_query(struct DbgHotkey *self)

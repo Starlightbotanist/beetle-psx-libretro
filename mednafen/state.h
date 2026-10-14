@@ -53,6 +53,9 @@ extern "C" {
 int MDFNSS_SaveSM(void *st, int a, int b, const void *c, const void *d, const void *e);
 int MDFNSS_LoadSM(void *st, int a, int b);
 
+int MDFNSS_StateActionOptional(void *st, int load, SFORMAT *sf,
+      const char *name, bool *present);
+
 int MDFNSS_StateAction(void *st, int load, int data_only,
       SFORMAT *sf, const char *name);
 

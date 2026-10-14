@@ -115,6 +115,11 @@ void rhi_vulkan_toggle_display(bool status);
 
 bool rhi_vulkan_has_software_renderer(void);
 bool rhi_vulkan_context_ready(void);
+void rhi_vulkan_close(void);
+struct TextureTrackerSaveState;
+bool rhi_vulkan_save_texture_state(struct TextureTrackerSaveState **state);
+/* Takes ownership on success, including while context creation is deferred. */
+bool rhi_vulkan_load_texture_state(struct TextureTrackerSaveState *state);
 
 #ifdef __cplusplus
 }

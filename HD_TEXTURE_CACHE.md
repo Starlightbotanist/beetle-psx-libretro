@@ -221,6 +221,32 @@ with replacement off.
 The `[hdcache]` log gains a line with the journal size and, per 300 frames, the
 predicted loads, inline uploads and pooled waits (timeouts should stay 0).
 
+### Savestates and graphics-context recreation
+
+With **Track Textures** enabled, new savestates include the original upload
+identities, their VRAM mappings and any retained restoration history. Loading
+one rebuilds replacement bindings in either hardware renderer, including in a
+fresh session. Replacement images remain external files: the same texture pack
+must be available. The saved history does not override the session's tracking,
+replacement or cache options.
+
+Older savestates contain native VRAM but no upload history. They still load,
+clearing unrelated replacement mappings; upload-rectangle replacements become
+available again when the game uploads those textures. A future, unrecognized HD
+section also falls back to native VRAM. A malformed recognized section fails
+the load instead of installing partial history.
+
+Both renderers preserve CPU tracking history across graphics-context recreation
+and rebuild GPU images in the new context. Failed initialization retains that
+history for a later retry. Saving while the graphics context is unavailable
+fails when tracking is enabled; loading before context creation is deferred.
+
+Tracking-disabled saves have no additional HD section. HD history can increase
+state size; a VRAM mirror is included only when it differs from the native VRAM
+already saved. The existing fixed serialization-buffer limit is unchanged;
+frontends that negotiate variable-size serialization can request the actual
+required size. No additional user option is needed.
+
 ### Build
 
 Build the HW core as usual — `make HAVE_HW=1` — then optionally `strip` the

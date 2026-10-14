@@ -2,6 +2,7 @@
 #include "tt_trace.h"
 #if defined(TEXTURE_DUMPING_ENABLED) /* defined exactly when rhi_tt.c is built */
 #include "rhi_tt.h" /* texture_tracker_session_reset */
+#include "mednafen/state.h"
 #endif
 
 #include <math.h>
@@ -444,7 +445,10 @@ void rhi_intf_close(void)
    {
 #if defined(HAVE_VULKAN)
 	   if (vk_initialized)
+	   {
+         rhi_vulkan_close();
 		   return;
+	   }
 #endif
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
 	   if (gl_initialized)
@@ -1308,4 +1312,100 @@ float rhi_common_get_aspect_ratio(bool pal_content, int crop_overscan,
    }
 
    return ar; /* 4:3 */
+}
+
+int rhi_intf_texture_state_action(void *sm, int load)
+{
+#if defined(TEXTURE_DUMPING_ENABLED)
+   TextureTrackerSaveState *snapshot = NULL;
+   uint8_t *data = NULL;
+   uint32_t header[2] = { 0, 0 };
+   SFORMAT metadata[] = {
+      { header, sizeof(header), MDFNSTATE_RLSB32, "format_size" },
+      { NULL, 0, 0, NULL }
+   };
+   SFORMAT payload[] = {
+      { NULL, 0, 0, "tracker" },
+      { NULL, 0, 0, NULL }
+   };
+   bool present = false;
+   bool ok = true;
+   if (!load)
+   {
+      struct retro_variable variable = { BEETLE_OPT(track_textures), NULL };
+      if (!environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &variable) ||
+          !variable.value || strcmp(variable.value, "enabled"))
+         goto done;
+      switch (rhi_type)
+      {
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+         case RHI_OPENGL: ok = rhi_gl_save_texture_state(&snapshot); break;
+#endif
+#if defined(HAVE_VULKAN)
+         case RHI_VULKAN: ok = rhi_vulkan_save_texture_state(&snapshot); break;
+#endif
+         default: break;
+      }
+      if (!ok || !snapshot)
+         goto done;
+      header[0] = 1;
+      ok = tts_serialize(snapshot, &data, &header[1]);
+      if (!ok)
+         goto done;
+   }
+   if (!MDFNSS_StateActionOptional(sm, load, metadata, "HD_TEXTURE_META", &present))
+   {
+      ok = false;
+      goto done;
+   }
+   /* Old saves and future schemas have no usable HD history. Native VRAM
+    * still loads normally; never borrow associations from another state. */
+   if (!present || (load && header[0] != 1))
+      goto restore;
+   if (load)
+   {
+      StateMem *state = (StateMem *)sm;
+      if (!header[1] || header[1] > INT32_MAX || header[1] > state->len)
+      {
+         ok = false;
+         goto done;
+      }
+      data = (uint8_t *)calloc(header[1], 1);
+      if (!data)
+      {
+         ok = false;
+         goto done;
+      }
+   }
+   payload[0].v = data;
+   payload[0].size = header[1];
+   ok = MDFNSS_StateAction(sm, load, 0, payload, "HD_TEXTURE_DATA") != 0;
+   if (!ok || !load)
+      goto done;
+   snapshot = tts_unserialize(data, header[1]);
+   if (!snapshot)
+   {
+      ok = false;
+      goto done;
+   }
+restore:
+   switch (rhi_type)
+   {
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+      case RHI_OPENGL: ok = rhi_gl_load_texture_state(snapshot); break;
+#endif
+#if defined(HAVE_VULKAN)
+      case RHI_VULKAN: ok = rhi_vulkan_load_texture_state(snapshot); break;
+#endif
+      default: goto done;
+   }
+   if (ok)
+      snapshot = NULL; /* The backend or its deferred queue owns it now. */
+done:
+   free(data);
+   tts_free(snapshot);
+   return ok;
+#else
+   return 1;
+#endif
 }

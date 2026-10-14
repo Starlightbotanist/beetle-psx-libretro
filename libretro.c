@@ -3962,6 +3962,8 @@ int StateAction(StateMem *sm, int load, int data_only)
    ret &= PS_CDC_StateAction(PSX_CDC, sm, load, data_only);
    ret &= MDEC_StateAction(sm, load, data_only);
    ret &= GPU_StateAction(sm, load, data_only);
+   if (ret)
+      ret &= rhi_intf_texture_state_action(sm, load);
    ret &= SPU_StateAction(sm, load, data_only);
 
    ret &= FrontIO_StateAction(PSX_FIO, sm, load, data_only);

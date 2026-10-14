@@ -59,6 +59,8 @@ void rhi_intf_get_system_av_info(struct retro_system_av_info *info);
 
 bool rhi_intf_open(bool is_pal, bool force_software);
 void rhi_intf_close(void);
+/* Optional HD associations follow the GPU section's native VRAM restore. */
+int rhi_intf_texture_state_action(void *sm, int load);
 void rhi_intf_refresh_variables(void);
 void rhi_intf_prepare_frame(void);
 void rhi_intf_apply_pending_geometry(void);

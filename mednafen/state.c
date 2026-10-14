@@ -760,7 +760,7 @@ static int ReadStateChunk(StateMem *st, SFORMAT *sf, int size)
 }
 
 /* This function is called by the game driver(NES, GB, GBA) to save a state. */
-static int MDFNSS_StateAction_internal(void *st_p, int load, int data_only, struct SSDescriptor *section)
+static int MDFNSS_StateAction_internal(void *st_p, int load, int data_only, struct SSDescriptor *section, bool *present)
 {
    StateMem *st = (StateMem*)st_p;
 
@@ -798,6 +798,8 @@ static int MDFNSS_StateAction_internal(void *st_p, int load, int data_only, stru
       }
       if(smem_seek(st, entry_loc, SSEEK_SET) < 0)
          return(0);
+      if (present)
+         *present = found != 0;
       if(!found && !section->optional) /* Not found.  We are sad! */
          return(0);
    }
@@ -820,7 +822,34 @@ int MDFNSS_StateAction(
    love.name         = name;
    love.optional     = false;
 
-   return(MDFNSS_StateAction_internal(st, load, 0, &love));
+   return(MDFNSS_StateAction_internal(st, load, 0, &love, NULL));
+}
+
+int MDFNSS_StateActionOptional(void *st, int load, SFORMAT *sf,
+      const char *name, bool *present)
+{
+   struct SSDescriptor section;
+   StateMem *state = (StateMem *)st;
+   uint32_t original_len = state->len;
+   int result;
+   section.sf = sf;
+   section.name = name;
+   section.optional = true;
+   *present = !load;
+   if (load && state->len >= 32)
+   {
+      /* Frontends may supply a padded, fixed-size buffer. Search only the
+       * recorded state bytes, not uninitialised padding after the last chunk. */
+      const uint8_t *size = state->data + 20;
+      uint32_t used = (uint32_t)size[0] | ((uint32_t)size[1] << 8) |
+            ((uint32_t)size[2] << 16) | ((uint32_t)size[3] << 24);
+      if (used >= 32 && used <= original_len)
+         state->len = used;
+   }
+   result = MDFNSS_StateAction_internal(st, load, 0, &section, present);
+   if (load)
+      state->len = original_len;
+   return result;
 }
 
 int MDFNSS_SaveSM(void *st_p, int a, int b, const void *c, const void *d,

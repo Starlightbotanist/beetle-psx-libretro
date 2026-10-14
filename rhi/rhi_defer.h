@@ -60,7 +60,8 @@ typedef enum
    RHI_DEFER_SET_VERTICAL_DISPLAY_RANGE,
    RHI_DEFER_SET_DISPLAY_MODE,
    RHI_DEFER_LOAD_IMAGE,
-   RHI_DEFER_TOGGLE_DISPLAY
+   RHI_DEFER_TOGGLE_DISPLAY,
+   RHI_DEFER_TEXTURE_STATE
 } rhi_defer_kind_t;
 
 /*
@@ -148,6 +149,7 @@ typedef struct
       {
          bool status;
       } toggle_display;
+      struct TextureTrackerSaveState *texture_state;
    } u;
 } rhi_defer_op_t;
 
@@ -169,9 +171,9 @@ typedef struct
  * has all renderer state in its own statics) plus a const pointer to the
  * op being replayed. Implementation should switch on op->kind and call
  * the appropriate rhi_<backend>_<op>(...) function with op->u.<op>.*
- * fields. Returning has no effect; errors are the dispatcher's problem.
+ * fields. Return false to retain the complete queue for a reset retry.
  */
-typedef void (*rhi_defer_dispatch_fn)(void *user, const rhi_defer_op_t *op);
+typedef bool (*rhi_defer_dispatch_fn)(void *user, const rhi_defer_op_t *op);
 
 /* Discard every queued op and free the backing storage. Safe on an
  * empty / never-used queue. After this the queue is left in a usable
@@ -183,16 +185,20 @@ size_t rhi_defer_count(const rhi_defer_queue_t *q);
 
 /*
  * Drain the queue in FIFO order, invoking `dispatch(user, op)` once per
- * entry, then clear. The dispatcher is allowed to call back into the
+ * entry, then clear on success. A failure retains all entries. The dispatcher is allowed to call back into the
  * same rhi_<backend>_* entry point that originally queued the op - by
  * the time drain runs the renderer is up, so the entry point's
  * "renderer present" branch will execute and actually perform the work.
  * It is *not* safe for the dispatcher to push new ops onto the same
  * queue during drain (we snapshot count up-front but reuse storage).
  */
-void rhi_defer_drain(rhi_defer_queue_t *q,
+bool rhi_defer_drain(rhi_defer_queue_t *q,
                      rhi_defer_dispatch_fn dispatch,
                      void *user);
+
+/* On success the queue owns state; on failure the caller still owns it. */
+bool rhi_defer_push_texture_state(rhi_defer_queue_t *q,
+      struct TextureTrackerSaveState *state);
 
 /* Per-op push helpers. Each appends a single tagged entry. They allocate
  * on first use and grow geometrically; an OOM during growth drops the

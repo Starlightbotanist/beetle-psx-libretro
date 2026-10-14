@@ -598,11 +598,17 @@ void texture_tracker_ensure_directories(TextureTracker *self,
 
 TextureTrackerSaveState *tts_new(void);
 void tts_free(TextureTrackerSaveState *s);
+bool tts_serialize(TextureTrackerSaveState *state, uint8_t **data, uint32_t *size);
+TextureTrackerSaveState *tts_unserialize(const uint8_t *data, uint32_t size);
 
-void texture_tracker_save_state(TextureTracker *self,
-      TextureTrackerSaveState *out);
-void texture_tracker_load_state(TextureTracker *self,
-      const TextureTrackerSaveState *state);
+bool texture_tracker_save_state(TextureTracker *self,
+      TextureTrackerSaveState *out, const uint16_t *saved_vram);
+/* saved_vram is the native VRAM already serialized by the GPU section, or
+ * NULL for a self-contained context snapshot. Equal mirrors are not copied. */
+bool texture_tracker_load_state(TextureTracker *self,
+      const TextureTrackerSaveState *state, const uint16_t *fallback_vram);
+/* NULL state clears earlier HD history. fallback_vram is borrowed native
+ * VRAM for that case; NULL skips mirror copying while tracking is disabled. */
 
 #ifdef __cplusplus
 }

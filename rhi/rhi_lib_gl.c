@@ -1066,6 +1066,7 @@ typedef struct gl_renderer gl_renderer;
 struct retro_gl
 {
    gl_renderer *state_data;
+   TextureTrackerSaveState *tracker_state;
    gl_state state;
    gl_video_clock video_clock;
    bool inited;
@@ -1102,7 +1103,7 @@ static rhi_defer_queue_t gl_defer_queue;
 /* Forward declarations for the rhi_gl_* entry points the dispatcher
  * replays into. They are defined further down in this file; the
  * dispatcher itself is static so no header touch is needed. */
-static void gl_defer_dispatch(void *user, const rhi_defer_op_t *op);
+static bool gl_defer_dispatch(void *user, const rhi_defer_op_t *op);
 
 static bool has_software_fb = false;
 
@@ -3746,6 +3747,37 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
    glGenFramebuffers(1, &renderer->vram_sync_read_fbo);
    glGenFramebuffers(1, &renderer->vram_sync_draw_fbo);
    {
+      bool complete = renderer->tt_read_fbo != 0;
+      gl_texture *textures[3];
+      unsigned i;
+      textures[0] = &renderer->fb_texture;
+      textures[1] = &renderer->palette_texture;
+      textures[2] = &renderer->fb_out;
+      /* A failed immutable allocation may leave a nonzero texture name.
+       * Reject it before context_reset consumes the retained CPU snapshot. */
+      glBindFramebuffer(GL_FRAMEBUFFER, renderer->tt_read_fbo);
+      for (i = 0; i < 3; i++)
+      {
+         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+               GL_TEXTURE_2D, textures[i]->id, 0);
+         if (i == 2)
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                  GL_TEXTURE_2D, renderer->fb_out_depth.id, 0);
+         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            complete = false;
+      }
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D, 0, 0);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+            GL_TEXTURE_2D, 0, 0);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      if (!complete)
+      {
+         log_cb(RETRO_LOG_ERROR, "[gl_renderer_new] framebuffer allocation failed\n");
+         return false;
+      }
+   }
+   {
       TTGpuBackend vt = gl_tt_make_backend(renderer);
       renderer->tracker = texture_tracker_new(&vt, NULL);
    }
@@ -5795,11 +5827,11 @@ static void gl_caps_init(void)
  * state because the entry points already read everything they need from
  * the file-static `static_renderer`.
  */
-static void gl_defer_dispatch(void *user, const rhi_defer_op_t *op)
+static bool gl_defer_dispatch(void *user, const rhi_defer_op_t *op)
 {
    (void)user;
    if (!op)
-      return;
+      return false;
 
    switch (op->kind)
    {
@@ -5849,10 +5881,42 @@ static void gl_defer_dispatch(void *user, const rhi_defer_op_t *op)
                            op->u.load_image.mask_test,
                            op->u.load_image.set_mask);
          break;
+      case RHI_DEFER_TEXTURE_STATE:
+         return texture_tracker_load_state(static_renderer.state_data->tracker,
+               static_renderer.state_data->texture_tracking_enabled ? op->u.texture_state : NULL,
+               static_renderer.state_data->texture_tracking_enabled ? GPU_get_vram() : NULL);
       case RHI_DEFER_TOGGLE_DISPLAY:
          rhi_gl_toggle_display(op->u.toggle_display.status);
          break;
    }
+   return true;
+}
+
+/* Preserve CPU tracking metadata while the old context is still current.
+ * The tracker snapshot contains no GL handles. Native VRAM must be current
+ * too: gl_renderer_free cannot read it after the context has gone away. */
+static bool gl_save_context_state(void)
+{
+   gl_renderer *renderer = static_renderer.state_data;
+   TextureTrackerSaveState *state;
+   if (!renderer || static_renderer.state != GL_STATE_VALID)
+      return true;
+   if (!gl_draw_buffer_is_empty(renderer->command_buffer))
+      gl_renderer_draw(renderer);
+   if (!has_software_fb && !rhi_gl_read_vram(0, 0,
+            VRAM_WIDTH_PIXELS, VRAM_HEIGHT, GPU_get_vram()))
+      return false;
+   if (!renderer->texture_tracking_enabled)
+      return true;
+   state = tts_new();
+   if (!state || !texture_tracker_save_state(renderer->tracker, state, NULL))
+   {
+      tts_free(state);
+      return false;
+   }
+   tts_free(static_renderer.tracker_state);
+   static_renderer.tracker_state = state;
+   return true;
 }
 
 static void gl_context_reset(void)
@@ -5893,6 +5957,11 @@ static void gl_context_reset(void)
     * mirroring vk_context_reset. */
    if (static_renderer.state_data)
    {
+      if (!gl_save_context_state())
+      {
+         log_cb(RETRO_LOG_ERROR, "[gl_context_reset] cannot preserve renderer state\n");
+         return;
+      }
       gl_renderer_free(static_renderer.state_data);
       free(static_renderer.state_data);
       static_renderer.state_data = NULL;
@@ -5922,6 +5991,27 @@ static void gl_context_reset(void)
       GPU_RestoreStateP2(true);
       GPU_RestoreStateP3();
 
+      /* A new tracker starts with tracking/replacement disabled. Reapply
+       * this session's options before restoring its texture identities. */
+      rhi_gl_refresh_variables();
+      if (static_renderer.tracker_state)
+      {
+         if (!texture_tracker_load_state(static_renderer.state_data->tracker,
+                  static_renderer.state_data->texture_tracking_enabled ?
+                  static_renderer.tracker_state : NULL, NULL))
+         {
+            log_cb(RETRO_LOG_ERROR, "[gl_context_reset] cannot restore texture tracking\n");
+            gl_renderer_free(static_renderer.state_data);
+            free(static_renderer.state_data);
+            static_renderer.state_data = NULL;
+            static_renderer.state = GL_STATE_INVALID;
+            static_renderer.inited = false;
+            return;
+         }
+         tts_free(static_renderer.tracker_state);
+         static_renderer.tracker_state = NULL;
+      }
+
       /* Replay any rhi_gl_* state-sets / VRAM uploads / display
        * toggles that arrived between rhi_gl_open's SET_HW_RENDER
        * and this context_reset firing. By this point the renderer
@@ -5937,7 +6027,15 @@ static void gl_context_reset(void)
          log_cb(RETRO_LOG_INFO,
                "[gl_context_reset] replaying %u deferred RHI op(s)\n",
                (unsigned)rhi_defer_count(&gl_defer_queue));
-         rhi_defer_drain(&gl_defer_queue, gl_defer_dispatch, NULL);
+         if (!rhi_defer_drain(&gl_defer_queue, gl_defer_dispatch, NULL))
+         {
+            log_cb(RETRO_LOG_ERROR, "[gl_context_reset] cannot replay texture state\n");
+            gl_renderer_free(static_renderer.state_data);
+            free(static_renderer.state_data);
+            static_renderer.state_data = NULL;
+            static_renderer.state = GL_STATE_INVALID;
+            static_renderer.inited = false;
+         }
       }
    }
    else
@@ -5957,11 +6055,8 @@ static void gl_context_reset(void)
        * cleanly instead. */
       static_renderer.state      = GL_STATE_INVALID;
 
-      /* Drop any pending deferred ops too: with no renderer they
-       * can never be replayed, and surviving across a failed
-       * context_reset would let them leak into a future, unrelated
-       * reset attempt. */
-      rhi_defer_clear(&gl_defer_queue);
+      /* Keep this game's deferred work and CPU snapshot for a retry.
+       * rhi_gl_close clears them when the game actually ends. */
    }
 }
 
@@ -5969,6 +6064,14 @@ static void gl_context_destroy(void)
 {
    if (static_renderer.state_data)
    {
+      if (!gl_save_context_state())
+      {
+         /* Destruction cannot be postponed. Do not restore metadata against
+          * stale CPU VRAM after an unsuccessful readback. */
+         log_cb(RETRO_LOG_ERROR, "[gl_context_destroy] cannot preserve renderer state\n");
+         tts_free(static_renderer.tracker_state);
+         static_renderer.tracker_state = NULL;
+      }
       gl_renderer_free(static_renderer.state_data);
       free(static_renderer.state_data);
    }
@@ -5977,10 +6080,8 @@ static void gl_context_destroy(void)
    static_renderer.state      = GL_STATE_INVALID;
    static_renderer.inited     = false;
 
-   /* Free the deferred-op storage. A new context_reset would start
-    * from an empty queue anyway; carrying allocations across a
-    * destroy would just hold memory we have no use for. */
-   rhi_defer_clear(&gl_defer_queue);
+   /* A repeated destroy must not discard uploads queued while the context
+    * was unavailable. They belong to this game until rhi_gl_close. */
 }
 
 static struct retro_system_av_info get_av_info(gl_video_clock std)
@@ -6237,6 +6338,9 @@ hw_render_accepted:
 
 void rhi_gl_close(void)
 {
+   tts_free(static_renderer.tracker_state);
+   static_renderer.tracker_state = NULL;
+   rhi_defer_clear(&gl_defer_queue);
    static_renderer.state       = GL_STATE_INVALID;
    static_renderer.video_clock = VIDEO_CLOCK_NTSC;
 }
@@ -7344,9 +7448,6 @@ void rhi_gl_load_image(
    gl_image_load_vertex slice[4];
    GLboolean scissor_was_enabled;
 
-   if (static_renderer.state == GL_STATE_INVALID)
-      return;
-
    x &= VRAM_WIDTH_PIXELS - 1;
    y &= VRAM_HEIGHT - 1;
    renderer = static_renderer.state_data;
@@ -7365,6 +7466,9 @@ void rhi_gl_load_image(
             x, y, w, h, vram, mask_test, set_mask);
       return;
    }
+
+   if (static_renderer.state == GL_STATE_INVALID)
+      return;
 
    gl_normalize_inherited_state();
 
@@ -8580,4 +8684,33 @@ bool rhi_gl_context_ready(void)
 {
    return static_renderer.state != GL_STATE_INVALID
       && static_renderer.state_data != NULL;
+}
+
+bool rhi_gl_save_texture_state(TextureTrackerSaveState **state)
+{
+   gl_renderer *renderer = static_renderer.state_data;
+   *state = NULL;
+   if (!rhi_gl_context_ready())
+      return false;
+   if (!renderer->texture_tracking_enabled)
+      return true;
+   if (!gl_draw_buffer_is_empty(renderer->command_buffer))
+      gl_renderer_draw(renderer);
+   *state = tts_new();
+   return *state && texture_tracker_save_state(renderer->tracker, *state,
+         GPU_get_upscale_shift() == 0 ? GPU_get_vram() : NULL);
+}
+
+bool rhi_gl_load_texture_state(TextureTrackerSaveState *state)
+{
+   if (!rhi_gl_context_ready())
+      return rhi_defer_push_texture_state(&gl_defer_queue, state);
+   if (!gl_draw_buffer_is_empty(static_renderer.state_data->command_buffer))
+      gl_renderer_draw(static_renderer.state_data);
+   if (!texture_tracker_load_state(static_renderer.state_data->tracker,
+            static_renderer.state_data->texture_tracking_enabled ? state : NULL,
+            static_renderer.state_data->texture_tracking_enabled ? GPU_get_vram() : NULL))
+      return false;
+   tts_free(state);
+   return true;
 }

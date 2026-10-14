@@ -116,6 +116,10 @@ void rhi_gl_toggle_display(bool status);
 
 bool rhi_gl_has_software_renderer(void);
 bool rhi_gl_context_ready(void);
+struct TextureTrackerSaveState;
+bool rhi_gl_save_texture_state(struct TextureTrackerSaveState **state);
+/* Takes ownership on success, including while context creation is deferred. */
+bool rhi_gl_load_texture_state(struct TextureTrackerSaveState *state);
 
 #ifdef __cplusplus
 }

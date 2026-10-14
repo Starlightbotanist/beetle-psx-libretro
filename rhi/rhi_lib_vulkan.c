@@ -6925,10 +6925,6 @@ static void renderer_init(Renderer *self,
    renderer_flush(self);
    renderer_reset_scissor_queue(self);
 
-   if (state) {
-      texture_tracker_load_state(self->tracker, state->tracker_state);
-   }
-
    }
    }
    }
@@ -6972,7 +6968,9 @@ static void renderer_save_vram_state(Renderer *self, SaveState *out){
    savestate_init(out);
    owned_u32_move(&out->vram, &vram);
    out->state = self->render_state;
-   texture_tracker_save_state(self->tracker, out->tracker_state);
+   if (!out->tracker_state ||
+       !texture_tracker_save_state(self->tracker, out->tracker_state, NULL))
+      TT_LOG(RETRO_LOG_ERROR, "Could not preserve HD texture tracking\n");
    }
 
    /* Release the readback buffer. In the pre-C++->C source BufferHandle was an
@@ -20010,11 +20008,50 @@ static const VkApplicationInfo *get_application_info(void)
  * call could not. The user pointer is unused - everything the entry
  * points need is in this TU's file-statics.
  */
-static void vk_defer_dispatch(void *user, const rhi_defer_op_t *op)
+/* Apply this session's HD policy before either drawing or replaying saved
+ * upload history. A new renderer starts with tracking disabled. */
+static void renderer_apply_texture_config(Renderer *self)
+{
+   self->texture_tracking_enabled = track_textures;
+   /* HD Texture Folder changed (or first non-default read): re-point the
+    * tracker's folder helpers and re-scan replacements from the new base
+    * (the tracker init loaded from the content dir, mode 0). */
+   {
+      static int texture_dir_mode_applied = 0;
+      texture_tracker_set_texture_dir_mode(hd_texture_dir_mode);
+      if (hd_texture_dir_mode != texture_dir_mode_applied) {
+         texture_tracker_reload_textures_from_disk(self->tracker);
+         texture_dir_mode_applied = hd_texture_dir_mode;
+      }
+   }
+   /* Everything else goes through the shared tracker's config setter.
+    * Replace Textures is edge-applied inside set_config so the in-game ']'
+    * toggle (see texture_tracker_endFrame) isn't re-stamped back to the menu
+    * value every frame. */
+   {
+      TextureTrackerConfig ttcfg;
+      ttcfg.dump_enabled           = dump_textures;
+      ttcfg.hd_textures_enabled    = replace_textures;
+      ttcfg.eager_textures         = eager_hd_textures;
+      ttcfg.lazy_sync              = lazy_sync_hd_textures;
+      ttcfg.dump_mode_rect         = hd_dump_mode_rect;
+      ttcfg.dump_mode_pages        = hd_dump_mode_pages;
+      ttcfg.replacement_mode_pages = hd_replacement_mode_pages;
+      ttcfg.replacement_fallback   = hd_replacement_fallback;
+      ttcfg.reduce_palette_range   = hd_reduce_palette_range;
+      texture_tracker_set_config(self->tracker, &ttcfg);
+   }
+   renderer_set_hd_cache_budgets(self, hd_cache_ram_bytes, hd_cache_vram_bytes);
+   /* Auto-create the dump/replacement folders once enabled + a game is loaded (after
+    * the config above so it picks the right rect/pages folder). */
+   texture_tracker_ensure_directories(self->tracker, dump_textures, replace_textures);
+}
+
+static bool vk_defer_dispatch(void *user, const rhi_defer_op_t *op)
 {
    (void)user;
    if (!op)
-      return;
+      return false;
 
    switch (op->kind)
    {
@@ -20064,10 +20101,17 @@ static void vk_defer_dispatch(void *user, const rhi_defer_op_t *op)
                                op->u.load_image.mask_test,
                                op->u.load_image.set_mask);
          break;
+      case RHI_DEFER_TEXTURE_STATE:
+         renderer_flush(renderer);
+         renderer_reset_scissor_queue(renderer);
+         return texture_tracker_load_state(renderer->tracker,
+               renderer->texture_tracking_enabled ? op->u.texture_state : NULL,
+               renderer->texture_tracking_enabled ? GPU_get_vram() : NULL);
       case RHI_DEFER_TOGGLE_DISPLAY:
          rhi_vulkan_toggle_display(op->u.toggle_display.status);
          break;
    }
+   return true;
 }
 
 static void vk_context_reset(void)
@@ -20109,6 +20153,13 @@ static void vk_context_reset(void)
             vulkan->lock_queue, vulkan->unlock_queue, vulkan->handle);
    if (renderer)
    {
+      /* A same-context reset needs the same native VRAM/tracker snapshot as
+       * context_destroy. Drop old scanout references before freeing Device. */
+      inside_frame = false;
+      savestate_destroy(&save_state);
+      renderer_save_vram_state(renderer, &save_state);
+      scanouthandlevec_free_storage(&scanout_handles);
+      swapchainimagevec_free_storage(&swapchain_images);
       renderer_fini(renderer);
       free(renderer);
       renderer = NULL;
@@ -20145,12 +20196,32 @@ static void vk_context_reset(void)
    tt_log_startup("vk renderer init: scaling=%u msaa=%u has_software_fb=%d\n",
          (unsigned)scaling, (unsigned)msaa, (int)has_software_fb);
 
+   /* Tracking/configuration must be active before queued uploads and saved
+    * HD history replay, including a subsequent old state with no history. */
+   rhi_vulkan_refresh_variables();
+   renderer_apply_texture_config(renderer);
+
    /* Replay any rhi_vulkan_* state-sets / VRAM uploads that arrived
     * between rhi_vulkan_open's SET_HW_RENDER and this context_reset
     * firing. By this point `renderer` is non-null so each call lands
     * on the live renderer instead of being silently dropped. */
-   if (rhi_defer_count(&defer) > 0)
-      rhi_defer_drain(&defer, vk_defer_dispatch, NULL);
+   if ((save_state.tracker_state &&
+        !texture_tracker_load_state(renderer->tracker,
+              renderer->texture_tracking_enabled ? save_state.tracker_state : NULL,
+              NULL)) ||
+       (rhi_defer_count(&defer) > 0 &&
+        !rhi_defer_drain(&defer, vk_defer_dispatch, NULL)))
+   {
+      log_cb(RETRO_LOG_ERROR, "[vk_context_reset] cannot restore texture state\n");
+      renderer_fini(renderer);
+      free(renderer);
+      device_deinit(device);
+      free(device);
+      renderer = NULL;
+      device = NULL;
+      vulkan = NULL;
+      return;
+   }
 
    renderer_flush(renderer);
 }
@@ -20783,39 +20854,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
       return;
    }
 
-   renderer->texture_tracking_enabled = track_textures;
-   /* HD Texture Folder changed (or first non-default read): re-point the
-    * tracker's folder helpers and re-scan replacements from the new base
-    * (the tracker init loaded from the content dir, mode 0). */
-   {
-      static int texture_dir_mode_applied = 0;
-      texture_tracker_set_texture_dir_mode(hd_texture_dir_mode);
-      if (hd_texture_dir_mode != texture_dir_mode_applied) {
-         texture_tracker_reload_textures_from_disk(renderer->tracker);
-         texture_dir_mode_applied = hd_texture_dir_mode;
-      }
-   }
-   /* Everything else goes through the shared tracker's config setter.
-    * Replace Textures is edge-applied inside set_config so the in-game ']'
-    * toggle (see texture_tracker_endFrame) isn't re-stamped back to the menu
-    * value every frame. */
-   {
-      TextureTrackerConfig ttcfg;
-      ttcfg.dump_enabled           = dump_textures;
-      ttcfg.hd_textures_enabled    = replace_textures;
-      ttcfg.eager_textures         = eager_hd_textures;
-      ttcfg.lazy_sync              = lazy_sync_hd_textures;
-      ttcfg.dump_mode_rect         = hd_dump_mode_rect;
-      ttcfg.dump_mode_pages        = hd_dump_mode_pages;
-      ttcfg.replacement_mode_pages = hd_replacement_mode_pages;
-      ttcfg.replacement_fallback   = hd_replacement_fallback;
-      ttcfg.reduce_palette_range   = hd_reduce_palette_range;
-      texture_tracker_set_config(renderer->tracker, &ttcfg);
-   }
-   renderer_set_hd_cache_budgets(renderer, hd_cache_ram_bytes, hd_cache_vram_bytes);
-   /* Auto-create the dump/replacement folders once enabled + a game is loaded (after
-    * the config above so it picks the right rect/pages folder). */
-   texture_tracker_ensure_directories(renderer->tracker, dump_textures, replace_textures);
+   renderer_apply_texture_config(renderer);
    renderer->render_state.adaptive_smoothing = adaptive_smoothing;
    renderer->render_state.crop_overscan = vulkan_crop_overscan;
    renderer->render_state.offset_cycles = image_offset_cycles;
@@ -21408,4 +21447,37 @@ bool rhi_vulkan_has_software_renderer(void)
 bool rhi_vulkan_context_ready(void)
 {
    return device != NULL && renderer != NULL;
+}
+
+bool rhi_vulkan_save_texture_state(TextureTrackerSaveState **state)
+{
+   *state = NULL;
+   if (!rhi_vulkan_context_ready())
+      return false;
+   if (!renderer->texture_tracking_enabled)
+      return true;
+   renderer_flush(renderer);
+   renderer_reset_scissor_queue(renderer);
+   *state = tts_new();
+   return *state && texture_tracker_save_state(renderer->tracker, *state,
+         GPU_get_upscale_shift() == 0 ? GPU_get_vram() : NULL);
+}
+
+bool rhi_vulkan_load_texture_state(TextureTrackerSaveState *state)
+{
+   if (!rhi_vulkan_context_ready())
+      return rhi_defer_push_texture_state(&defer, state);
+   renderer_flush(renderer);
+   renderer_reset_scissor_queue(renderer);
+   if (!texture_tracker_load_state(renderer->tracker,
+            renderer->texture_tracking_enabled ? state : NULL,
+            renderer->texture_tracking_enabled ? GPU_get_vram() : NULL))
+      return false;
+   tts_free(state);
+   return true;
+}
+
+void rhi_vulkan_close(void)
+{
+   rhi_defer_clear(&defer);
 }
