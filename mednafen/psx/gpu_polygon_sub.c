@@ -14,6 +14,46 @@
 
 #include <retro_miscellaneous.h>
 
+static bool IsAxisAlignedTriangle(const tri_vertex *vertices)
+{
+	return vertices[0].precise[2] == vertices[1].precise[2] &&
+		vertices[1].precise[2] == vertices[2].precise[2] &&
+		(vertices[0].x == vertices[1].x || vertices[0].x == vertices[2].x ||
+		 vertices[1].x == vertices[2].x) &&
+		(vertices[0].y == vertices[1].y || vertices[0].y == vertices[2].y ||
+		 vertices[1].y == vertices[2].y);
+}
+
+/* Keep the decoder's single-triangle fallback when the second half will
+ * be culled. The first half's size was already checked by the decoder. */
+static bool TriangleFits(const tri_vertex *vertices, unsigned shift)
+{
+	int32_t min_x = MIN(vertices[0].x, MIN(vertices[1].x, vertices[2].x));
+	int32_t max_x = MAX(vertices[0].x, MAX(vertices[1].x, vertices[2].x));
+	int32_t min_y = MIN(vertices[0].y, MIN(vertices[1].y, vertices[2].y));
+	int32_t max_y = MAX(vertices[0].y, MAX(vertices[1].y, vertices[2].y));
+	return (int64_t)max_x - min_x < ((int64_t)1024 << shift) &&
+		(int64_t)max_y - min_y < ((int64_t)512 << shift);
+}
+
+/* Hardware submits both triangles together. A zero UV derivative in one
+ * triangle does not make an oblique 3D quad a sprite. Check the complete
+ * strip, including the first vertex retained by the command decoder. */
+static bool IsAxisAlignedQuad(const tri_vertex *first,
+      const tri_vertex *vertices)
+{
+	const tri_vertex *b = &vertices[0];
+	const tri_vertex *c = &vertices[1];
+	const tri_vertex *d = &vertices[2];
+	return first->precise[2] == b->precise[2] &&
+		((first->x == c->x && b->x == d->x &&
+		  first->y == b->y && c->y == d->y &&
+		  first->x != b->x && first->y != c->y) ||
+		 (first->x == b->x && c->x == d->x &&
+		  first->y == c->y && b->y == d->y &&
+		  first->x != c->x && first->y != b->y));
+}
+
 /* Determine whether to offset UVs to account for difference in interpolation between PS1 and modern GPUs */
 void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned count)
 {
@@ -21,6 +61,10 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 	uint16_t off_u = 0;
 	uint16_t off_v = 0;
 	bool may_be_2d = false;
+	enum rhi_renderer_type renderer = rhi_intf_is_type();
+	bool hardware_command = count == 4 && gpu->InCmd == INCMD_QUAD &&
+		(renderer == RHI_OPENGL || renderer == RHI_VULKAN);
+	bool hardware_quad = false;
 	if (gpu->InCmd == INCMD_QUAD)
 	{
 		off_u = gpu->off_u;
@@ -74,6 +118,31 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 		/* Leverage PGXP to further avoid 3D polygons that just happen to align this way after projection */
 		bool is3D = ((vertices[0].precise[2] != vertices[1].precise[2]) || (vertices[1].precise[2] != vertices[2].precise[2]));
 
+		bool first_valid = false;
+		bool second_valid = false;
+		if (hardware_command)
+		{
+			const tri_vertex *first = gpu->InQuad_F3Vertices;
+			int64_t first_area = 0;
+			first_valid = !(gpu->killQuadPart & 1) &&
+				TriangleFits(first, gpu->upscale_shift);
+			if (first_valid)
+				first_area = ((int64_t)first[1].x - first[0].x) *
+					((int64_t)first[2].y - first[0].y) - ((int64_t)first[2].x - first[0].x) *
+					((int64_t)first[1].y - first[0].y);
+			first_valid = first_valid && first_area != 0;
+			second_valid = !(gpu->killQuadPart & 2) && area != 0 &&
+				TriangleFits(vertices, gpu->upscale_shift);
+			hardware_quad = first_valid && second_valid && texArea != 0;
+			if (hardware_quad)
+			{
+				/* Rebuild completed-quad corrections from saved vertices.
+				 * Do not carry a first-triangle guess across reset/restore. */
+				off_u = off_v = 0;
+				may_be_2d = false;
+			}
+		}
+
 		/* Shouldn't matter as degenerate primitives will be culled anyways. */
 		if ((area != 0) && (texArea != 0) && !is3D)
 		{
@@ -90,7 +159,11 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 			bool zero_dvdy = dvdy == 0;
 
 			/* Dumb heuristic to check if a polygon may be 2D */
-			may_be_2d = may_be_2d || zero_dudy || zero_dudx || zero_dvdy || zero_dvdx;
+			if (hardware_quad)
+				may_be_2d = IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices) &&
+					((zero_dudy && zero_dvdx) || (zero_dudx && zero_dvdy));
+			else
+				may_be_2d = may_be_2d || zero_dudy || zero_dudx || zero_dvdy || zero_dvdx;
 
 			/* If we have negative dU or dV in any direction, increment the U or V to work properly with nearest-neighbor in this impl.
 			 * If we don't have 1:1 pixel correspondence, this creates a slight "shift" in the sprite, but we guarantee that we don't sample garbage at least.
@@ -104,7 +177,8 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 			 * Case 2: U is decreasing in Y, but no change in X.
 			 * Case 3: V is decreasing in X, but no change in Y.
 			 * Case 4: V is decreasing in Y, but no change in X. */
-			if (rhi_intf_is_type() != RHI_VULKAN || psx_gpu_upscale_shift_hw)
+			if ((!hardware_quad || may_be_2d) &&
+				(renderer != RHI_VULKAN || psx_gpu_upscale_shift_hw))
 			{
 				if (neg_dudx && zero_dudy)
 					off_u = 1;
@@ -143,6 +217,20 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 							vertices[0].v = vertices[2].v - 1;
 					}
 				}
+			}
+		}
+		if (hardware_command && !hardware_quad && (first_valid || second_valid))
+		{
+			/* Degenerate quads can encode a single triangle. Preserve 2D
+			 * fallback artwork without applying sprite corrections to an
+			 * oblique surviving triangle. No pending triangle is dropped. */
+			bool sprite_geometry = first_valid && second_valid ?
+				IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices) :
+				IsAxisAlignedTriangle(first_valid ? gpu->InQuad_F3Vertices : vertices);
+			if (!sprite_geometry)
+			{
+				off_u = off_v = 0;
+				may_be_2d = false;
 			}
 		}
 	}
