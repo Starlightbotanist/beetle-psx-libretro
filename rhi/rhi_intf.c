@@ -924,7 +924,8 @@ void rhi_intf_push_quad(
                texture_blend_mode,
                depth_shift,
                quad_dither,
-               blend_mode, mask_test, set_mask, uv_offset_u, uv_offset_v);
+               blend_mode, mask_test, set_mask, is_sprite, may_be_2d,
+               uv_offset_u, uv_offset_v);
 #endif
          break;
       case RHI_VULKAN:

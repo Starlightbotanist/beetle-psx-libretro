@@ -723,7 +723,7 @@ struct gl_command_vertex {
    /* Read indexed colors from the retained CLUT instead of live VRAM. */
    uint8_t palette_cached;
    /* Native payload flags: 1 RGB plane, 2 UV plane, 4 line coverage,
-    * 8 integer pixel origin.
+    * 8 integer pixel origin, 16 enhanced polygon UV rounding.
     * This byte occupies existing padding before fog. */
    uint8_t native_flags;
    /* Depth-cue sidecar: far colour (1.0 == 0xFF) in [0..2], blend factor in
@@ -1052,6 +1052,7 @@ struct gl_renderer {
    /* When true we display the entire VRAM buffer instead of just
     * the visible area */
    bool display_vram;
+   bool scaled_uv_offset;
 
    /* Display Mode - GP1(08h) */
    enum width_modes curr_width_mode;
@@ -3618,7 +3619,8 @@ static void gl_renderer_upload_textures(
    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
 
-static void get_variables(uint8_t *upscaling, bool *display_vram)
+static void get_variables(uint8_t *upscaling, bool *display_vram,
+      bool *scaled_uv_offset)
 {
    struct retro_variable var = {0};
 
@@ -3635,6 +3637,14 @@ static void get_variables(uint8_t *upscaling, bool *display_vram)
             *upscaling += var.value[1] - '0';
          }
       }
+   }
+
+   if (scaled_uv_offset)
+   {
+      var.key = BEETLE_OPT(scaled_uv_offset);
+      *scaled_uv_offset = true;
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         *scaled_uv_offset = strcmp(var.value, "disabled") != 0;
    }
 
    if (display_vram)
@@ -3685,6 +3695,7 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
    gl_draw_buffer *command_buffer = NULL;
    uint8_t upscaling         = 1;
    bool display_vram         = false;
+   bool scaled_uv_offset     = true;
    struct retro_variable var = {0};
    uint16_t top_left[2]      = {0, 0};
    uint16_t dimensions[2]    = {
@@ -3717,7 +3728,7 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
    else
       has_software_fb = true;
 
-   get_variables(&upscaling, &display_vram);
+   get_variables(&upscaling, &display_vram, &scaled_uv_offset);
 
    var.key = BEETLE_OPT(crop_overscan);
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -4015,6 +4026,7 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
    renderer->tex_y_mask = 0;
    renderer->tex_y_or = 0;
    renderer->display_vram = display_vram;
+   renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->set_mask  = false;
    renderer->force_mask = false;
    renderer->mask_test = false;
@@ -5239,6 +5251,7 @@ static bool retro_refresh_variables(gl_renderer *renderer)
    uint8_t filter            = FILTER_MODE_NEAREST;
    uint8_t upscaling         = 1;
    bool display_vram         = false;
+   bool scaled_uv_offset     = true;
    struct retro_variable var = {0};
    int crop_overscan         = 1;
    int32_t image_offset_cycles = 0;
@@ -5266,7 +5279,7 @@ static bool retro_refresh_variables(gl_renderer *renderer)
        * we are running in software mode */
       has_software_fb = true;
 
-   get_variables(&upscaling, &display_vram);
+   get_variables(&upscaling, &display_vram, &scaled_uv_offset);
 
    var.key = BEETLE_OPT(crop_overscan);
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -5623,6 +5636,7 @@ framebuffer_ready:
 
    renderer->internal_upscaling     = upscaling;
    renderer->display_vram           = display_vram;
+   renderer->scaled_uv_offset       = scaled_uv_offset;
    renderer->internal_color_depth   = depth;
    renderer->color_mode = psx_internal_color_mode;
    renderer->filter_type            = filter;
@@ -6492,7 +6506,7 @@ static struct retro_system_av_info get_av_info(gl_video_clock std)
    /* This function currently queries core options rather than
       checking gl_renderer state; possible to refactor? */
 
-   get_variables(&upscaling, &display_vram);
+   get_variables(&upscaling, &display_vram, NULL);
 
    var.key = BEETLE_OPT(widescreen_hack);
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -7476,6 +7490,10 @@ void rhi_gl_push_triangle(
 
       {
          uint32_t colors[3] = {c0, c1, c2};
+         unsigned i;
+         if (renderer->internal_upscaling > 1 && renderer->scaled_uv_offset)
+            for (i = 0; i < 3; i++)
+               v[i].native_flags |= 16;
          push_primitive(renderer, v, 3, colors, GL_TRIANGLES,
                semi_transparency_mode, mask_test, set_mask);
       }
@@ -7506,6 +7524,7 @@ void rhi_gl_push_quad(
       bool dither,
       int blend_mode,
       bool mask_test, bool set_mask,
+      bool is_sprite, bool may_be_2d,
       uint16_t uv_offset_u, uint16_t uv_offset_v)
 {
    gl_renderer *renderer;
@@ -7631,6 +7650,10 @@ void rhi_gl_push_quad(
          /* Per-primitive HD replacement query (see push_primitive). */
          HdTextureHandle hd = gl_tt_query_hd(renderer, v);
          uint32_t colors[4] = {c0, c1, c2, c3};
+         if (renderer->internal_upscaling > 1 && renderer->scaled_uv_offset &&
+             !is_sprite && !may_be_2d)
+            for (i = 0; i < 4; i++)
+               v[i].native_flags |= 16;
          /* Indices 0,1,2 and 1,2,3 have distinct last vertices. Pack
           * each triangle's flat plane there without expanding the quad. */
          gl_build_native_triangle_interpolants(renderer, v + 1, colors + 1, hd,
