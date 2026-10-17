@@ -116,8 +116,9 @@ STRINGIZE(
 #endif
 STRINGIZE(
 
-   // Enhanced 3D polygons interpolate between texel centers. Sprites and
-   // 2D polygons retain the decoder's edge/flip adjustment, as in Vulkan.
+   // Enhanced polygons interpolate between texel centers. Sprites and
+   // possible 2D quads retain the decoder's edge/flip adjustment. Standalone
+   // triangles use the polygon policy, as in Vulkan.
    smooth_texture_coord = vec2(texture_coord) +
          vec2((native_flags & 16u) != 0u ? 0.5 : 0.001);
 

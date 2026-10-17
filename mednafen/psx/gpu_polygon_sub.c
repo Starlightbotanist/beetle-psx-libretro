@@ -24,8 +24,8 @@ static bool IsAxisAlignedTriangle(const tri_vertex *vertices)
 		 vertices[1].y == vertices[2].y);
 }
 
-/* Keep the decoder's single-triangle fallback when the second half will
- * be culled. The first half's size was already checked by the decoder. */
+/* Match the decoder's size culling when selecting a surviving triangle.
+ * Check saved vertices too before recomputing completed-quad corrections. */
 static bool TriangleFits(const tri_vertex *vertices, unsigned shift)
 {
 	int32_t min_x = MIN(vertices[0].x, MIN(vertices[1].x, vertices[2].x));
@@ -38,14 +38,15 @@ static bool TriangleFits(const tri_vertex *vertices, unsigned shift)
 
 /* Hardware submits both triangles together. A zero UV derivative in one
  * triangle does not make an oblique 3D quad a sprite. Check the complete
- * strip, including the first vertex retained by the command decoder. */
+ * strip, including the first vertex retained by the command decoder.
+ * Reuse the current triangle's depth test rather than comparing it twice. */
 static bool IsAxisAlignedQuad(const tri_vertex *first,
-      const tri_vertex *vertices)
+      const tri_vertex *vertices, bool triangle_is_3d)
 {
 	const tri_vertex *b = &vertices[0];
 	const tri_vertex *c = &vertices[1];
 	const tri_vertex *d = &vertices[2];
-	return first->precise[2] == b->precise[2] &&
+	return !triangle_is_3d && first->precise[2] == b->precise[2] &&
 		((first->x == c->x && b->x == d->x &&
 		  first->y == b->y && c->y == d->y &&
 		  first->x != b->x && first->y != c->y) ||
@@ -160,7 +161,7 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 
 			/* Dumb heuristic to check if a polygon may be 2D */
 			if (hardware_quad)
-				may_be_2d = IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices) &&
+				may_be_2d = IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices, is3D) &&
 					((zero_dudy && zero_dvdx) || (zero_dudx && zero_dvdy));
 			else
 				may_be_2d = may_be_2d || zero_dudy || zero_dudx || zero_dvdy || zero_dvdx;
@@ -225,7 +226,7 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 			 * fallback artwork without applying sprite corrections to an
 			 * oblique surviving triangle. No pending triangle is dropped. */
 			bool sprite_geometry = first_valid && second_valid ?
-				IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices) :
+				IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices, is3D) :
 				IsAxisAlignedTriangle(first_valid ? gpu->InQuad_F3Vertices : vertices);
 			if (!sprite_geometry)
 			{
