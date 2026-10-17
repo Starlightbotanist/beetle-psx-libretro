@@ -188,6 +188,11 @@ void primitive_source(out vec4 source, out bool enhanced_texel,
 			return;
 		}
 	}
+	/* Enhanced geometry interpolates fractional shade bytes. Ordinary
+	 * RGB5 modulation retains GP0's eight-bit operand; filtered/HD
+	 * texels and higher-color modes keep their existing precision. */
+	if (!raw_texture && !enhanced_texel && primitive_native_color())
+		shade_color = psx_color8(shade_color) / 255.0;
 	vec3 shaded_hot = raw_texture ? color.rgb :
 		color.rgb * shade_color * (255.0 / 128.0);
 #ifdef FEEDBACK
