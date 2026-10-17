@@ -386,9 +386,10 @@ vec4 sample_texel(vec2 coords) {
    
    //coords += vec2(0.001, 0.001);
    
-   // Texture pages are limited to 256x256 pixels
-   uint tex_x = clamp(uint(coords.x), 0x0U, 0xffU);
-   uint tex_y = clamp(uint(coords.y), 0x0U, 0xffU);
+   // Sprite UVs may cross the page edge. Clamp the unwrapped coordinates
+   // to the primitive's limits, then let the texture window wrap to bytes.
+   uint tex_x = uint(max(coords.x, 0.0));
+   uint tex_y = uint(max(coords.y, 0.0));
 
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)
@@ -418,8 +419,7 @@ STRINGIZE(
    if (frag_depth_shift == 0U && frag_framebuffer_feedback != 0U &&
        feedback_upscaling != 0U)
    {
-      vec2 feedback_phase = clamp(coords, vec2(0.0), vec2(255.0));
-      feedback_phase = clamp(feedback_phase, vec2(frag_texture_limits.xy),
+      vec2 feedback_phase = clamp(coords, vec2(frag_texture_limits.xy),
             vec2(frag_texture_limits.zw));
       vec2 feedback_coord = vec2(tex_x_pix & 0x3ffU, tex_y & 0x1ffU) +
             fract(feedback_phase);
