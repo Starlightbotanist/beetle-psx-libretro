@@ -1303,6 +1303,9 @@ static void GPU_SoftReset(void) /* Control command 0x00 */
    GPU.DataReadBufferEx = 0;
    GPU.InCmd = INCMD_NONE;
 
+   GPU.off_u = GPU.off_v = 0;
+   GPU.may_be_2d = false;
+
    GPU.DisplayOff = 1;
    GPU.DisplayFB_XStart = 0;
    GPU.DisplayFB_YStart = 0;
@@ -3044,6 +3047,13 @@ void GPU_RestoreStateP3(void)
 
 int GPU_StateAction(StateMem *sm, int load, int data_only)
 {
+   /* These are needed only while a quad command is incomplete. Older
+    * states omit them; use neutral defaults instead of a previous draw's
+    * cache. The original UV cannot always be recovered after the one-pixel
+    * vertex adjustment, so retain the computed mapping in new states. */
+   uint16_t off_u = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_u : 0;
+   uint16_t off_v = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_v : 0;
+   bool may_be_2d = !load && GPU.InCmd == INCMD_QUAD && GPU.may_be_2d;
    GPU_RestoreStateP1(load);
 
    SFORMAT StateRegs[] =
@@ -3189,10 +3199,22 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
 
       SFVARN(GPU.DrawTimeAvail, "DrawTimeAvail"),
 
+      /* Append so older positional fast states keep their existing order. */
+      SFVARN(off_u, "InQuad_off_u"),
+      SFVARN(off_v, "InQuad_off_v"),
+      SFVARN(may_be_2d, "InQuad_may_be_2d"),
+
       SFEND
    };
 
    int ret = MDFNSS_StateAction(sm, load, data_only, StateRegs, "GPU");
+
+   if(load && ret)
+   {
+      GPU.off_u = off_u;
+      GPU.off_v = off_v;
+      GPU.may_be_2d = may_be_2d;
+   }
 
    GPU_RestoreStateP2(load);
 

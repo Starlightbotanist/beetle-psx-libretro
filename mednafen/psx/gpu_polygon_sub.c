@@ -224,7 +224,10 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 		{
 			/* Degenerate quads can encode a single triangle. Preserve 2D
 			 * fallback artwork without applying sprite corrections to an
-			 * oblique surviving triangle. No pending triangle is dropped. */
+			 * oblique surviving triangle. A collapsed second UV triangle
+			 * uses the saved first mapping; its first vertex may already
+			 * have the one-pixel adjustment, so these cached corrections
+			 * must be saved along with the pending command. */
 			bool sprite_geometry = first_valid && second_valid ?
 				IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices, is3D) :
 				IsAxisAlignedTriangle(first_valid ? gpu->InQuad_F3Vertices : vertices);
