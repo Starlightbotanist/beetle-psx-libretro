@@ -13,6 +13,12 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--texture-depth', type=int, choices=[4, 8, 16], default=16)
+    variant = parser.add_mutually_exclusive_group()
+    variant.add_argument('--feedback', action='store_true',
+        help='Paint a Gouraud triangle into the texture before sampling it.')
+    variant.add_argument('--coverage', action='store_true',
+        help='Draw opaque white geometry to isolate raster coverage.')
     args = parser.parse_args()
     words = [0x3c081f80, 0x35081810]  # t0 = GP0
 
@@ -34,21 +40,37 @@ def main():
     packet([0x024892d8, 0, xy(1023, 511)])
     texture = [1 | (x & 31) | ((y & 31) << 5) | (((x*11+y*7) & 31) << 10) |
         (32768 if (x+y) & 1 else 0) for y in range(256) for x in range(256)]
+    if args.coverage:
+        texture = [0x7fff] * (256*256)
     packet([0xa0000000, xy(768, 256), xy(256, 256)] +
         [texture[i] | (texture[i+1] << 16) for i in range(0, len(texture), 2)])
 
+    clut = 0
+    if args.texture_depth != 16:
+        clut = 480 << 6
+        palette = [1 | (i & 31) | (((i*3) & 31) << 5) |
+            (((i*7) & 31) << 10) | (32768 if i & 1 else 0) for i in range(256)]
+        if args.coverage:
+            palette = [0x7fff]*256
+        packet([0xa0000000, xy(0, 480), xy(256, 1)] +
+            [palette[i] | (palette[i+1] << 16) for i in range(0, 256, 2)])
+    if args.feedback:
+        packet([0x300000ff, xy(768, 256), 0x00ff00, xy(1023, 256),
+            0xff0000, xy(768, 511)])
+
     rng = random.Random(10112026)
+    texture_mode = {4: 0, 8: 1, 16: 2}[args.texture_depth]
     for i in range(512):
         x, y = (i % 32)*16, (i // 32)*16
-        page = 0x11c | (((i >> 3) & 3) << 5) | ((i & 1) << 9)
+        page = 0x1c | (texture_mode << 7) | (((i >> 3) & 3) << 5) | ((i & 1) << 9)
         packet([0xe1000000 | page])
         packet([0xe2000000 if i % 5 else 0xe2008421])
-        semi_transparent = 0x02000000 if i & 16 else 0
+        semi_transparent = 0x02000000 if i & 16 and not args.coverage else 0
         if i % 4 == 0:
             u = rng.choice([0, 1, 128, 249, 255])
             v = rng.choice([0, 1, 128, 249, 255])
             packet([0x64808080 | semi_transparent, xy(x+1, y+1),
-                u | (v << 8), xy(13, 13)])
+                u | (v << 8) | (clut << 16), xy(13, 13)])
             continue
 
         positions = [(x+1, y+1), (x+14, y+1), (x+1, y+14)]
@@ -65,12 +87,14 @@ def main():
         # The historical fixture advanced the color RNG four times even
         # though only three vertices are drawn; retain its exact input.
         colors = [rng.randrange(1 << 24) for _ in range(4)] if gouraud else [0x808080]*4
+        if args.coverage:
+            colors = [0x808080]*4
         packet_words = []
         for vertex in range(3):
             if vertex == 0 or gouraud:
                 packet_words.append((command if vertex == 0 else 0) | colors[vertex])
             packet_words.extend([xy(*positions[vertex]), u[vertex] | (v[vertex] << 8) |
-                (page << 16 if vertex == 1 else 0)])
+                (page << 16 if vertex == 1 else clut << 16 if vertex == 0 else 0)])
         packet(packet_words)
 
     idle = 0x80010000 + len(words)*4

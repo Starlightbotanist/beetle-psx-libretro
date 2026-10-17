@@ -120,7 +120,7 @@ soft-reset path clears the command and corrections. This gives 97 cases and
 headers are outside this CPU-only codec test; the renderer fixture remains a
 separate integration test.
 
-## Known open enhanced-renderer difference
+## Mixed-fixture renderer checks
 
 Generate the exact original mixed fixture:
 
@@ -147,21 +147,59 @@ The table was repeated on State follow-up, core SHA-256
 `312cd0042f529c3dc2b42b5aa103544d0e3d0347cac3a8de7d5b8bc3e0a9ea46`,
 and agrees with the historical Reviewed combined captures.
 
-Displayed capture at frame 120:
+The enhanced difference had two independent causes. OpenGL clamped sprite
+UVs to 255 before applying the texture window, preventing byte wrapping at
+the page edge (92,736 differing pixels). Vulkan retained fractional shading
+bytes for ordinary textures at enhanced resolutions, while OpenGL and the
+software modulation operation truncate those operands (8,314 pixels).
+The fixes clamp GL UVs before byte wrapping and use Vulkan's existing byte
+conversion to truncate ordinary RGB5 shading before modulation. Raw, filtered, HD and
+HDR source policies retain their existing modulation paths.
 
-| Internal GPU Resolution | Reference | Observed recovered-RGB5 differences |
-|---|---|---|
-| 1x | Vulkan versus OpenGL | 0 / 71,680 displayed pixels |
-| 1x | Software versus OpenGL | 0 / 71,680 displayed pixels |
-| 4x | Vulkan versus OpenGL | 101,050 / 1,146,880 displayed pixels |
+Displayed capture at frame 120; **Before** is State follow-up above and
+**Both fixes** is the local tested runtime, core SHA-256
+`a981da60459a8e4dfb37470d451677514c392f09cd549912a97286d57a5c0472`.
+Its source is the State follow-up plus the comment/test follow-ups and the
+two renderer fixes in this branch. No unrelated diagnostic shader is used.
+
+The ordered implementation is
+`6382d66f71d8b4dbfdac57db2f7fea5713e6b580` `Wrap OpenGL sprite UVs after primitive bounds` (child of `5d6d04a1d72084dbc947dd2a5bbcd107ccc0d813`)(92,736 sprite-tile differences against repeated native software become zero), then
+`f03caae555553cd1e00ecf666f84bee930edea02` `Truncate Vulkan RGB5 shading bytes` (child of `6382d66f71d8b4dbfdac57db2f7fea5713e6b580`)(the remaining 8,314 mixed-fixture GL/Vulkan differences become zero).
+
+| Fixture / settings | Comparison | Before | Both fixes |
+|---|---|---|---|
+| Original, 1x | GL versus Vulkan | 0 / 71,680 | 0 / 71,680 |
+| Original, 1x | GL versus software | 0 / 71,680 | 0 / 71,680 |
+| Original, 2x | GL versus Vulkan | Unmeasured | 0 / 286,720 |
+| Original, 4x | GL versus Vulkan | 101,050 / 1,146,880 | 0 / 1,146,880 |
+| Original, 8x | GL versus Vulkan | Unmeasured | 0 / 4,587,520 |
+| 4-bit indexed, 4x | GL versus Vulkan | 86,589 / 1,146,880 | 0 / 1,146,880 |
+| 8-bit indexed, 4x | GL versus Vulkan | 84,121 / 1,146,880 | 0 / 1,146,880 |
+| GPU-written texture, 4x | GL versus Vulkan | 92,736 / 1,146,880 | 0 / 1,146,880 |
+
+Generate the additional maintained inputs with `--texture-depth 4`,
+`--texture-depth 8`, `--feedback`, or `--coverage`. The default output remains
+byte-identical to the original executable. Coverage uses opaque white
+artwork with the same positions. GL and Vulkan cover the same 456,260 pixels
+at 4x before and after; the original fixture's differences lie on common
+coverage. The nearest 4x sprite output also matches nearest-repeated native
+software in all 286,720 pixels of the 70 visible sprite tiles after the GL
+fix. These finite fixture results do not establish original-hardware or
+whole-game accuracy.
 
 The display-byte normalization is `round(byte * 31 / 255)` for hardware and
 `byte // 8` for software. These are displayed pixel differences, not native
-VRAM readback or independently established incorrect-pixel counts. Coverage
-and color contributions were not measured separately. The 4x difference was
-present before the pending-state serialization change and remains in the
-follow-up. Its cause is unresolved. The smaller four-orientation gallery's
-enhanced GL/Vulkan match does not close this open item.
+VRAM readback or universal incorrect-pixel counts. The 4x remainder predates
+all MGS changes: the color base has 277,757 differences, the shoulder fix
+reduces that to 101,050, and subsequent MGS commits retain the same result.
+
+Remaining cross-renderer differences are explicitly outside that nearest
+result. At 4x, bilinear has 125,621 differing displayed RGB-byte pixels and
+xBR has 34,814, out of 1,146,880. Vulkan's filtered captures are unchanged by
+the modulation fix; GL's 507,904 pixels of page-interior filter controls are
+unchanged by the wrapping fix. In 32bpp, one pre-existing pixel differs by one
+red byte (GL 35 versus Vulkan 34, at x=1113, y=723); both values are unchanged
+by these fixes. HDR/HD and other GPUs are not covered by these captures.
 
 ## PGXP-on integration check
 
