@@ -39,14 +39,15 @@ static void write_u32(uint8_t *data, uint32_t value)
       data[i] = value >> (i * 8);
 }
 
-/* Strip the three appended entries from a real GPU section. All older
+/* Strip appended entries from a real GPU section. All older
  * entries stay byte-for-byte unchanged, including the last old sentinel.
  * Do not use a second SFORMAT table that could disagree with production. */
-static StateMem legacy_chunk(const StateMem *saved)
+static StateMem legacy_chunk(const StateMem *saved, unsigned removed)
 {
-   static const char *names[3] = {"InQuad_off_u", "InQuad_off_v", "InQuad_may_be_2d"};
-   static const unsigned sizes[3] = {2, 2, 1};
-   uint32_t last[3] = {0, 0, 0};
+   static const char *names[7] = {"InQuad_off_u", "InQuad_off_v", "InQuad_may_be_2d",
+                                "CLUT_Cache", "CLUT_Cache_VB", "TexCache_Tag", "TexCache_Data"};
+   static const unsigned sizes[7] = {2, 2, 1, 512, 4, 1024, 2048};
+   uint32_t last[7] = {0};
    uint32_t cursor = 36;
    unsigned i;
    StateMem legacy = {0};
@@ -56,9 +57,9 @@ static StateMem legacy_chunk(const StateMem *saved)
    while (cursor < saved->len)
    {
       uint32_t size_at = cursor;
-      last[0] = last[1];
-      last[1] = last[2];
-      last[2] = cursor;
+      for (i = 0; i < 6; i++)
+         last[i] = last[i + 1];
+      last[6] = cursor;
       if (!FastSaveStates)
          size_at += 1 + saved->data[cursor];
       if (size_at > saved->len || saved->len - size_at < 4)
@@ -67,7 +68,7 @@ static StateMem legacy_chunk(const StateMem *saved)
       if (cursor > saved->len)
          exit(2);
    }
-   for (i = 0; i < 3; i++)
+   for (i = 0; i < 7; i++)
    {
       uint32_t size_at = last[i];
       if (!FastSaveStates)
@@ -80,7 +81,7 @@ static StateMem legacy_chunk(const StateMem *saved)
       }
       check("appended field size", read_u32(saved->data + size_at) == sizes[i]);
    }
-   legacy.len = legacy.malloced = last[0];
+   legacy.len = legacy.malloced = last[7 - removed];
    legacy.data = (uint8_t *)malloc(legacy.len);
    if (!legacy.data)
       exit(2);
@@ -97,6 +98,28 @@ static void poison(void)
    GPU.DrawTimeAvail = -1;
    GPU.InQuad_F3Vertices[0].precise[2] = -1.0f;
    vram[123] = 0;
+   memset(GPU.CLUT_Cache, 0xAA, sizeof(GPU.CLUT_Cache));
+   GPU.CLUT_Cache_VB = 0x1234;
+   memset(GPU.TexCache, 0xBB, sizeof(GPU.TexCache));
+   GPU.last_tex_line = 0;
+   GPU.last_tex_c = &GPU.TexCache[0];
+}
+
+static void check_caches(bool restored)
+{
+   unsigned i, j;
+   check("CLUT tag", GPU.CLUT_Cache_VB == (restored ? 0x4567 : ~0U));
+   check("derived texture pointer invalidated", GPU.last_tex_line == ~0U && !GPU.last_tex_c);
+   for (i = 0; i < 256; i++)
+   {
+      check("texture tag", GPU.TexCache[i].Tag == (restored ? i * 4 : ~0U));
+      if (restored)
+      {
+         check("latched palette", GPU.CLUT_Cache[i] == (0x1111 ^ i));
+         for (j = 0; j < 4; j++)
+            check("latched texture", GPU.TexCache[i].Data[j] == (0x2222 ^ (i * 4 + j)));
+      }
+   }
 }
 
 static void check_restored(unsigned pending, unsigned u, unsigned v, bool possible_2d)
@@ -112,12 +135,12 @@ static void check_restored(unsigned pending, unsigned u, unsigned v, bool possib
 
 int main(void)
 {
-   unsigned fast, pending, bits;
+   unsigned fast, pending, bits, i, j;
    for (fast = 0; fast < 2; fast++)
       for (pending = 0; pending < 2; pending++)
          for (bits = 0; bits < 8; bits++)
          {
-            StateMem saved = {0}, legacy;
+            StateMem saved = {0}, legacy, cache_legacy;
             FastSaveStates = fast != 0;
             memset(&GPU, 0, sizeof(GPU));
             GPU.vram = vram;
@@ -128,9 +151,18 @@ int main(void)
             GPU.DrawTimeAvail = 123456;
             GPU.InQuad_F3Vertices[0].precise[2] = 12.5f;
             vram[123] = 0x4321;
+            GPU.CLUT_Cache_VB = 0x4567;
+            for (i = 0; i < 256; i++)
+            {
+               GPU.CLUT_Cache[i] = 0x1111 ^ i;
+               GPU.TexCache[i].Tag = i * 4;
+               for (j = 0; j < 4; j++)
+                  GPU.TexCache[i].Data[j] = 0x2222 ^ (i * 4 + j);
+            }
             if (!GPU_StateAction(&saved, 0, 0))
                return 2;
-            legacy = legacy_chunk(&saved);
+            legacy = legacy_chunk(&saved, 7);
+            cache_legacy = legacy_chunk(&saved, 4);
 
             poison();
             saved.loc = 0;
@@ -138,15 +170,24 @@ int main(void)
             check("current round trip", GPU_StateAction(&saved, 1, 0) != 0);
             check_restored(pending, pending ? bits & 1 : 0, pending ? (bits >> 1) & 1 : 0,
                            pending && (bits & 4));
+            check_caches(true);
+
+            poison();
+            cases++;
+            check("pre-cache chunk loads", GPU_StateAction(&cache_legacy, 1, 0) != 0);
+            check_restored(pending, pending ? bits & 1 : 0, pending ? (bits >> 1) & 1 : 0,
+                           pending && (bits & 4));
+            check_caches(false);
 
             /* A successful earlier restore must not supply missing fields. */
             poison();
             cases++;
             check("older chunk loads", GPU_StateAction(&legacy, 1, 0) != 0);
             check_restored(pending, 0, 0, false);
+            check_caches(false);
 
-            /* Fail after reading the first two new locals. They must not be
-             * committed to GPU state when the last entry is truncated. */
+            /* A truncated cache payload must fail without committing the
+             * pending-quad locals. */
             poison();
             saved.loc = 0;
             saved.len--;
@@ -157,6 +198,7 @@ int main(void)
             check("failed load keeps flag", GPU.may_be_2d);
 
             free(legacy.data);
+            free(cache_legacy.data);
             free(saved.data);
          }
 
@@ -167,6 +209,7 @@ int main(void)
    check("power clears U", GPU.off_u == 0);
    check("power clears V", GPU.off_v == 0);
    check("power clears flag", !GPU.may_be_2d);
+   check_caches(false);
    printf("GPU UV serialization: %u cases, %u assertions, %u failures\n", cases,
           assertions, failures);
    return failures ? 1 : 0;

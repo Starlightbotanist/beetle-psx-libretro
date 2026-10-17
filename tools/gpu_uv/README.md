@@ -103,20 +103,24 @@ API, Internal GPU Resolution, PGXP, filtering and reference capture separately.
 
 Both commands above also run `serialization.c` against the actual shipping
 `GPU_StateAction` and `MDFNSS_StateAction`, including the real GPU state table.
-The test removes the last three entries from a freshly written GPU section to
-make an older chunk; all preceding bytes remain unchanged. It verifies the
+The test removes the last seven entries from a freshly written GPU section to
+make an older chunk, or just the last four to retain the pending UV entries;
+all preceding bytes remain unchanged. It verifies the
 entry names/sizes and the last older field, so it tests appending order as well
 as neutral defaults without duplicating a state table.
 
 The finite domain is both `FastSaveStates` modes, idle/pending quad commands,
 and all eight valid combinations of the two offsets and possible-2D flag.
-For each input it checks a current round trip, a chunk without the three new
-entries after a successful restore, and a truncated final entry. Missing fields
+For each input it checks a current round trip, both older chunk formats after
+a successful restore, and a truncated final entry. Missing UV fields
 must default to zero; a failed read must not commit the three new locals. Idle
-states must serialize neutral corrections. VRAM, a saved W value and the last
+states must serialize neutral corrections. Missing cache tags must invalidate
+the emulated texture and palette caches, while current states must restore
+their latched contents even when those differ from VRAM. The derived texture
+lookup pointer must be discarded after every load. VRAM, a saved W value and the last
 older field are controls. An actual `GPU_Power` call also checks that the shared
-soft-reset path clears the command and corrections. This gives 97 cases and
-820 assertions. GPU transfers, emulated command execution and whole-core file
+soft-reset path clears the command, corrections and cache tags. This gives
+129 cases. GPU transfers, emulated command execution and whole-core file
 headers are outside this CPU-only codec test; the renderer fixture remains a
 separate integration test.
 

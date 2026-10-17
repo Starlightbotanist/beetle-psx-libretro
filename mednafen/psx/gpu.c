@@ -3057,6 +3057,14 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
    bool may_be_2d = !load && GPU.InCmd == INCMD_QUAD && GPU.may_be_2d;
    GPU_RestoreStateP1(load);
 
+   /* Older states omit the emulated caches. Invalidate their tags so a
+    * load cannot retain texture or palette data from the abandoned frame. */
+   if (load)
+   {
+      GPU.CLUT_Cache_VB = ~0U;
+      memset(TexCache_Tag, 0xFF, sizeof(TexCache_Tag));
+   }
+
    SFORMAT StateRegs[] =
    {
       /* Hardcode entry name to remain backward compatible with the */
@@ -3204,6 +3212,14 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
       SFVARN(off_u, "InQuad_off_u"),
       SFVARN(off_v, "InQuad_off_v"),
       SFVARN(may_be_2d, "InQuad_may_be_2d"),
+
+      /* These model the PS1's retained texture and palette contents, not
+       * just an acceleration cache: VRAM writes need not invalidate them.
+       * Rollback must restore the saved contents rather than future data. */
+      SFARRAY16N(GPU.CLUT_Cache, 256, "CLUT_Cache"),
+      SFVARN(GPU.CLUT_Cache_VB, "CLUT_Cache_VB"),
+      SFARRAY32N(TexCache_Tag, 256, "TexCache_Tag"),
+      SFARRAY16N(&TexCache_Data[0][0], 256 * 4, "TexCache_Data"),
 
       SFEND
    };
