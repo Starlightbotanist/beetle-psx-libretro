@@ -1411,7 +1411,8 @@ void GPU_Power(void)
     * because they're only consumed when InCmd == INCMD_QUAD (and we
     * just zeroed InCmd above), but explicit clears match the saved
     * state and make cold-reset behavior deterministic regardless of
-    * BSS contents. */
+    * BSS contents. The UV correction fields are cleared by the common
+    * GPU_SoftReset() call below, as on a GP1 reset. */
    GPU.InQuad_clut = 0;
    GPU.InQuad_invalidW = false;
    GPU.killQuadPart = 0;
