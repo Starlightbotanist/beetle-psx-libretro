@@ -58,6 +58,23 @@ def main():
 
         current = build('current')
         subprocess.run([str(current)], env=env, check=True)
+        serializer = work/('serialization'+('.exe' if os.name == 'nt' else ''))
+        linker_flags = ['-Wl,--gc-sections']
+        if os.name == 'nt':
+            linker_flags.append('-Wl,--exclude-all-symbols')
+        # LTO discards unrelated GPU execution paths before linking; this
+        # exercises the actual GPU state table without linking the whole emulator.
+        # The unused outer file-header writer only needs a version definition.
+        subprocess.run([compiler, '-O2', '-Wall', '-Wextra', '-std=gnu99', '-flto',
+            '-ffunction-sections', '-fdata-sections', '-Wno-unused-parameter',
+            '-Wno-unused-variable', '-Wno-unused-function', '-Wno-sign-compare',
+            '-Wno-strict-aliasing', '-DMEDNAFEN_VERSION_NUMERIC=0',
+            '-I'+str(ROOT), '-I'+str(ROOT/'libretro-common/include'),
+            '-I'+str(ROOT/'mednafen'), '-I'+str(ROOT/'include'),
+            str(HERE/'serialization.c'), str(ROOT/'mednafen/psx/gpu.c'),
+            str(ROOT/'mednafen/state.c'), str(ROOT/'libretro-common/compat/compat_strl.c'),
+            *linker_flags, '-o', str(serializer)], env=env, check=True)
+        subprocess.run([str(serializer)], env=env, check=True)
         if args.matrix_base:
             baseline = build('matrix-base', args.matrix_base)
             before, after = capture(baseline, '--matrix'), capture(current, '--matrix')
