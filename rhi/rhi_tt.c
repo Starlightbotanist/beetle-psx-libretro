@@ -4217,6 +4217,24 @@ static TTRect fromSRect(SRect rect) {
       }
    }
 
+   void texture_tracker_notifyWrite(struct TextureTracker *self,
+         TTRect rect, uint16_t *vram)
+   {
+      int i;
+      rect_tracker_clear(&self->tracker,
+            make_srect(rect.x, rect.y, rect.width, rect.height));
+      fused_pages_mark_dead(&self->fused_pages, rect);
+      texture_tracker_mirror_store(self, rect, vram);
+      texture_tracker_clear_palette_cache(self, rect);
+      for (i = 0; i < rrvec_size(&self->restorable_rects); )
+      {
+         if (rect_intersects(&self->restorable_rects.items[i].rect, &rect))
+            rrvec_erase_at(&self->restorable_rects, i);
+         else
+            i++;
+      }
+   }
+
    void texture_tracker_upload(struct TextureTracker *self,
          TTRect rect,
          uint16_t *vram){

@@ -9,6 +9,11 @@ static const char *image_load_fragment = GLSL_FRAGMENT(
       // Uploads rebuild the derived stencil from the authoritative mask bit.
       // 0: color copy, 1: protected pixels for the stencil-only pass.
       uniform uint mask_pass;
+      // Copies retain every scaled texel; uploads address native VRAM words.
+      // 0: upload/resolve, 1: copy, 2: copy with the mask bit forced on.
+      uniform uint copy_mode;
+      uniform ivec2 copy_offset;
+      uniform uvec2 copy_upscaling;
       in vec2 frag_fb_coord;
       out vec4 frag_color;
 
@@ -19,7 +24,17 @@ static const char *image_load_fragment = GLSL_FRAGMENT(
 
       void main() {
       // GLES 5551 note: color reinterpretation can be done here
-      frag_color = vram_get_pixel(int(frag_fb_coord.x), int(frag_fb_coord.y));
+      if (copy_mode != 0u) {
+         ivec2 position = ivec2(gl_FragCoord.xy);
+         if (copy_upscaling.x != copy_upscaling.y)
+            position = position / int(copy_upscaling.y) * int(copy_upscaling.x);
+         frag_color = texelFetch(fb_texture,
+               position + copy_offset * int(copy_upscaling.x), 0);
+         if (copy_mode == 2u)
+            frag_color.a = 1.0;
+      }
+      else
+         frag_color = vram_get_pixel(int(frag_fb_coord.x), int(frag_fb_coord.y));
       if (mask_pass != 0u && frag_color.a <= 0.5)
          discard;
       if (color_conversion == 1u)

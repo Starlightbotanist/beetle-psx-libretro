@@ -575,6 +575,10 @@ void texture_tracker_clearRegion(TextureTracker *self,
 void texture_tracker_notifyReadback(TextureTracker *self,
       TTRect rect,
       uint16_t *vram);
+/* A masked/overlapping GPU write has no single uploaded replacement source. */
+void texture_tracker_notifyWrite(TextureTracker *self,
+      TTRect rect,
+      uint16_t *vram);
 
 void texture_tracker_endFrame(TextureTracker *self);
 void texture_tracker_on_queues_reset(TextureTracker *self);
