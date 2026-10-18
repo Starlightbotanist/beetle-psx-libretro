@@ -1092,6 +1092,7 @@ struct gl_renderer {
    GLuint vram_sync_draw_fbo;
    /* Renderer-owned draw targets; attachments follow current textures. */
    GLuint fb_out_fbo;
+   GLuint stencil_fbo;
    GLuint fb_texture_fbo;
 
    /* fb_out receives primitive rendering while fb_texture supplies texels.
@@ -1873,13 +1874,22 @@ static void gl_framebuffer_configure(GLuint id,
       const struct gl_texture *color_texture,
       const struct gl_texture *depth_texture)
 {
-   GLenum col_attach_0 = GL_COLOR_ATTACHMENT0;
+   GLenum col_attach_0 = color_texture ? GL_COLOR_ATTACHMENT0 : GL_NONE;
    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, id);
    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-         GL_TEXTURE_2D, color_texture->id, 0);
+         GL_TEXTURE_2D, color_texture ? color_texture->id : 0, 0);
    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
          GL_TEXTURE_2D, depth_texture ? depth_texture->id : 0, 0);
    glDrawBuffers(1, &col_attach_0);
+   if (!color_texture)
+   {
+      GLint read_framebuffer;
+      /* GL 3.0 also requires a depth-only target's read buffer to be NONE. */
+      glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_framebuffer);
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, id);
+      glReadBuffer(GL_NONE);
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read_framebuffer);
+   }
    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
 
@@ -4102,14 +4112,17 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
    glGenFramebuffers(1, &renderer->vram_sync_read_fbo);
    glGenFramebuffers(1, &renderer->vram_sync_draw_fbo);
    glGenFramebuffers(1, &renderer->fb_out_fbo);
+   glGenFramebuffers(1, &renderer->stencil_fbo);
    glGenFramebuffers(1, &renderer->fb_texture_fbo);
-   if (!renderer->fb_out_fbo || !renderer->fb_texture_fbo)
+   if (!renderer->fb_out_fbo || !renderer->stencil_fbo || !renderer->fb_texture_fbo)
    {
       log_cb(RETRO_LOG_ERROR,
             "[gl_renderer_new] framebuffer allocation failed\n");
       return false;
    }
    gl_framebuffer_configure(renderer->fb_out_fbo, &renderer->fb_out,
+         &renderer->fb_out_depth);
+   gl_framebuffer_configure(renderer->stencil_fbo, NULL,
          &renderer->fb_out_depth);
    gl_framebuffer_configure(renderer->fb_texture_fbo, &renderer->fb_texture,
          NULL);
@@ -4982,7 +4995,10 @@ static void gl_renderer_free(gl_renderer *renderer)
       glDeleteFramebuffers(1, &renderer->fb_out_fbo);
    if (renderer->fb_texture_fbo)
       glDeleteFramebuffers(1, &renderer->fb_texture_fbo);
+   if (renderer->stencil_fbo)
+      glDeleteFramebuffers(1, &renderer->stencil_fbo);
    renderer->fb_out_fbo = 0;
+   renderer->stencil_fbo = 0;
    renderer->fb_texture_fbo = 0;
 
    if (renderer->command_buffer)
@@ -5508,6 +5524,8 @@ static bool retro_refresh_variables(gl_renderer *renderer)
       }
 
       gl_framebuffer_configure(renderer->fb_out_fbo, &renderer->fb_out,
+            &renderer->fb_out_depth);
+      gl_framebuffer_configure(renderer->stencil_fbo, NULL,
             &renderer->fb_out_depth);
 
       glDeleteTextures(1, &renderer->fb_feedback_texture.id);
@@ -9296,7 +9314,10 @@ static void gl_transfer_draw(gl_renderer *renderer, gl_texture *source,
    glDisable(GL_BLEND);
    glActiveTexture(GL_TEXTURE0);
    glBindTexture(GL_TEXTURE_2D, source->id);
-   gl_framebuffer_bind(renderer->fb_out_fbo, &renderer->fb_out);
+   /* Stencil reconstruction samples fb_out color while writing only the
+    * separate depth/stencil image. No sampled image is attached here. */
+   gl_framebuffer_bind(stencil_only ? renderer->stencil_fbo : renderer->fb_out_fbo,
+         &renderer->fb_out);
    glUseProgram(buffer->program->id);
    glUniform1i(gl_uniform_map_get(uniforms, "fb_texture"), 0);
    glUniform1ui(gl_uniform_map_get(uniforms, "color_conversion"),
@@ -9352,9 +9373,9 @@ static void gl_sync_stencil(gl_renderer *renderer,
       return;
    if (!gl_draw_buffer_is_empty(renderer->command_buffer))
       gl_renderer_draw(renderer);
-   source = gl_transfer_snapshot(renderer, rect[0], rect[1], rect[2], rect[3]);
-   if (!source)
-      return;
+   /* A stencil-only framebuffer makes the current color image a legal
+    * texture source, avoiding the transfer snapshot entirely. */
+   source = &renderer->fb_out;
    gl_transfer_draw(renderer, source, rect[0], rect[1], rect[0], rect[1],
          rect[2], rect[3], false, false, true);
    memset(rect, 0, sizeof(renderer->stencil_dirty_rect));
