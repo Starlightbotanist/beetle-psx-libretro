@@ -3280,12 +3280,13 @@ static void gl_renderer_draw(gl_renderer *renderer)
       last->count = renderer->vertex_index_pos - last->first;
    }
 
-   /* Upload index data to EBO (required for core profile - client-side
-    * index pointers are not allowed) */
+   /* Replace the index storage for this submission so uploading does not
+    * wait for earlier draws to finish reading the previous indices.
+    * Client-side index pointers are not allowed in core profile. */
    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, renderer->index_buffer);
-   glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0,
-                   renderer->vertex_index_pos * sizeof(GLushort),
-                   renderer->vertex_indices);
+   glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                renderer->vertex_index_pos * sizeof(GLushort),
+                renderer->vertex_indices, GL_STREAM_DRAW);
 
    {
       size_t bi;
