@@ -25,6 +25,15 @@ enum force_renderer_type
    FORCE_VULKAN
 };
 
+void *rhi_intf_memory_snapshot_create(void);
+void rhi_intf_memory_snapshot_free(enum rhi_renderer_type type, void *snapshot);
+bool rhi_intf_memory_snapshot_supported(void);
+bool rhi_intf_memory_snapshot_failed(void);
+bool rhi_intf_memory_snapshot_matches(void *snapshot);
+bool rhi_intf_memory_snapshot_prepare(void *snapshot);
+bool rhi_intf_memory_snapshot_save(void *snapshot);
+bool rhi_intf_memory_snapshot_load(void *snapshot);
+
 enum blending_modes
 {
    BLEND_MODE_OPAQUE     = -1,

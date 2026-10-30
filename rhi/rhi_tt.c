@@ -39,6 +39,8 @@
 #include "rhi_tt.h"
 #include "tt_io_channel.h"
 
+extern void retro_clear_memory_snapshots(void);
+
 /* Tracker-internal forward typedefs (subset of the old rhi_lib_vulkan.c
  * typedef block; the shared types now come from rhi_tt.h). */
 typedef struct RectMatch RectMatch;
@@ -977,7 +979,7 @@ static void enduring_arr_free(EnduringRectArr *v) {
 
    static void lookup_grid_init(LookupGrid *g);
    static void lookup_grid_deinit(LookupGrid *g);
-   static void lookup_grid_insert(LookupGrid *self, SRect r, RectIndex index);
+   static bool lookup_grid_insert(LookupGrid *self, SRect r, RectIndex index);
    static void lookup_grid_get(LookupGrid *self,
          SRect r,
          RectIndexSet *results);
@@ -6489,6 +6491,7 @@ static bool is_power_of_two(int n) {
             size_t vram_budget = HdGpuCache_budget(&self->hd_gpu_cache) / (1024 * 1024);
             size_t vram_count  = HdGpuCache_count(&self->hd_gpu_cache);
             int    fused_count = fused_page_vec_size(&self->fused_pages.pages);
+            retro_clear_memory_snapshots();
             self->hd_textures_enabled = !self->hd_textures_enabled;
             tt_replace_latch_toggle(&tt_replace, self->hd_textures_enabled);
             if (!self->hd_textures_enabled)
@@ -6523,6 +6526,8 @@ static bool is_power_of_two(int n) {
    void texture_tracker_reload_textures_from_disk(struct TextureTracker *self) {
       char rpath[PATH_MAX_TT];
       char cfg[PATH_MAX_TT];
+      /* Retained images belong to the previous replacement pack. */
+      retro_clear_memory_snapshots();
       /* Reload the directory listing */
       read_texture_directory(&self->known_files, replacements_path(rpath, sizeof(rpath)), false);
       TT_LOG_VERBOSE(RETRO_LOG_INFO, "Found %d hd textures\n", (int)self->known_files.count);
@@ -6843,7 +6848,7 @@ static int clamp(int x, int low, int high)
          free(g->cells[i].entries);
    }
 
-   static void lookup_grid_insert(LookupGrid *self, SRect r, RectIndex index)
+   static bool lookup_grid_insert(LookupGrid *self, SRect r, RectIndex index)
    {
       CellBounds c = cellBounds(r);
       int x, y;
@@ -6854,7 +6859,7 @@ static int clamp(int x, int low, int high)
                int ncap = cell->cap ? cell->cap * 2 : 8;
                LookupEntry *ne = (LookupEntry *)realloc(cell->entries, (size_t)ncap * sizeof(LookupEntry));
                if (!ne)
-                  return;
+                  return false;
                cell->entries = ne;
                cell->cap = ncap;
             }
@@ -6863,6 +6868,7 @@ static int clamp(int x, int low, int high)
             cell->count++;
          }
       }
+      return true;
    }
 
    static void lookup_grid_get(LookupGrid *self, SRect r, RectIndexSet *results)
@@ -7514,6 +7520,212 @@ static int64_t page_bytes(FusionRects *fusion)
  * the backend vtable is process-wide (one active RHI renderer at
  * a time - see the shim block at the top of this file).
  * ============================================================ */
+
+typedef struct
+{
+   RectTracker tracker;
+   RestorableRectVec restorable;
+   uint16_t *mirror;
+   uint64_t frame;
+} TTMemoryImage;
+
+typedef struct
+{
+   TTMemoryImage saved, prepared;
+   bool prepared_valid;
+} TTMemoryState;
+
+typedef struct
+{
+   TextureUpload *source, *copy;
+} TTUploadCopy;
+
+static void tt_memory_image_free(TTMemoryImage *image)
+{
+   rect_tracker_deinit(&image->tracker);
+   rrvec_clear(&image->restorable);
+   free(image->restorable.items);
+   free(image->mirror);
+   memset(image, 0, sizeof(*image));
+}
+
+static TextureUpload *tt_memory_upload(TextureUpload *source,
+      TTUploadCopy *copies, size_t *count)
+{
+   TextureUpload *copy;
+   size_t i;
+   for (i = 0; i < *count; i++)
+      if (copies[i].source == source)
+         return copies[i].copy;
+   copy = (TextureUpload *)calloc(1, sizeof(*copy));
+   if (!copy) return NULL;
+   texture_upload_init(copy);
+   copy->refcount = 1;
+   texture_upload_copy_contents(copy, source);
+   if (copy->image_count != source->image_count ||
+       copy->dumped_modes_count != source->dumped_modes_count ||
+       copy->textures.count != source->textures.count)
+   {
+      texture_upload_release(copy);
+      return NULL;
+   }
+   copies[*count].source = source;
+   copies[(*count)++].copy = copy;
+   return copy;
+}
+
+/* Native uploads and replacement images remain owned by the snapshot.
+ * Build every fallible part before publishing a save or applying a load. */
+static bool tt_memory_image_copy(TTMemoryImage *out, const TTMemoryImage *source)
+{
+   TTMemoryImage next;
+   TTUploadCopy *copies;
+   size_t count = 0, total = source->tracker.textures.count;
+   int i, j;
+   bool okay = false;
+   memset(&next, 0, sizeof(next));
+   for (i = 0; i < source->restorable.count; i++)
+   {
+      size_t n = source->restorable.items[i].to_restore.v.count;
+      if (n > SIZE_MAX - total) return false;
+      total += n;
+   }
+   copies = total ? (TTUploadCopy *)calloc(total, sizeof(*copies)) : NULL;
+   if (total && !copies) return false;
+   if (source->tracker.textures.count)
+   {
+      next.tracker.textures.cap = source->tracker.textures.count;
+      next.tracker.textures.a = (EnduringTextureRect *)calloc(
+            next.tracker.textures.cap, sizeof(*next.tracker.textures.a));
+      if (!next.tracker.textures.a) goto done;
+   }
+   for (i = 0; i < source->tracker.textures.count; i++)
+   {
+      EnduringTextureRect *src = &source->tracker.textures.a[i];
+      EnduringTextureRect *dst;
+      if (!src->alive) continue;
+      dst = &next.tracker.textures.a[next.tracker.textures.count];
+      *dst = *src;
+      dst->texture_rect.upload = tt_memory_upload(src->texture_rect.upload, copies, &count);
+      if (!dst->texture_rect.upload) goto done;
+      texture_rect_retain(&dst->texture_rect);
+      next.tracker.textures.count++;
+      if (!lookup_grid_insert(&next.tracker.lookup_grid,
+            dst->texture_rect.vram_rect, next.tracker.textures.count - 1)) goto done;
+   }
+   if (source->restorable.count)
+   {
+      next.restorable.cap = source->restorable.count;
+      next.restorable.items = (RestorableRect *)calloc(
+            next.restorable.cap, sizeof(*next.restorable.items));
+      if (!next.restorable.items) goto done;
+   }
+   for (i = 0; i < source->restorable.count; i++)
+   {
+      RestorableRect *src = &source->restorable.items[i];
+      RestorableRect *dst = &next.restorable.items[next.restorable.count++];
+      dst->rect = src->rect;
+      dst->hash = src->hash;
+      if (src->to_restore.v.count)
+      {
+         dst->to_restore.v.cap = src->to_restore.v.count;
+         dst->to_restore.v.items = (TextureRect *)calloc(
+               dst->to_restore.v.cap, sizeof(*dst->to_restore.v.items));
+         if (!dst->to_restore.v.items) goto done;
+      }
+      for (j = 0; j < src->to_restore.v.count; j++)
+      {
+         TextureRect *rect = &dst->to_restore.v.items[dst->to_restore.v.count];
+         *rect = src->to_restore.v.items[j];
+         rect->upload = tt_memory_upload(rect->upload, copies, &count);
+         if (!rect->upload) goto done;
+         texture_rect_retain(rect);
+         dst->to_restore.v.count++;
+      }
+   }
+   if (source->mirror)
+   {
+      size_t bytes = (size_t)FB_WIDTH * FB_HEIGHT * sizeof(uint16_t);
+      next.mirror = (uint16_t *)malloc(bytes);
+      if (!next.mirror) goto done;
+      memcpy(next.mirror, source->mirror, bytes);
+   }
+   next.frame = source->frame;
+   tt_memory_image_free(out);
+   *out = next;
+   memset(&next, 0, sizeof(next));
+   okay = true;
+done:
+   while (count) texture_upload_release(copies[--count].copy);
+   free(copies);
+   tt_memory_image_free(&next);
+   return okay;
+}
+
+void *texture_tracker_memory_new(void)
+{
+   return calloc(1, sizeof(TTMemoryState));
+}
+
+void texture_tracker_memory_free(void *snapshot)
+{
+   TTMemoryState *state = (TTMemoryState *)snapshot;
+   if (!state) return;
+   tt_memory_image_free(&state->saved);
+   tt_memory_image_free(&state->prepared);
+   free(state);
+}
+
+bool texture_tracker_memory_save(TextureTracker *self, void *snapshot)
+{
+   TTMemoryState *state = (TTMemoryState *)snapshot;
+   TTMemoryImage source;
+   source.tracker = self->tracker;
+   source.restorable = self->restorable_rects;
+   source.mirror = self->vram_mirror;
+   source.frame = self->frame;
+   if (!tt_memory_image_copy(&state->saved, &source)) return false;
+   tt_memory_image_free(&state->prepared);
+   state->prepared_valid = false;
+   return true;
+}
+
+bool texture_tracker_memory_prepare(void *snapshot)
+{
+   TTMemoryState *state = (TTMemoryState *)snapshot;
+   if (!state->prepared_valid)
+      state->prepared_valid = tt_memory_image_copy(&state->prepared, &state->saved);
+   return state->prepared_valid;
+}
+
+void texture_tracker_memory_load(TextureTracker *self, void *snapshot)
+{
+   TTMemoryState *state = (TTMemoryState *)snapshot;
+   TTMemoryImage old;
+   size_t budget = self->fused_pages.budget_bytes;
+   int i;
+   old.tracker = self->tracker;
+   old.restorable = self->restorable_rects;
+   old.mirror = self->vram_mirror;
+   old.frame = self->frame;
+   self->tracker = state->prepared.tracker;
+   self->restorable_rects = state->prepared.restorable;
+   self->vram_mirror = state->prepared.mirror;
+   self->frame = state->prepared.frame;
+   memset(&state->prepared, 0, sizeof(state->prepared));
+   state->prepared_valid = false;
+   tt_memory_image_free(&old);
+   fused_page_vec_truncate(&self->fused_pages.pages, 0);
+   free(self->fused_pages.pages.items);
+   fused_pages_init(&self->fused_pages);
+   self->fused_pages.budget_bytes = budget;
+   handle_lru_cache_clear(&self->handle_cache);
+   self->cached_palette_hashes_count = 0;
+   self->cached_page_hashes_count = 0;
+   self->cached_page_bounds_count = 0;
+   for (i = 0; i < self->page_bindings_count; i++) ih_reset(&self->page_bindings[i].texture);
+   self->page_bindings_count = 0;
+}
 
 TextureTracker *texture_tracker_new(const TTGpuBackend *backend,
       TTGpuImage *default_hd_texture)

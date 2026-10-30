@@ -427,6 +427,7 @@ static INLINE int DrawSpanVec_NT(PS_GPU *gpu, int y, int32_t x, int32_t w,
    const uint16x8_t vmso  = vdupq_n_u16(mso);
 #endif
 
+   snapshot_mark_range((size_t)(row - gpu->vram) + x, w);
    for (; done + step <= w; done += step)
    {
       const int32_t bx = x + done;

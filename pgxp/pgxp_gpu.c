@@ -1,3 +1,4 @@
+#include "pgxp_state.h"
 /***************************************************************************
 *   Copyright (C) 2016 by iCatButler                                      *
 *                                                                         *
@@ -163,6 +164,18 @@ const uint32_t mode_fail = 3;
 
 static PGXP_cache_entry *vertexCache = NULL;
 
+static uint8_t snapshot_dirty[VERTEX_CACHE_SIZE * sizeof(PGXP_cache_entry) / 16384];
+static unsigned vertex_states;
+#include "pgxp_state.h"
+#include "../mednafen/psx/history_pages.h"
+
+typedef struct
+{
+	HistoryPages *pages;
+	PGXP_cache_entry *restore_buffer;
+	bool allocated;
+} PGXPVertexState;
+
 uint32_t cacheMode = 0;
 
 /* Current write generation.  Bumped when a write session opens (i.e. on
@@ -236,6 +249,9 @@ static int VertexCacheEnsureAllocated(void)
  * path in pgxp_main.c when the vertex cache bit is cleared. */
 void PGXP_FreeVertexCache(void)
 {
+	history_pages_free(history_current);
+	history_current = NULL;
+	memset(snapshot_dirty, 1, sizeof(snapshot_dirty));
 	if (vertexCache)
 	{
 		free(vertexCache);
@@ -316,6 +332,8 @@ void PGXP_CacheVertex(int16_t sx, int16_t sy, const PGXP_value* _pVertex)
 			    pOldVertex->z != pNewVertex->z)
 			{
 				pOldVertex->tag |= PGXP_TAG_AMBIGUOUS;
+				if (vertex_states)
+					snapshot_dirty[(pOldVertex - vertexCache) / 1024] = 1;
 				VCACHE_STAT(1);
 				return;
 			}
@@ -333,7 +351,80 @@ void PGXP_CacheVertex(int16_t sx, int16_t sy, const PGXP_value* _pVertex)
 		pOldVertex->y   = pNewVertex->y;
 		pOldVertex->z   = pNewVertex->z;
 		pOldVertex->tag = tag;
+		if (vertex_states)
+			snapshot_dirty[(pOldVertex - vertexCache) / 1024] = 1;
 	}
+}
+
+void *PGXP_VertexStateCreate(void)
+{
+	PGXPVertexState *state = (PGXPVertexState *)calloc(1, sizeof(*state));
+	if (state && !vertex_states++)
+		memset(snapshot_dirty, 1, sizeof(snapshot_dirty));
+	return state;
+}
+
+static void PGXP_VertexStateDiscard(void *snapshot)
+{
+	PGXPVertexState *state = (PGXPVertexState *)snapshot;
+	if (!state) return;
+	history_pages_free(state->pages);
+	state->pages = NULL;
+	free(state->restore_buffer);
+	state->restore_buffer = NULL;
+	state->allocated = false;
+}
+
+void PGXP_VertexStateFree(void *snapshot)
+{
+	if (!snapshot) return;
+	PGXP_VertexStateDiscard(snapshot);
+	free(snapshot);
+	if (!--vertex_states)
+	{
+		history_pages_free(history_current);
+		history_current = NULL;
+	}
+}
+
+bool PGXP_VertexStateSave(void *snapshot)
+{
+	PGXPVertexState *state = (PGXPVertexState *)snapshot;
+	if (vertexCache && !history_pages_save(&state->pages,
+		vertexCache, VERTEX_CACHE_SIZE * sizeof(*vertexCache)))
+		return false;
+	if (!vertexCache)
+	{
+		history_pages_free(state->pages);
+		state->pages = NULL;
+	}
+	state->allocated = vertexCache != NULL;
+	return true;
+}
+
+bool PGXP_VertexStatePrepare(void *snapshot)
+{
+	PGXPVertexState *state = (PGXPVertexState *)snapshot;
+	if (state->allocated && !vertexCache && !state->restore_buffer)
+		state->restore_buffer = (PGXP_cache_entry *)calloc(VERTEX_CACHE_SIZE, sizeof(*vertexCache));
+	return !state->allocated || vertexCache || state->restore_buffer;
+}
+
+void PGXP_VertexStateLoad(void *snapshot)
+{
+	PGXPVertexState *state = (PGXPVertexState *)snapshot;
+	if (!state->allocated)
+	{
+		PGXP_FreeVertexCache();
+		return;
+	}
+	if (!vertexCache)
+	{
+		vertexCache = state->restore_buffer;
+		state->restore_buffer = NULL;
+		memset(snapshot_dirty, 1, sizeof(snapshot_dirty));
+	}
+	history_pages_load(state->pages, vertexCache);
 }
 
 static PGXP_cache_entry* PGXP_GetCachedVertex(int16_t sx, int16_t sy)
@@ -671,4 +762,18 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	}
 
 	return 1;
+}
+
+size_t PGXP_GPUStateSize(void)
+{
+	return sizeof(FIFO) + sizeof(CB) + sizeof(cacheMode) + sizeof(cacheGen);
+}
+
+void PGXP_GPUState(void *data, bool load)
+{
+	uint8_t *cursor = (uint8_t *)data;
+	PGXP_StateCopy(&cursor, &FIFO, sizeof(FIFO), load);
+	PGXP_StateCopy(&cursor, &CB, sizeof(CB), load);
+	PGXP_StateCopy(&cursor, &cacheMode, sizeof(cacheMode), load);
+	PGXP_StateCopy(&cursor, &cacheGen, sizeof(cacheGen), load);
 }

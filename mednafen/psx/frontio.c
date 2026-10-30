@@ -22,6 +22,7 @@
 #include "frontio.h"
 
 #include "../../beetle_psx_globals.h"
+#include "../../libretro_cbs.h"
 
 /* Globals defined in libretro.cpp.  Duplicating these declarations
  * here keeps frontio.c compilable as plain C. */
@@ -1212,6 +1213,8 @@ void FrontIO_UpdateInput(FrontIO *self_)
 void FrontIO_SetInput(FrontIO *self_, unsigned int port, const char *type, void *ptr)
 {
    FrontIO *self = self_;
+
+   retro_invalidate_memory_snapshots();
 
    free(self->Devices[port]);
    self->Devices[port] = NULL;
@@ -5316,21 +5319,41 @@ static int InputDevice_Memcard_StateAction(InputDevice *self_, StateMem* sm, int
       SFEND
    };
    int ret = 1;
+   bool snapshot = retro_using_memory_snapshots();
+   uint16_t changed[32] = {0};
 
    if(MDFNSS_StateAction(sm, load, data_only, StateRegs, section_name) != 0)
    {
       /* printf("%s data_used=%d\n", section_name, data_used); */
-      if(self->data_used)
+      if(self->data_used || snapshot)
       {
          char tmp_name[64];
          snprintf(tmp_name, sizeof(tmp_name), "%s_DT", section_name);
 
+         /* Rollback must also restore a previously unused card. */
+         if (snapshot && load)
+         {
+            CD_StateRegs[0].flags |= MDFNSTATE_DIFF;
+            MDFNSS_SetDiffMap(changed, 4096);
+         }
          ret &= MDFNSS_StateAction(sm, load, data_only, CD_StateRegs, tmp_name);
+         if (snapshot && load)
+            MDFNSS_SetDiffMap(NULL, 0);
       }
 
       if(load)
       {
-         if(self->data_used)
+         if (snapshot)
+         {
+            unsigned i;
+            for (i = 0; i < sizeof(changed) / sizeof(changed[0]); i++)
+               if (changed[i] & MDFNSS_DIFF_CHANGED)
+               {
+                  self->dirty_count++;
+                  break;
+               }
+         }
+         else if(self->data_used)
             self->dirty_count++;
       }
    }

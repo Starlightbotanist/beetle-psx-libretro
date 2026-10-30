@@ -348,6 +348,86 @@ static void upscaler_forget(psx_upscaler_t *u)
    u->reset_pending = true;
 }
 
+static bool upscaler_table_copy(upscaler_table_t *dst,
+      const upscaler_table_t *src)
+{
+   size_t size = (size_t)src->mask + 1;
+   if (!src->values)
+   {
+      upscaler_table_clear(dst);
+      return true;
+   }
+   if (!dst->values || dst->mask != src->mask)
+   {
+      uint64_t *keys = (uint64_t *)malloc(size * sizeof(*keys));
+      uint32_t *values = (uint32_t *)malloc(size * sizeof(*values));
+      if (!keys || !values)
+      {
+         free(keys);
+         free(values);
+         return false;
+      }
+      upscaler_table_free(dst);
+      dst->keys = keys;
+      dst->values = values;
+      dst->mask = src->mask;
+   }
+   memcpy(dst->keys, src->keys, size * sizeof(*dst->keys));
+   memcpy(dst->values, src->values, size * sizeof(*dst->values));
+   dst->count = src->count;
+   return true;
+}
+
+bool psx_upscaler_copy(psx_upscaler_t *dst, const psx_upscaler_t *src)
+{
+   unsigned i;
+   if (!dst || !src)
+      return false;
+   if (dst == src)
+      return true;
+   for (i = 0; i < UPSCALER_RECORDS; i++)
+   {
+      upscaler_record_t *d = &dst->records[i];
+      const upscaler_record_t *s = &src->records[i];
+      upscaler_record_t record = *s;
+      if (!upscaler_grow((void **)&d->prims, &d->cap_prims,
+               s->num_prims, sizeof(*d->prims)) ||
+          !upscaler_table_copy(&d->ordinals, &s->ordinals) ||
+          !upscaler_table_copy(&d->family_ordinals, &s->family_ordinals))
+         return false;
+      if (s->num_prims)
+         memcpy(d->prims, s->prims, s->num_prims * sizeof(*d->prims));
+      record.prims = d->prims;
+      record.cap_prims = d->cap_prims;
+      record.ordinals = d->ordinals;
+      record.family_ordinals = d->family_ordinals;
+      *d = record;
+   }
+   if (!upscaler_grow((void **)&dst->prev, &dst->cap_prev,
+            src->num_prev, sizeof(*dst->prev)) ||
+       !upscaler_table_copy(&dst->prev_table, &src->prev_table) ||
+       !upscaler_table_copy(&dst->prev_family, &src->prev_family) ||
+       !upscaler_table_copy(&dst->prev_exact, &src->prev_exact))
+      return false;
+   if (src->num_prev)
+      memcpy(dst->prev, src->prev, src->num_prev * sizeof(*dst->prev));
+   dst->num_prev = src->num_prev;
+   dst->drawing = src->drawing ?
+         &dst->records[src->drawing - src->records] : NULL;
+   dst->area_x0 = src->area_x0;
+   dst->area_y0 = src->area_y0;
+   dst->area_x1 = src->area_x1;
+   dst->area_y1 = src->area_y1;
+   dst->serial = src->serial;
+   dst->shown_serial = src->shown_serial;
+   dst->jitter_phase = src->jitter_phase;
+   dst->jitter_index = src->jitter_index;
+   dst->active = src->active;
+   dst->reset_pending = src->reset_pending;
+   /* Match and draw scratch is rebuilt by resolve, never retained. */
+   return true;
+}
+
 void psx_upscaler_configure(psx_upscaler_t *u, bool enable,
       unsigned jitter_phase, bool reset)
 {

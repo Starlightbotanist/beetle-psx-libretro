@@ -7,7 +7,11 @@ extern enum dither_mode psx_gpu_dither_mode;
 #define texel_fetch(gpu, x, y) vram_fetch((gpu), (x) << (gpu)->upscale_shift, (y) << (gpu)->upscale_shift)
 
 /* Set a pixel in VRAM */
-#define vram_put(gpu, x, y, v) (gpu)->vram[((y) << (10 + (gpu)->upscale_shift)) | (x)] = (v)
+#define vram_put(gpu, x, y, v) do { \
+   size_t position = ((size_t)(y) << (10 + (gpu)->upscale_shift)) | (x); \
+   snapshot_mark_range(position, 1); \
+   (gpu)->vram[position] = (v); \
+} while (0)
 
 #define DitherEnabled(gpu)    (psx_gpu_dither_mode != DITHER_OFF && (gpu)->dtd)
 

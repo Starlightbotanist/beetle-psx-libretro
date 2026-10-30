@@ -1,4 +1,6 @@
+#include "pgxp_state.h"
 #include <string.h>
+#include <stdlib.h>
 
 #include "pgxp_mem.h"
 #include "pgxp_cpu.h"
@@ -61,6 +63,26 @@ const uint32_t ScratchOffset  = USER_MEM_COUNT;
 const uint32_t RegisterOffset = USER_MEM_COUNT + SCRATCH_MEM_COUNT;
 const uint32_t InvalidAddress = USER_MEM_COUNT + SCRATCH_MEM_COUNT + REGISTER_MEM_COUNT;
 
+#define PGXP_PAGE_VALUES 128
+#define PGXP_PAGE_COUNT (PGXP_MEM_TOTAL / PGXP_PAGE_VALUES)
+
+typedef struct
+{
+	unsigned refs;
+	PGXP_value values[PGXP_PAGE_VALUES];
+} PGXPMemoryPage;
+
+typedef struct
+{
+	PGXPMemoryPage *pages[PGXP_PAGE_COUNT];
+	PGXPMemoryPage *pending[PGXP_PAGE_COUNT];
+	uint32_t written[sizeof(MemEverWritten) / sizeof(MemEverWritten[0])];
+} PGXPMemoryState;
+
+static PGXPMemoryPage *MemoryVersions[PGXP_PAGE_COUNT];
+static uint8_t MemoryDirty[PGXP_PAGE_COUNT];
+static unsigned MemoryStates;
+
 static inline int MemBitTest(uint32_t paddr)
 {
 	return (MemEverWritten[paddr >> 5] >> (paddr & 31)) & 1;
@@ -75,6 +97,9 @@ static inline void MemBitSet(uint32_t paddr)
  * Caller guarantees paddr < InvalidAddress. */
 static inline PGXP_value* PtrFromPacked(uint32_t paddr)
 {
+	/* Validators also mutate entries returned to memory consumers. */
+	if (MemoryStates)
+		MemoryDirty[paddr / PGXP_PAGE_VALUES] = 1;
 	if (paddr < ScratchOffset)
 		return &UserMem[paddr - UserMemOffset];
 	if (paddr < RegisterOffset)
@@ -88,6 +113,7 @@ void PGXP_InitMem()
 	memset(ScratchMem,  0, sizeof(ScratchMem));
 	memset(RegisterMem, 0, sizeof(RegisterMem));
 	memset(MemEverWritten, 0, sizeof(MemEverWritten));
+	memset(MemoryDirty, 1, sizeof(MemoryDirty));
 }
 
 /*  Playstation Memory Map (from Playstation doc by Joshua Walker)
@@ -336,4 +362,120 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 		/*dest->valid = dest->valid && src->valid; */
 		dest->gFlags |= src->gFlags;				/* inherit flags from both values (?) */
 	}
+}
+
+static PGXP_value *memory_page_data(unsigned page)
+{
+	unsigned word = page * PGXP_PAGE_VALUES;
+	if (word < USER_MEM_COUNT)
+		return UserMem + word;
+	if (word < USER_MEM_COUNT + SCRATCH_MEM_COUNT)
+		return ScratchMem + word - USER_MEM_COUNT;
+	return RegisterMem + word - USER_MEM_COUNT - SCRATCH_MEM_COUNT;
+}
+
+static void memory_page_release(PGXPMemoryPage *page)
+{
+	if (page && !--page->refs)
+		free(page);
+}
+
+void *PGXP_MemoryStateCreate(void)
+{
+	PGXPMemoryState *state = (PGXPMemoryState *)calloc(1, sizeof(*state));
+	if (state && !MemoryStates++)
+		memset(MemoryDirty, 1, sizeof(MemoryDirty));
+	return state;
+}
+
+static void PGXP_MemoryStateDiscard(void *snapshot)
+{
+	PGXPMemoryState *state = (PGXPMemoryState *)snapshot;
+	unsigned i;
+	if (!state)
+		return;
+	for (i = 0; i < PGXP_PAGE_COUNT; i++)
+	{
+		memory_page_release(state->pages[i]);
+		state->pages[i] = NULL;
+	}
+}
+
+void PGXP_MemoryStateFree(void *snapshot)
+{
+	unsigned i;
+	if (!snapshot)
+		return;
+	PGXP_MemoryStateDiscard(snapshot);
+	free(snapshot);
+	if (!--MemoryStates)
+		for (i = 0; i < PGXP_PAGE_COUNT; i++)
+		{
+			memory_page_release(MemoryVersions[i]);
+			MemoryVersions[i] = NULL;
+		}
+}
+
+bool PGXP_MemoryStateSave(void *snapshot)
+{
+	PGXPMemoryState *state = (PGXPMemoryState *)snapshot;
+	PGXPMemoryPage **pages = state->pending;
+	unsigned i;
+	for (i = 0; i < PGXP_PAGE_COUNT; i++)
+	{
+		PGXPMemoryPage *page = MemoryVersions[i];
+		if (!page || (MemoryDirty[i] && page->refs != 1))
+		{
+			page = (PGXPMemoryPage *)malloc(sizeof(*page));
+			if (!page)
+				break;
+			page->refs = 1;
+		}
+		else
+			page->refs++;
+		if (MemoryDirty[i])
+			memcpy(page->values, memory_page_data(i), sizeof(page->values));
+		pages[i] = page;
+	}
+	if (i != PGXP_PAGE_COUNT)
+	{
+		while (i)
+			memory_page_release(pages[--i]);
+		return false;
+	}
+	/* Publish only after every fallible page allocation succeeded. */
+	for (i = 0; i < PGXP_PAGE_COUNT; i++)
+	{
+		if (MemoryVersions[i] != pages[i])
+		{
+			memory_page_release(MemoryVersions[i]);
+			MemoryVersions[i] = pages[i];
+			pages[i]->refs++;
+		}
+		memory_page_release(state->pages[i]);
+		state->pages[i] = pages[i];
+	}
+	memcpy(state->written, MemEverWritten, sizeof(MemEverWritten));
+	memset(MemoryDirty, 0, sizeof(MemoryDirty));
+	return true;
+}
+
+void PGXP_MemoryStateLoad(const void *snapshot)
+{
+	const PGXPMemoryState *state = (const PGXPMemoryState *)snapshot;
+	unsigned i;
+	for (i = 0; i < PGXP_PAGE_COUNT; i++)
+	{
+		PGXPMemoryPage *page = state->pages[i];
+		if (MemoryDirty[i] || MemoryVersions[i] != page)
+			memcpy(memory_page_data(i), page->values, sizeof(page->values));
+		if (MemoryVersions[i] != page)
+		{
+			memory_page_release(MemoryVersions[i]);
+			MemoryVersions[i] = page;
+			page->refs++;
+		}
+	}
+	memcpy(MemEverWritten, state->written, sizeof(MemEverWritten));
+	memset(MemoryDirty, 0, sizeof(MemoryDirty));
 }

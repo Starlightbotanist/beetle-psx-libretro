@@ -31,6 +31,7 @@ retro_input_state_t dbg_input_state_cb = 0;
 #include "mednafen/error.h"
 
 #include "pgxp/pgxp_main.h"
+#include "pgxp/pgxp_state.h"
 #include "pgxp/pgxp_gte.h"
 #include "rhi/hdr_display.h"
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN)
@@ -4355,11 +4356,14 @@ static void check_system_specs(void)
 
 static bool disk_set_eject_state(bool ejected)
 {
+   bool was_open = CD_TrayOpen;
    if (ejected == eject_state)
       return false;
 
    DoSimpleCommand(ejected ? MDFN_MSC_EJECT_DISK : MDFN_MSC_INSERT_DISK);
    eject_state = ejected;
+   if (CD_TrayOpen != was_open)
+      retro_invalidate_memory_snapshots();
    return true;
 }
 
@@ -4377,6 +4381,8 @@ static unsigned disk_get_image_index(void)
 static bool disk_set_image_index(unsigned index)
 {
    unsigned num_images = disk_get_num_images();
+   int old_disc = CD_SelectedDisc;
+   bool was_open = CD_TrayOpen;
 
    /* An index of num_images is a request to eject the disc in the libretro API. */
    if (index == num_images)
@@ -4384,6 +4390,8 @@ static bool disk_set_image_index(unsigned index)
       eject_state = true;
       CD_SelectedDisc = -1;
       DoSimpleCommand(MDFN_MSC_EJECT_DISK);
+      if (CD_SelectedDisc != old_disc || CD_TrayOpen != was_open)
+         retro_invalidate_memory_snapshots();
       return true;
    }
 
@@ -4398,6 +4406,8 @@ static bool disk_set_image_index(unsigned index)
    CD_SelectedDisc = (int)index - 1;
 
    DoSimpleCommand(MDFN_MSC_SELECT_DISK);
+   if (CD_SelectedDisc != old_disc)
+      retro_invalidate_memory_snapshots();
    return true;
 }
 
@@ -4412,6 +4422,7 @@ static bool disk_replace_image_index(unsigned index, const struct retro_game_inf
 
    if (!info)
    {
+      retro_invalidate_memory_snapshots();
       CDIF_Close(cdifs.items[index]);
       cdif_array_remove_at(&cdifs, index);
       disc_compatibility_remove_at(index);
@@ -4441,6 +4452,7 @@ static bool disk_replace_image_index(unsigned index, const struct retro_game_inf
          return false;
       }
 
+      retro_invalidate_memory_snapshots();
       CDIF_Close(cdifs.items[index]);
       cdifs.items[index] = iface;
       CalcDiscSCEx();
@@ -4553,6 +4565,20 @@ static void fallback_log(enum retro_log_level level, const char *fmt, ...)
    va_end(va);
 }
 
+static bool memory_snapshot_supported(uint32_t max_live_states);
+static enum retro_snapshot_execution_context (RETRO_CALLCONV *snapshot_execution_context)(void);
+static bool memory_restore_failed;
+static enum retro_snapshot_result memory_snapshot_create(void **snapshot);
+static enum retro_snapshot_result memory_snapshot_save(void *snapshot);
+static enum retro_snapshot_result memory_snapshot_load(const void *snapshot);
+static void memory_snapshot_release(void *snapshot);
+static bool memory_snapshot_valid(const void *snapshot);
+
+void retro_mark_memory_restore_failed(void)
+{
+   memory_restore_failed = true;
+}
+
 void retro_init(void)
 {
    VCD_Init();
@@ -4566,6 +4592,18 @@ void retro_init(void)
       log_cb = log.log;
    else
       log_cb = fallback_log;
+
+   {
+      struct retro_snapshot_interface iface = {
+         RETRO_SNAPSHOT_INTERFACE_VERSION, sizeof(iface),
+         memory_snapshot_supported, memory_snapshot_create,
+         memory_snapshot_save, memory_snapshot_load,
+         memory_snapshot_release, memory_snapshot_valid, NULL
+      };
+      snapshot_execution_context = NULL;
+      if (environ_cb(RETRO_ENVIRONMENT_SET_SNAPSHOT_INTERFACE, &iface))
+         snapshot_execution_context = iface.get_execution_context;
+   }
 
 #ifdef NEED_DEINTERLACER
    /* The deinterlacer is a static-storage struct, so all fields
@@ -4640,6 +4678,7 @@ void retro_reset(void)
       return;
 
    DoSimpleCommand(MDFN_MSC_RESET);
+   memory_restore_failed = rhi_intf_memory_snapshot_failed();
 
    currently_interlaced    = true;
    interlace_setting_dirty = true;
@@ -6787,6 +6826,7 @@ bool retro_load_game(const struct retro_game_info *info)
    }
 
    compatibility_runtime_ready = ret;
+   memory_restore_failed = rhi_intf_memory_snapshot_failed();
    return ret;
 }
 
@@ -6801,6 +6841,7 @@ void retro_unload_game(void)
    MDFN_FlushGameCheats(0);
 
    CloseGame();
+   memory_restore_failed = false;
 
    MDFNMP_Kill();
 
@@ -6830,6 +6871,7 @@ static bool retro_set_system_av_info(void)
 void retro_run(void)
 {
    bool updated = false;
+   bool speculative = retro_is_speculative();
    static int32_t rects[MEDNAFEN_CORE_GEOMETRY_MAX_H];
    MDFN_Surface *frame_surf;
    EmulateSpecStruct spec = {0};
@@ -6846,7 +6888,7 @@ void retro_run(void)
    /* Defensive: a frontend should not call retro_run before
     * retro_load_game succeeds, but if it does we'd crash on the
     * unconditional PSX_CPU->Run / PSX_FIO->UpdateInput calls below. */
-   if (!PSX_CPU || !PSX_FIO || !PSX_CDC)
+   if (!PSX_CPU || !PSX_FIO || !PSX_CDC || memory_restore_failed)
       return;
 
    /* Keep the HDR encode in sync with the frontend's live HDR controls.
@@ -6855,18 +6897,20 @@ void retro_run(void)
     * while HDR is engaged. They feed the display quad's push constant, so
     * updating the globals here takes effect on the very next present. One
     * env_cb read, gated on psx_hdr_active. */
-   if (psx_hdr_active)
+   if (psx_hdr_active && !speculative)
       refresh_hdr_metadata();
 
    /* Apply any geometry change deferred from a previous frame's
     * check_variables before beginning this frame, so the frontend's
     * synchronous video-driver reinit runs between frames. */
-   rhi_intf_apply_pending_geometry();
+   if (!speculative)
+      rhi_intf_apply_pending_geometry();
 
    rhi_intf_prepare_frame();
 
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+   if (!speculative && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
    {
+      retro_clear_memory_snapshots();
       check_variables(false);
 
       /* Max width/height changed, need to call SET_SYSTEM_AV_INFO */
@@ -7015,7 +7059,7 @@ void retro_run(void)
    if (input_poll_cb)
       input_poll_cb();
 
-   input_update(libretro_supports_bitmasks, input_state_cb);
+   input_update(libretro_supports_bitmasks, input_state_cb, !speculative);
 
    /* Video CD transport. In HLE mode there is no PSX-side player to read the
     * pad, so the buttons have to reach the transport directly or the disc
@@ -7062,6 +7106,8 @@ void retro_run(void)
    GPU_StartFrame(espec);
 
    Running = -1;
+   /* State restores may reschedule devices between frames. */
+   CPU_SetEventNT(FirstRealEventTS());
    timestamp = CPU_Run(PSX_CPU, timestamp);
 
    assert(timestamp);
@@ -7084,7 +7130,8 @@ void retro_run(void)
 
    RebaseTS(timestamp);
 
-   // Save memcards if dirty.
+   // Save memcards only after canonical frames.
+   if (!speculative)
    {
       unsigned players = input_get_player_count();
       int i;
@@ -7452,6 +7499,8 @@ void retro_deinit(void)
     * retain them across sessions, since the frontend can be reloaded at a
     * different address before the core is initialized again. */
    led_state_cb = NULL;
+   snapshot_execution_context = NULL;
+   memory_restore_failed = false;
    memset(retro_led_state, 0, sizeof(retro_led_state));
 }
 
@@ -7546,6 +7595,8 @@ void retro_set_video_refresh(retro_video_refresh_t cb)
 
 size_t retro_serialize_size(void)
 {
+   if (memory_restore_failed)
+      return 0;
    if (enable_variable_serialization_size)
    {
       StateMem st;
@@ -7567,12 +7618,267 @@ size_t retro_serialize_size(void)
    return DEFAULT_STATE_SIZE; // 16MB
 }
 
+typedef struct MemorySnapshot
+{
+   struct MemorySnapshot *next;
+   uint8_t *data;
+   void *gpu;
+   void *pgxp;
+   bool captured;
+   uint32_t data_size, data_capacity;
+} MemorySnapshot;
+
+static MemorySnapshot *memory_snapshots;
+static MemorySnapshot memory_staging;
+static bool memory_restoring;
+static bool memory_capturing;
+
+static void memory_snapshot_discard(MemorySnapshot *state)
+{
+   GPU_MemorySnapshotFree(state->gpu);
+   PGXP_StateFree(state->pgxp);
+   free(state->data);
+   state->gpu = NULL;
+   state->pgxp = NULL;
+   state->data = NULL;
+   state->captured = false;
+   state->data_size = state->data_capacity = 0;
+}
+
+void retro_invalidate_memory_snapshots(void)
+{
+   MemorySnapshot *state;
+   for (state = memory_snapshots; state; state = state->next)
+      state->captured = false;
+}
+
+void retro_clear_memory_snapshots(void)
+{
+   MemorySnapshot *state;
+   GPU_MemorySnapshotSelect(NULL);
+   for (state = memory_snapshots; state; state = state->next)
+      memory_snapshot_discard(state);
+   memory_snapshot_discard(&memory_staging);
+   GPU_MemorySnapshotTrim();
+}
+
+static bool memory_snapshot_supported(uint32_t max_live_states)
+{
+   return max_live_states && GPU_MemorySnapshotSupported();
+}
+
+static bool memory_snapshot_owned(const MemorySnapshot *state)
+{
+   const MemorySnapshot *entry;
+   for (entry = memory_snapshots; entry; entry = entry->next)
+      if (entry == state)
+         return true;
+   return false;
+}
+
+static enum retro_snapshot_result memory_snapshot_create(void **snapshot)
+{
+   MemorySnapshot *state;
+   if (!snapshot || *snapshot)
+      return RETRO_SNAPSHOT_UNAVAILABLE;
+   if (memory_restore_failed || rhi_intf_memory_snapshot_failed())
+   {
+      memory_restore_failed = true;
+      return RETRO_SNAPSHOT_FATAL;
+   }
+   state = (MemorySnapshot *)calloc(1, sizeof(*state));
+   if (!state)
+      return RETRO_SNAPSHOT_UNAVAILABLE;
+   state->next = memory_snapshots;
+   memory_snapshots = state;
+   *snapshot = state;
+   return RETRO_SNAPSHOT_SUCCESS;
+}
+
+static void memory_snapshot_release(void *snapshot)
+{
+   MemorySnapshot **link = &memory_snapshots;
+   MemorySnapshot *state = (MemorySnapshot *)snapshot;
+   while (*link && *link != state)
+      link = &(*link)->next;
+   if (!*link)
+      return;
+   *link = state->next;
+   memory_snapshot_discard(state);
+   free(state);
+   if (!memory_snapshots)
+   {
+      memory_snapshot_discard(&memory_staging);
+      GPU_MemorySnapshotTrim();
+   }
+}
+
+static bool memory_snapshot_valid(const void *snapshot)
+{
+   const MemorySnapshot *state = (const MemorySnapshot *)snapshot;
+   return memory_snapshot_owned(state) && state->captured && GPU_MemorySnapshotMatches(state->gpu) &&
+         (PGXP_enabled() ? PGXP_StateMatches(state->pgxp) : !state->pgxp);
+}
+
+static bool memory_snapshot_capture(void *snapshot)
+{
+   MemorySnapshot *state = (MemorySnapshot *)snapshot;
+   StateMem st;
+   uint8_t *old_data, *trimmed;
+   uint32_t old_size, old_capacity, capacity;
+   void *old_gpu, *old_pgxp;
+   if (!memory_snapshot_owned(state) || !MainRAM || !PSX_CDC || !PSX_CPU || !PSX_FIO)
+      return false;
+   if (!GPU_MemorySnapshotMatches(memory_staging.gpu))
+   {
+      GPU_MemorySnapshotFree(memory_staging.gpu);
+      memory_staging.gpu = GPU_MemorySnapshotCreate();
+   }
+   if (PGXP_enabled() && !PGXP_StateMatches(memory_staging.pgxp))
+   {
+      PGXP_StateFree(memory_staging.pgxp);
+      memory_staging.pgxp = PGXP_StateCreate();
+   }
+   else if (!PGXP_enabled() && memory_staging.pgxp)
+   {
+      PGXP_StateFree(memory_staging.pgxp);
+      memory_staging.pgxp = NULL;
+   }
+   if (PGXP_enabled() && !memory_staging.pgxp)
+      return false;
+   if (!memory_staging.gpu)
+      return false;
+   memset(&st, 0, sizeof(st));
+   st.data = memory_staging.data;
+   st.malloced = memory_staging.data_capacity;
+   st.initial_malloc = 65536;
+   FastSaveStates = true;
+   memory_capturing = true;
+   memory_staging.captured = MDFNSS_SaveSM(&st, 0, 0, NULL, NULL, NULL);
+   memory_capturing = false;
+   FastSaveStates = false;
+   memory_staging.data = st.data;
+   memory_staging.data_capacity = st.malloced;
+   if (!memory_staging.captured || !GPU_MemorySnapshotSave(memory_staging.gpu) ||
+       (memory_staging.pgxp && !PGXP_StateSave(memory_staging.pgxp)))
+      return false;
+   capacity = st.len > UINT32_MAX - 65535 ? memory_staging.data_capacity :
+         (st.len + 65535u) & ~65535u;
+   if (memory_staging.data_capacity > capacity)
+   {
+      /* Keep the larger buffer if shrinking fails. */
+      trimmed = (uint8_t *)realloc(memory_staging.data, capacity);
+      if (trimmed)
+      {
+         memory_staging.data = trimmed;
+         memory_staging.data_capacity = capacity;
+      }
+   }
+   old_data = state->data;
+   old_size = state->data_size;
+   old_capacity = state->data_capacity;
+   state->data = memory_staging.data;
+   state->data_size = st.len;
+   state->data_capacity = memory_staging.data_capacity;
+   memory_staging.data = old_data;
+   memory_staging.data_size = old_size;
+   memory_staging.data_capacity = old_capacity;
+   old_gpu = state->gpu;
+   old_pgxp = state->pgxp;
+   state->gpu = memory_staging.gpu;
+   state->pgxp = memory_staging.pgxp;
+   state->captured = true;
+   memory_staging.gpu = old_gpu;
+   memory_staging.pgxp = old_pgxp;
+   memory_staging.captured = false;
+   return true;
+}
+
+static enum retro_snapshot_result memory_snapshot_save(void *snapshot)
+{
+   bool okay;
+   if (memory_restore_failed || rhi_intf_memory_snapshot_failed())
+   {
+      memory_restore_failed = true;
+      return RETRO_SNAPSHOT_FATAL;
+   }
+   okay = memory_snapshot_capture(snapshot);
+   if (rhi_intf_memory_snapshot_failed())
+   {
+      memory_restore_failed = true;
+      return RETRO_SNAPSHOT_FATAL;
+   }
+   return okay ? RETRO_SNAPSHOT_SUCCESS : RETRO_SNAPSHOT_UNAVAILABLE;
+}
+
+static enum retro_snapshot_result memory_snapshot_load(const void *snapshot)
+{
+   const MemorySnapshot *state = (const MemorySnapshot *)snapshot;
+   StateMem st;
+   bool okay;
+   if (rhi_intf_memory_snapshot_failed())
+   {
+      memory_restore_failed = true;
+      return RETRO_SNAPSHOT_FATAL;
+   }
+   if (!memory_snapshot_valid(state) || memory_restoring ||
+       !MainRAM || !PSX_CDC || !PSX_CPU || !PSX_FIO)
+      return RETRO_SNAPSHOT_UNAVAILABLE;
+   if (!GPU_MemorySnapshotPrepare(state->gpu))
+   {
+      if (rhi_intf_memory_snapshot_failed())
+      {
+         memory_restore_failed = true;
+         return RETRO_SNAPSHOT_FATAL;
+      }
+      return RETRO_SNAPSHOT_UNAVAILABLE;
+   }
+   if (state->pgxp && !PGXP_StatePrepare(state->pgxp))
+      return RETRO_SNAPSHOT_UNAVAILABLE;
+   memset(&st, 0, sizeof(st));
+   st.data = state->data;
+   st.len = state->data_size;
+   st.fixed = true;
+   PGXP_GTE_InvalidateFogRing();
+   GPU_MemorySnapshotSelect(state->gpu);
+   memory_restoring = true;
+   FastSaveStates = true;
+   okay = MDFNSS_LoadSM(&st, 0, 0);
+   if (okay && state->pgxp)
+      okay = PGXP_StateLoad(state->pgxp);
+   FastSaveStates = false;
+   memory_restoring = false;
+   GPU_MemorySnapshotSelect(NULL);
+   memory_restore_failed = !okay || rhi_intf_memory_snapshot_failed();
+   return memory_restore_failed ? RETRO_SNAPSHOT_FATAL : RETRO_SNAPSHOT_SUCCESS;
+}
+
+bool retro_using_memory_snapshots(void)
+{
+   return memory_capturing || memory_restoring;
+}
+
+bool retro_is_speculative(void)
+{
+   return snapshot_execution_context &&
+         snapshot_execution_context() == RETRO_SNAPSHOT_SPECULATIVE;
+}
+
 bool UsingFastSavestates(void)
 {
    int flags;
    if (environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &flags))
       return flags & 4;
    return false;
+}
+
+static bool using_temporary_savestates(void)
+{
+   enum retro_savestate_context context = RETRO_SAVESTATE_CONTEXT_NORMAL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context) &&
+       context != RETRO_SAVESTATE_CONTEXT_NORMAL)
+      return true;
+   return UsingFastSavestates();
 }
 
 /* Serialize emulator state straight into the frontend's `data` buffer
@@ -7583,7 +7889,12 @@ bool retro_serialize(void *data, size_t size)
    StateMem st;
    bool     ret;
 
-   if (!data || size == 0)
+   if (!data || size == 0 || memory_restore_failed)
+      return false;
+
+   /* Enhanced continuation state is available only through snapshots. */
+   if (using_temporary_savestates() && (rhi_intf_is_type() != RHI_SOFTWARE ||
+       GPU_get_upscale_shift() > 0 || PGXP_enabled()))
       return false;
 
    /* Same defensive check as retro_unserialize - StateAction touches
@@ -7616,7 +7927,6 @@ bool retro_unserialize(const void *data, size_t size)
    /* The fog sidecar ring is keyed by a push counter that restarts with the
     * loaded state while counts inside RAM shadows survive; stale slots must
     * not satisfy post-load lookups. */
-   PGXP_GTE_InvalidateFogRing();
    StateMem st;
    bool okay;
 
@@ -7625,6 +7935,7 @@ bool retro_unserialize(const void *data, size_t size)
     * which derefs MainRAM, PSX_CDC, etc. */
    if (!data || size == 0 || !MainRAM || !PSX_CDC || !PSX_CPU || !PSX_FIO)
       return false;
+   PGXP_GTE_InvalidateFogRing();
 
    st.data           = (uint8_t*)data;
    st.loc            = 0;
@@ -7637,11 +7948,19 @@ bool retro_unserialize(const void *data, size_t size)
    FastSaveStates = UsingFastSavestates();
    okay           = MDFNSS_LoadSM(&st, 0, 0);
    FastSaveStates = false;
+   okay = okay && !rhi_intf_memory_snapshot_failed();
+   memory_restore_failed = !okay;
+   /* Discard snapshots only after a successful ordinary load. */
+   if (okay)
+      retro_clear_memory_snapshots();
+   GPU_MemorySnapshotSelect(NULL);
    return okay;
 }
 
 void *retro_get_memory_data(unsigned type)
 {
+   if (memory_restore_failed)
+      return NULL;
    /* This callback may be invoked before retro_load_game or after
     * retro_unload_game. Returning NULL is a valid response per the
     * libretro spec; the frontend must cope with that. */

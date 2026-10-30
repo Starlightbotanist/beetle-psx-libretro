@@ -56,6 +56,7 @@ static INLINE int DrawSpriteFillVec(PS_GPU *gpu, int32_t x, int32_t y,
    const uint16_t mso  = gpu->MaskSetOR;
    const int      step = (BM_VAL == BLEND_MODE_SUBTRACT) ? 4 : 8;
    int32_t        done = 0;
+   snapshot_mark_range((size_t)(row - gpu->vram) + x, w);
 #if defined(__SSE2__)
    const __m128i  FP    = _mm_set1_epi16((short)fill_color);
    const __m128i  v7FFF = _mm_set1_epi16(0x7FFF);

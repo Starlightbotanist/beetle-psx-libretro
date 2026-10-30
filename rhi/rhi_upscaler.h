@@ -78,6 +78,10 @@ typedef struct psx_upscaler_geometry
 psx_upscaler_t *psx_upscaler_new(void);
 void psx_upscaler_free(psx_upscaler_t *u);
 
+/* Copies retained geometry and jitter into private staging storage. Failure
+ * leaves the source unchanged; the destination must be copied again before use. */
+bool psx_upscaler_copy(psx_upscaler_t *dst, const psx_upscaler_t *src);
+
 /* Before a frame. Primitives are jittered while @enable is set;
  * @jitter_phase frames make the sequence. */
 void psx_upscaler_configure(psx_upscaler_t *u, bool enable,

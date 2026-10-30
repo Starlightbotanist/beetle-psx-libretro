@@ -319,6 +319,16 @@ void GPU_WakeVirtual(void);
 bool GPU_EventVirtual(void);
 int32_t  GPU_GetScanlineNum(void);
 
+bool GPU_MemorySnapshotSupported(void);
+void *GPU_MemorySnapshotCreate(void);
+void GPU_MemorySnapshotFree(void *snapshot);
+bool GPU_MemorySnapshotSave(void *snapshot);
+bool GPU_MemorySnapshotPrepare(void *snapshot);
+bool GPU_MemorySnapshotMatches(void *snapshot);
+void GPU_MemorySnapshotSelect(void *snapshot);
+void retro_clear_memory_snapshots(void);
+void GPU_MemorySnapshotTrim(void);
+
 /* Used by rhi_lib_gl.c to access the VRAM contents and
  * to drive state restore points. */
 uint16_t *GPU_get_vram(void);

@@ -31,6 +31,8 @@ static INLINE bool SimpleFIFO_Init(SimpleFIFO *f, uint32_t the_size)
       f->in_count  = 0;
       return false;
    }
+   /* Savestates include the unused bytes of this buffer. */
+   memset(f->data, 0, the_size * sizeof(uint8_t));
    f->size      = the_size;
    f->read_pos  = 0;
    f->write_pos = 0;

@@ -254,8 +254,9 @@ void hd_make_level(int l, out HdLevelInfo level) {
    ivec2 v2l_i = (hd_texel_rect.zw / hd_vram_rect.zw) >> l;
    vec2 vram_to_level = vec2(v2l_i);
    ivec4 texel_rect = hd_texel_rect >> l;
+   int texels_per_word = 1 << int(frag_depth_shift);
    level.level = l;
-   level.local_to_level = vec2(1.0 / float(1 << int(frag_depth_shift)), 1.0) * vram_to_level;
+   level.local_to_level = vec2(1.0 / float(texels_per_word), 1.0) * vram_to_level;
    level.clamp_rect = vec4(vec2(frag_texture_limits.xy) * level.local_to_level,
          (vec2(frag_texture_limits.zw) + vec2(1.0)) * level.local_to_level - vec2(1.0));
    level.level_texel_rect = vec4(vec2(texel_rect.xy), vec2(texel_rect.xy + texel_rect.zw));
@@ -326,7 +327,8 @@ bool hd_sample_nearest_sd(vec2 uv /* local */, out vec4 color) {
 }
 
 vec4 hd_sample_trilinear(vec2 uv /* local */, out bool valid) {
-   ivec2 vram_to_local = ivec2(1 << int(frag_depth_shift), 1);
+   int texels_per_word = 1 << int(frag_depth_shift);
+   ivec2 vram_to_local = ivec2(texels_per_word, 1);
    vec2 hd_uv = uv / vec2(vram_to_local)
          * (vec2(hd_texel_rect.zw) / vec2(hd_vram_rect.zw));
    // GL 3.3 / GLES3 have no textureQueryLod in the fragment stage; derive
@@ -464,7 +466,7 @@ STRINGIZE(
       uint index = (icolor >> shift) & mask;
 
       if (frag_palette_cached != 0U)
-         texel = texelFetch(palette_texture, ivec2(index, 0), 0);
+         texel = texelFetch(palette_texture, ivec2(int(index), 0), 0);
       else
          texel = vram_get_pixel(frag_clut.x + index, frag_clut.y);
    }

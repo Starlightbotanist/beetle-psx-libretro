@@ -1,3 +1,4 @@
+#include "pgxp_state.h"
 #include <string.h>
 #include <math.h>
 
@@ -1616,4 +1617,16 @@ void PGXP_CPU_Dispatch(uint32_t instr,
       case 0x2E: PGXP_CPU_SWR(instr, rtVal, addr);           break;
       default: break;
    }
+}
+
+size_t PGXP_CPUStateSize(void)
+{
+	return sizeof(CPU_reg_mem) + sizeof(CP0_reg_mem);
+}
+
+void PGXP_CPUState(void *data, bool load)
+{
+	uint8_t *cursor = (uint8_t *)data;
+	PGXP_StateCopy(&cursor, &CPU_reg_mem, sizeof(CPU_reg_mem), load);
+	PGXP_StateCopy(&cursor, &CP0_reg_mem, sizeof(CP0_reg_mem), load);
 }

@@ -41,13 +41,180 @@ enum rhi_renderer_type rhi_type                 = RHI_SOFTWARE;
 static bool gl_initialized                      = false;
 static bool vk_initialized                      = false;
 
+#include "rhi_coherence.h"
+
+typedef struct
+{
+   bool (*supported)(void);
+   bool (*failed)(void);
+   void *(*create)(void);
+   void (*release)(void *);
+   bool (*matches)(void *);
+   bool (*save)(void *);
+   bool (*prepare)(void *);
+   bool (*load)(void *);
+   void *(*tracker)(void *);
+} RHISnapshotOps;
+
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+static const RHISnapshotOps gl_snapshot_ops = {
+   rhi_gl_memory_snapshot_supported,
+   rhi_gl_memory_snapshot_failed,
+   rhi_gl_memory_snapshot_create,
+   rhi_gl_memory_snapshot_free, rhi_gl_memory_snapshot_matches,
+   rhi_gl_memory_snapshot_save, rhi_gl_memory_snapshot_prepare,
+   rhi_gl_memory_snapshot_load, rhi_gl_memory_snapshot_tracker
+};
+#endif
+#ifdef HAVE_VULKAN
+static const RHISnapshotOps vk_snapshot_ops = {
+   rhi_vulkan_memory_snapshot_supported,
+   rhi_vulkan_memory_snapshot_failed,
+   rhi_vulkan_memory_snapshot_create,
+   rhi_vulkan_memory_snapshot_free, rhi_vulkan_memory_snapshot_matches,
+   rhi_vulkan_memory_snapshot_save, rhi_vulkan_memory_snapshot_prepare,
+   rhi_vulkan_memory_snapshot_load, rhi_vulkan_memory_snapshot_tracker
+};
+#endif
+
+static const RHISnapshotOps *rhi_snapshot_ops(void)
+{
+   switch (rhi_type)
+   {
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+      case RHI_OPENGL: return &gl_snapshot_ops;
+#endif
+#ifdef HAVE_VULKAN
+      case RHI_VULKAN: return &vk_snapshot_ops;
+#endif
+      default: return NULL;
+   }
+}
+
+typedef struct
+{
+   const RHISnapshotOps *ops;
+   void *backend;
+   uint8_t clean[TT_COH_BH * TT_COH_BW];
+   uint16_t x, y, w, h;
+   bool pending;
+   void *textures;
+} RHIMemorySnapshot;
+
+bool rhi_intf_memory_snapshot_failed(void)
+{
+   const RHISnapshotOps *ops = rhi_snapshot_ops();
+   return ops && ops->failed();
+}
+
+bool rhi_intf_memory_snapshot_supported(void)
+{
+   const RHISnapshotOps *ops = rhi_snapshot_ops();
+   return ops && ops->supported();
+}
+
+void *rhi_intf_memory_snapshot_create(void)
+{
+   const RHISnapshotOps *ops = rhi_snapshot_ops();
+   RHIMemorySnapshot *state;
+   if (!ops || !ops->supported())
+      return NULL;
+   state = (RHIMemorySnapshot *)calloc(1, sizeof(*state));
+   if (!state)
+      return NULL;
+   state->ops = ops;
+   state->backend = ops->create();
+   if (!state->backend)
+   {
+      free(state);
+      return NULL;
+   }
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (ops->tracker(state->backend))
+   {
+      state->textures = texture_tracker_memory_new();
+      if (!state->textures)
+      {
+         ops->release(state->backend);
+         free(state);
+         return NULL;
+      }
+   }
+#endif
+   return state;
+}
+
+void rhi_intf_memory_snapshot_free(enum rhi_renderer_type type, void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   (void)type;
+   if (!state)
+      return;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   texture_tracker_memory_free(state->textures);
+#endif
+   state->ops->release(state->backend);
+   free(state);
+}
+
+bool rhi_intf_memory_snapshot_matches(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   return state && state->ops == rhi_snapshot_ops() &&
+      (!!state->textures == !!state->ops->tracker(state->backend)) &&
+      state->ops->matches(state->backend);
+}
+
+bool rhi_intf_memory_snapshot_save(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   if (!rhi_intf_memory_snapshot_matches(state) || !state->ops->save(state->backend))
+      return false;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (state->textures && !texture_tracker_memory_save(
+         (TextureTracker *)state->ops->tracker(state->backend), state->textures))
+      return false;
+#endif
+   memcpy(state->clean, tt_coh_clean, sizeof(state->clean));
+   state->x = tt_coh_dax; state->y = tt_coh_day;
+   state->w = tt_coh_daw; state->h = tt_coh_dah;
+   state->pending = tt_coh_da_pending;
+   return true;
+}
+
+bool rhi_intf_memory_snapshot_prepare(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   if (!rhi_intf_memory_snapshot_matches(state) || !state->ops->prepare(state->backend))
+      return false;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (state->textures && !texture_tracker_memory_prepare(state->textures))
+      return false;
+#endif
+   return true;
+}
+
+bool rhi_intf_memory_snapshot_load(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   if (!rhi_intf_memory_snapshot_prepare(state) || !state->ops->load(state->backend))
+      return false;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (state->textures)
+      texture_tracker_memory_load((TextureTracker *)state->ops->tracker(state->backend), state->textures);
+#endif
+   memcpy(tt_coh_clean, state->clean, sizeof(state->clean));
+   tt_coh_dax = state->x; tt_coh_day = state->y;
+   tt_coh_daw = state->w; tt_coh_dah = state->h;
+   tt_coh_da_pending = state->pending;
+   return true;
+}
+
 /* GPU reset defaults */
 static int rhi_width_mode = WIDTH_MODE_256;
 static int rhi_height_mode = HEIGHT_MODE_240;
 /* GP1(06h) range: x1 in the low 16 bits, x2 in the high 16 bits. */
 static uint32_t rhi_hrange = 0x200u | (0xC00u << 16);
-
-#include "rhi_coherence.h"
 
 static bool rhi_soft_open(bool is_pal)
 {
@@ -637,44 +804,33 @@ void rhi_intf_set_display_mode(bool depth_24bpp,
    rhi_dump_set_display_mode(depth_24bpp, is_pal, is_480i, width_mode);
 #endif
 
-   /* During the first 20 GP1(0x08) writes (the BIOS boot animation),
-    * suppress the dirty flags that trigger
-    * retro_set_geometry/retro_set_system_av_info, since those round-
-    * trip through the frontend and can cause a window/audio re-init
-    * stutter for every BIOS-boot mode flip.
-    *
-    * Do NOT gate the renderer state propagation -- the HW renderers'
-    * scanout texture dimensions, width_mode, is_pal and is_480i must
-    * always reflect the current GP1(0x08) value, otherwise programs
-    * that program their final display mode once early (single-purpose
-    * homebrew/test EXEs that boot, set up GP regs, then sit in a
-    * display loop without re-issuing GP1(0x08)) get the renderer
-    * stuck at the default (NTSC 240p, WIDTH_MODE_320) forever.
-    *
-    * That stuck-default produces the classic symptom: HW renderer
-    * shows the EXE's content squashed/scrambled into a 350x240 window
-    * even though SW renders the same content correctly at 700x576. */
-   if (startup_frame_count < 20)
-      startup_frame_count++;
-   else
+   /* Suppress frontend reinits during the first 20 guest mode writes.
+    * Restores and speculative writes update renderer registers below, but
+    * must not advance this startup gate or frontend timing/aspect policy. */
+   if (!retro_using_memory_snapshots() && !retro_is_speculative())
    {
-      /* Enforce weird interlaced non-480i modes as interlaced */
-      if (rhi_type == RHI_SOFTWARE && image_height > MEDNAFEN_CORE_GEOMETRY_BASE_H)
-         is_480i = true;
-
-      /* Is this check accurate for 240i timing? May need to be fixed later */
-      if (currently_interlaced != is_480i)
+      if (startup_frame_count < 20)
+         startup_frame_count++;
+      else
       {
-         currently_interlaced = is_480i;
-         interlace_setting_dirty = true;
-      }
+         /* Enforce weird interlaced non-480i modes as interlaced */
+         if (rhi_type == RHI_SOFTWARE && image_height > MEDNAFEN_CORE_GEOMETRY_BASE_H)
+            is_480i = true;
 
-      /* Also verify if this is accurate for 240i */
-      if ((rhi_width_mode != width_mode) || (rhi_height_mode != (int)is_480i))
-      {
-         rhi_width_mode = width_mode;
-         rhi_height_mode = (int)is_480i;
-         aspect_ratio_dirty = true;
+         /* Is this check accurate for 240i timing? May need to be fixed later */
+         if (currently_interlaced != is_480i)
+         {
+            currently_interlaced = is_480i;
+            interlace_setting_dirty = true;
+         }
+
+         /* Also verify if this is accurate for 240i */
+         if ((rhi_width_mode != width_mode) || (rhi_height_mode != (int)is_480i))
+         {
+            rhi_width_mode = width_mode;
+            rhi_height_mode = (int)is_480i;
+            aspect_ratio_dirty = true;
+         }
       }
    }
 

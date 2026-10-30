@@ -657,6 +657,12 @@ void texture_tracker_save_state(TextureTracker *self,
 void texture_tracker_load_state(TextureTracker *self,
       const TextureTrackerSaveState *state);
 
+void *texture_tracker_memory_new(void);
+void texture_tracker_memory_free(void *state);
+bool texture_tracker_memory_save(TextureTracker *self, void *state);
+bool texture_tracker_memory_prepare(void *state);
+void texture_tracker_memory_load(TextureTracker *self, void *state);
+
 #ifdef __cplusplus
 }
 #endif

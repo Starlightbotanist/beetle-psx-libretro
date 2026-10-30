@@ -9,6 +9,7 @@ static const char *image_load_fragment = GLSL_FRAGMENT(
       // Uploads rebuild the derived stencil from the authoritative mask bit.
       // 0: color copy, 1: protected pixels for the stencil-only pass.
       uniform uint mask_pass;
+      uniform highp ivec2 mask_origin;
       in vec2 frag_fb_coord;
       out vec4 frag_color;
 
@@ -18,6 +19,26 @@ static const char *image_load_fragment = GLSL_FRAGMENT(
       }
 
       void main() {
+      if (mask_pass == 3u) {
+         frag_color = vec4(1.0);
+         return;
+      }
+      if (mask_pass == 4u) {
+         ivec2 p = ivec2(gl_FragCoord.xy);
+         highp uint bits = 0u;
+         for (int i = 0; i < 8; i++)
+            if (texelFetch(fb_texture, ivec2(p.x * 8 + i, p.y) + mask_origin, 0).r > 0.5)
+               bits |= 1u << uint(i);
+         frag_color = vec4(float(bits) / 255.0, 0.0, 0.0, 1.0);
+         return;
+      }
+      if (mask_pass == 5u) {
+         ivec2 p = ivec2(gl_FragCoord.xy) - mask_origin;
+         highp uint bits = uint(floor(texelFetch(fb_texture, ivec2(p.x / 8, p.y), 0).r * 255.0 + 0.5));
+         if ((bits & (1u << uint(p.x & 7))) == 0u) discard;
+         frag_color = vec4(0.0);
+         return;
+      }
       // GLES 5551 note: color reinterpretation can be done here
       frag_color = vram_get_pixel(int(frag_fb_coord.x), int(frag_fb_coord.y));
       if (mask_pass != 0u && frag_color.a <= 0.5)
