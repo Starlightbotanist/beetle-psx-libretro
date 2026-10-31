@@ -290,6 +290,102 @@ static void test_factor(void)
    CHECK(psx_upscaler_factor(&r, 320, 240, 16, 0, 0, 0) == 0, "none when none fits");
 }
 
+static void compare_geometry(const psx_upscaler_geometry_t *a,
+      const psx_upscaler_geometry_t *b)
+{
+   CHECK(a->reset == b->reset && a->jitter_x == b->jitter_x &&
+         a->jitter_y == b->jitter_y, "restored reset and jitter");
+   CHECK(a->num_vertices == b->num_vertices && a->num_draws == b->num_draws,
+         "restored geometry counts");
+   if (a->num_vertices == b->num_vertices && a->num_vertices)
+      CHECK(!memcmp(a->vertices, b->vertices,
+               a->num_vertices * sizeof(*a->vertices)), "restored motion and depth");
+   if (a->num_draws == b->num_draws && a->num_draws)
+      CHECK(!memcmp(a->draws, b->draws, a->num_draws * sizeof(*a->draws)),
+            "restored draw ordering");
+}
+
+static void copy_frame(psx_upscaler_t *u, unsigned frame,
+      psx_upscaler_geometry_t *g)
+{
+   unsigned y = frame % 2 ? 256 : 0;
+   psx_upscaler_set_draw_area(u, 0, y, 319, y + 239);
+   tri_wf(u, 20 + frame, y + 20, 60 + frame, y + 20,
+         20 + frame, y + 60, 200, 0, sig(frame % 3), sig(50));
+   sprite(u, 80, y + 80 + frame, 20, 20, sig(51));
+   psx_upscaler_resolve(u, 0, (int)y, 320, 240, SCALE, g);
+}
+
+static void test_copy(void)
+{
+   psx_upscaler_t *reference = psx_upscaler_new();
+   psx_upscaler_t *capture = psx_upscaler_new();
+   psx_upscaler_t *replay = psx_upscaler_new();
+   psx_upscaler_geometry_t a, b;
+   unsigned i, pass;
+   CHECK(reference && capture && replay, "copy storage");
+   if (!reference || !capture || !replay)
+      goto done;
+   CHECK(psx_upscaler_copy(capture, reference), "inactive copy");
+   CHECK(!psx_upscaler_is_active(capture), "inactive remains inactive");
+   psx_upscaler_configure(reference, true, 13, false);
+   for (i = 0; i < 6; i++)
+      copy_frame(reference, i, &a);
+   CHECK(psx_upscaler_copy(capture, reference), "capture shown history");
+   /* Replay the same future twice from one non-consuming capture, after a
+    * divergent future has populated the destination's scratch and tables. */
+   for (pass = 0; pass < 2; pass++)
+   {
+      if (pass)
+      {
+         psx_upscaler_free(reference);
+         reference = psx_upscaler_new();
+         CHECK(reference != NULL, "fresh uninterrupted reference");
+         if (!reference)
+            goto done;
+         psx_upscaler_configure(reference, true, 13, false);
+         for (i = 0; i < 6; i++)
+            copy_frame(reference, i, &a);
+      }
+      CHECK(psx_upscaler_copy(replay, capture), "restore replay");
+      for (i = 6; i < 12; i++)
+      {
+         copy_frame(reference, i, &a);
+         copy_frame(replay, i, &b);
+         compare_geometry(&a, &b);
+         CHECK(a.num_vertices == 9, "comparison consumed triangle and sprite");
+      }
+      copy_frame(replay, 40 + pass, &b);
+   }
+   /* Capture during drawing: the next primitive must append to the copied
+    * area, using its existing ordinals and jitter. */
+   psx_upscaler_set_draw_area(reference, 0, 0, 319, 239);
+   tri(reference, 10, 10, 40, 10, 10, 40, 0, sig(90));
+   CHECK(psx_upscaler_copy(capture, reference), "capture unfinished area");
+   CHECK(psx_upscaler_copy(replay, capture), "restore unfinished area");
+   for (pass = 0; pass < 2; pass++)
+   {
+      psx_upscaler_t *u = pass ? replay : reference;
+      tri(u, 20, 20, 50, 20, 20, 50, 0, sig(90));
+      psx_upscaler_resolve(u, 0, 0, 320, 240, SCALE, pass ? &b : &a);
+   }
+   compare_geometry(&a, &b);
+   CHECK(a.num_vertices == 6, "copied drawing pointer and both primitives");
+   psx_upscaler_configure(reference, false, 8, false);
+   CHECK(psx_upscaler_copy(replay, reference), "disable after populated history");
+   CHECK(!psx_upscaler_is_active(replay), "disabled history stays disabled");
+   psx_upscaler_configure(reference, true, 8, false);
+   psx_upscaler_configure(replay, true, 8, false);
+   copy_frame(reference, 0, &a);
+   copy_frame(replay, 0, &b);
+   compare_geometry(&a, &b);
+   CHECK(b.reset, "empty restored history resets on activation");
+done:
+   psx_upscaler_free(reference);
+   psx_upscaler_free(capture);
+   psx_upscaler_free(replay);
+}
+
 int main(void)
 {
    test_inactive_and_jitter();
@@ -298,6 +394,7 @@ int main(void)
    test_family();
    test_reset();
    test_factor();
+   test_copy();
    if (s_failures)
    {
       printf("%d failure(s)\n", s_failures);

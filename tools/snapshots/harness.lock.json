@@ -1,0 +1,13 @@
+{
+  "repository": "Starlightbotanist/RetroArch",
+  "revision": "c23cba0ae262b5fb08d065ae29409b3384e2b2aa",
+  "files": {
+    "libretro-common/samples/snapshots/Makefile": "14b45d1f1ac38bcfe24babc69e5b107b70faca842d060f7c48f4314f19906363",
+    "libretro-common/samples/snapshots/README.md": "bae04c5beb00b66b1a0c984c6c3a2422d55339d366b56fb1f09f8d0635b869f9",
+    "libretro-common/samples/snapshots/snapshot_smoke.c": "f49fd5f3630d6f49134223fc112717f3e9ebaebfa44eeb4f90184a1666dfc6a7",
+    "libretro-common/samples/snapshots/snapshot_proxy.c": "9a6b596f54603d19cf52729442060353455185dc0fe471d24d35599fdfbfc059",
+    "libretro-common/samples/snapshots/run_profiles.py": "d84efef7209f0e6103a594e4d4da5cfa3430af503eeae10110417e6d1ddb11a4",
+    "libretro-common/samples/snapshots/run_gpu_profiles.py": "2f7e8d514998ffc2336a53cdb2be14a0f1e50bf2246fafe9d5e383400b94620c",
+    "libretro-common/include/libretro.h": "6a59409897d2c3985348dd126756cdf16ad11b536b312773eb6d6030bf0176ee"
+  }
+}
