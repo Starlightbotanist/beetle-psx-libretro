@@ -11,6 +11,15 @@ extern "C" {
 //void rhi_gl_set_blend_mode(enum blending_modes mode);
 void rhi_gl_get_system_av_info(struct retro_system_av_info *info);
 
+bool rhi_gl_memory_snapshot_supported(void);
+void *rhi_gl_memory_snapshot_create(void);
+void rhi_gl_memory_snapshot_free(void *snapshot);
+void rhi_gl_memory_snapshot_discard_tiles(void *snapshot);
+bool rhi_gl_memory_snapshot_matches(void *snapshot);
+bool rhi_gl_memory_snapshot_save(void *snapshot);
+bool rhi_gl_memory_snapshot_prepare(void *snapshot);
+bool rhi_gl_memory_snapshot_load(void *snapshot);
+
 bool rhi_gl_open(bool is_pal);
 void rhi_gl_close(void);
 void rhi_gl_refresh_variables(void);
@@ -117,9 +126,10 @@ void rhi_gl_toggle_display(bool status);
 
 bool rhi_gl_has_software_renderer(void);
 bool rhi_gl_context_ready(void);
+void *rhi_gl_memory_snapshot_tracker(void *snapshot);
+
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif /*__RHI_LIB_GL_H__*/

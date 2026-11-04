@@ -784,7 +784,8 @@ static void input_handle_lightgun( INPUT_DATA *p_input, int iplayer, retro_input
    }
 }
 
-void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_state_cb )
+void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_state_cb,
+      bool allow_rumble)
 {
    unsigned i;
    unsigned iplayer;
@@ -1165,7 +1166,7 @@ void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_sta
       /*  */
       /*  -- Rumble */
 
-      if ( rumble.set_rumble_state )
+      if ( rumble.set_rumble_state && allow_rumble )
       {
          switch ( input_type[ iplayer ] )
          {

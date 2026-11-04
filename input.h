@@ -47,7 +47,8 @@ extern bool input_set_controller_port_compatibility(
 
 extern unsigned input_get_player_count(void);
 
-void input_update(bool supports_bitmasks, retro_input_state_t input_state_cb );
+void input_update(bool supports_bitmasks, retro_input_state_t input_state_cb,
+      bool allow_rumble);
 
 enum
 {

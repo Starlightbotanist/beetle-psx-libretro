@@ -17,6 +17,9 @@
 #include <lrc_hash.h>
 #include <formats/data_transfer.h>
 #include "rhi/rhi_intf.h"
+#ifdef HAVE_VULKAN
+#include "rhi/rhi_lib_vulkan.h"
+#endif
 #include "libretro_cbs.h"
 #include "beetle_psx_globals.h"
 #include "libretro_game_database.h"
@@ -31,6 +34,7 @@ retro_input_state_t dbg_input_state_cb = 0;
 #include "mednafen/error.h"
 
 #include "pgxp/pgxp_main.h"
+#include "pgxp/pgxp_state.h"
 #include "pgxp/pgxp_gte.h"
 #include "rhi/hdr_display.h"
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN)
@@ -113,6 +117,7 @@ bool gpu_fbwrite_fifo_delay = false;
  * below. */
 retro_video_refresh_t video_cb = NULL;
 retro_environment_t environ_cb = NULL;
+static bool prediction_live_usable = true;
 
 static bool libretro_supports_option_categories = false;
 static bool libretro_supports_bitmasks = false;
@@ -3955,7 +3960,7 @@ static void CloseGame(void)
    /* If load failed partway through, PSX_FIO may be NULL while the
     * cdifs array and other state still exist. Skip memcard saves in
     * that case rather than segfaulting. */
-   if (PSX_FIO)
+   if (PSX_FIO && prediction_live_usable)
    {
       for (i = 0; i < 8; i++)
       {
@@ -4553,6 +4558,12 @@ static void fallback_log(enum retro_log_level level, const char *fmt, ...)
    va_end(va);
 }
 
+static enum retro_savestate_phase (RETRO_CALLCONV *prediction_phase)(void);
+static void RETRO_CALLCONV prediction_release(const void *data, size_t size);
+static bool RETRO_CALLCONV prediction_usable(void);
+static void prediction_clear(void);
+static void prediction_trim_idle(void);
+
 void retro_init(void)
 {
    VCD_Init();
@@ -4566,6 +4577,17 @@ void retro_init(void)
       log_cb = log.log;
    else
       log_cb = fallback_log;
+
+   {
+      struct retro_savestate_lifetime lifetime = {
+         RETRO_SAVESTATE_LIFETIME_VERSION, sizeof(lifetime),
+         prediction_release, prediction_usable, NULL
+      };
+      prediction_phase = NULL;
+      prediction_live_usable = true;
+      if (environ_cb(RETRO_ENVIRONMENT_SET_SAVESTATE_LIFETIME, &lifetime))
+         prediction_phase = lifetime.get_phase;
+   }
 
 #ifdef NEED_DEINTERLACER
    /* The deinterlacer is a static-storage struct, so all fields
@@ -6795,6 +6817,7 @@ void retro_unload_game(void)
    VCD_SetMode(VCD_MODE_OFF);
    VCD_Reset();
 
+   prediction_clear();
    rhi_intf_close();
    reset_hdr_output_state();
 
@@ -6827,9 +6850,17 @@ static bool retro_set_system_av_info(void)
    return environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &new_av_info);
 }
 
+static bool video_enabled = true;
+
+bool retro_video_enabled(void)
+{
+   return video_enabled;
+}
+
 void retro_run(void)
 {
    bool updated = false;
+   bool speculative = retro_is_speculative();
    static int32_t rects[MEDNAFEN_CORE_GEOMETRY_MAX_H];
    MDFN_Surface *frame_surf;
    EmulateSpecStruct spec = {0};
@@ -6842,6 +6873,13 @@ void retro_run(void)
    const uint32_t *pix;
    unsigned        pix_offset;
    unsigned        pitch;
+   int             av_enable = 3;
+
+   environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av_enable);
+   video_enabled = (av_enable & 1) != 0;
+   if (!prediction_live_usable)
+      return;
+   prediction_trim_idle();
 
    /* Defensive: a frontend should not call retro_run before
     * retro_load_game succeeds, but if it does we'd crash on the
@@ -6855,18 +6893,20 @@ void retro_run(void)
     * while HDR is engaged. They feed the display quad's push constant, so
     * updating the globals here takes effect on the very next present. One
     * env_cb read, gated on psx_hdr_active. */
-   if (psx_hdr_active)
+   if (psx_hdr_active && !speculative)
       refresh_hdr_metadata();
 
    /* Apply any geometry change deferred from a previous frame's
     * check_variables before beginning this frame, so the frontend's
     * synchronous video-driver reinit runs between frames. */
-   rhi_intf_apply_pending_geometry();
+   if (!speculative)
+      rhi_intf_apply_pending_geometry();
 
    rhi_intf_prepare_frame();
 
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+   if (!speculative && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
    {
+      retro_clear_memory_snapshots();
       check_variables(false);
 
       /* Max width/height changed, need to call SET_SYSTEM_AV_INFO */
@@ -7015,7 +7055,7 @@ void retro_run(void)
    if (input_poll_cb)
       input_poll_cb();
 
-   input_update(libretro_supports_bitmasks, input_state_cb);
+   input_update(libretro_supports_bitmasks, input_state_cb, !speculative);
 
    /* Video CD transport. In HLE mode there is no PSX-side player to read the
     * pad, so the buttons have to reach the transport directly or the disc
@@ -7545,8 +7585,319 @@ void retro_set_video_refresh(retro_video_refresh_t cb)
    rhi_intf_set_video_refresh(cb);
 }
 
+typedef struct MemoryCheckpoint
+{
+   struct MemoryCheckpoint *next;
+   uint64_t id;
+   uint8_t *data;
+   void *gpu;
+   void *pgxp;
+   bool captured;
+   size_t data_size, data_capacity;
+} MemoryCheckpoint;
+
+static MemoryCheckpoint *memory_checkpoints;
+static uint64_t memory_snapshot_id;
+static MemoryCheckpoint memory_staging;
+static uint8_t *memory_cpu_spare;
+static size_t memory_cpu_spare_capacity;
+static bool memory_restoring, memory_capturing;
+
+bool retro_using_memory_snapshots(void)
+{
+   return memory_capturing || memory_restoring;
+}
+
+void retro_mark_memory_restore_failed(void)
+{
+   prediction_live_usable = false;
+}
+
+static void memory_checkpoint_discard(MemoryCheckpoint *state)
+{
+   GPU_MemorySnapshotFree(state->gpu);
+   PGXP_StateFree(state->pgxp);
+   free(state->data);
+   state->gpu = NULL;
+   state->pgxp = NULL;
+   state->data = NULL;
+   state->captured = false;
+   state->data_size = state->data_capacity = 0;
+}
+
+void retro_clear_memory_snapshots(void)
+{
+   MemoryCheckpoint *state;
+   GPU_MemorySnapshotSelect(NULL);
+   GPU_MemorySnapshotSelectSave(NULL);
+   for (state = memory_checkpoints; state; state = state->next)
+      memory_checkpoint_discard(state);
+   memory_checkpoint_discard(&memory_staging);
+   free(memory_cpu_spare); memory_cpu_spare = NULL; memory_cpu_spare_capacity = 0;
+   GPU_MemorySnapshotTrim();
+}
+
+static void *memory_checkpoint_create(void)
+{
+   MemoryCheckpoint *state = (MemoryCheckpoint *)calloc(1, sizeof(*state));
+   if (state)
+   {
+      state->next = memory_checkpoints;
+      memory_checkpoints = state;
+   }
+   return state;
+}
+
+static void memory_checkpoint_release(void *checkpoint)
+{
+   MemoryCheckpoint **link = &memory_checkpoints;
+   MemoryCheckpoint *state = (MemoryCheckpoint *)checkpoint;
+   bool keep_staging;
+   while (*link && *link != state)
+      link = &(*link)->next;
+   if (!*link)
+      return;
+   *link = state->next;
+   keep_staging = memory_checkpoints ||
+      (prediction_phase && prediction_phase() != RETRO_SAVESTATE_PHASE_NORMAL);
+   if (keep_staging && state->gpu && state->data)
+   {
+      uint8_t *scratch = memory_staging.data;
+      size_t scratch_capacity = memory_staging.data_capacity;
+      memory_staging.data = NULL;
+      memory_checkpoint_discard(&memory_staging);
+      memory_staging.data = scratch;
+      memory_staging.data_capacity = scratch_capacity;
+      memory_staging.gpu = state->gpu;
+      memory_staging.pgxp = state->pgxp;
+      if (state->data_capacity >= memory_cpu_spare_capacity)
+      {
+         free(memory_cpu_spare);
+         memory_cpu_spare = state->data;
+         memory_cpu_spare_capacity = state->data_capacity;
+      }
+      else free(state->data);
+      GPU_MemorySnapshotReleaseVRAM(memory_staging.gpu);
+      PGXP_StateDiscard(memory_staging.pgxp);
+      memory_staging.captured = false;
+   }
+   else
+      memory_checkpoint_discard(state);
+   free(state);
+   if (!keep_staging)
+      prediction_trim_idle();
+}
+
+static void prediction_trim_idle(void)
+{
+   if (!memory_checkpoints && (memory_staging.gpu || memory_staging.data || memory_cpu_spare) &&
+       (!prediction_phase || prediction_phase() == RETRO_SAVESTATE_PHASE_NORMAL))
+   {
+      memory_checkpoint_discard(&memory_staging);
+      free(memory_cpu_spare);
+      memory_cpu_spare = NULL;
+      memory_cpu_spare_capacity = 0;
+      GPU_MemorySnapshotTrim();
+   }
+}
+
+static void prediction_clear(void)
+{
+   while (memory_checkpoints)
+      memory_checkpoint_release(memory_checkpoints);
+}
+
+static bool memory_checkpoint_valid(const void *checkpoint)
+{
+   const MemoryCheckpoint *state = (const MemoryCheckpoint *)checkpoint;
+   return state && state->captured && GPU_MemorySnapshotMatches(state->gpu) &&
+         (PGXP_enabled() ? PGXP_StateMatches(state->pgxp) : !state->pgxp);
+}
+
+static bool memory_checkpoint_save(MemoryCheckpoint *state)
+{
+   StateMem st;
+   uint8_t *old_data;
+   size_t old_capacity;
+   void *old_gpu, *old_pgxp;
+   if (!state || !MainRAM || !PSX_CDC || !PSX_CPU || !PSX_FIO)
+      return false;
+   if (!GPU_MemorySnapshotMatches(memory_staging.gpu))
+   {
+      GPU_MemorySnapshotFree(memory_staging.gpu);
+      memory_staging.gpu = GPU_MemorySnapshotCreate();
+   }
+   if (PGXP_enabled() && !PGXP_StateMatches(memory_staging.pgxp))
+   {
+      PGXP_StateFree(memory_staging.pgxp);
+      memory_staging.pgxp = PGXP_StateCreate();
+   }
+   else if (!PGXP_enabled() && memory_staging.pgxp)
+   {
+      PGXP_StateFree(memory_staging.pgxp);
+      memory_staging.pgxp = NULL;
+   }
+   if (PGXP_enabled() && !memory_staging.pgxp)
+      return false;
+   if (!memory_staging.data)
+   {
+      if (memory_cpu_spare_capacity >= DEFAULT_STATE_SIZE)
+      {
+         memory_staging.data = memory_cpu_spare;
+         memory_staging.data_capacity = memory_cpu_spare_capacity;
+         memory_cpu_spare = NULL;
+         memory_cpu_spare_capacity = 0;
+      }
+      else
+      {
+         memory_staging.data = (uint8_t *)malloc(DEFAULT_STATE_SIZE);
+         memory_staging.data_capacity = memory_staging.data ? DEFAULT_STATE_SIZE : 0;
+      }
+   }
+   if (!memory_staging.gpu || !memory_staging.data)
+      return false;
+   memset(&st, 0, sizeof(st));
+   st.data = memory_staging.data;
+   st.malloced = DEFAULT_STATE_SIZE;
+   st.fixed = true;
+   FastSaveStates = true;
+   GPU_MemorySnapshotSelectSave(memory_staging.gpu);
+   memory_capturing = true;
+   memory_staging.captured = MDFNSS_SaveSM(&st, 0, 0, NULL, NULL, NULL);
+   memory_capturing = false;
+   GPU_MemorySnapshotSelectSave(NULL);
+   FastSaveStates = false;
+   if (!memory_staging.captured ||
+       !GPU_MemorySnapshotSave(memory_staging.gpu) ||
+       (memory_staging.pgxp && !PGXP_StateSave(memory_staging.pgxp)))
+   {
+      GPU_MemorySnapshotReleaseVRAM(memory_staging.gpu);
+      memory_staging.captured = false;
+      return false;
+   }
+   /* Publish CPU and GPU storage only after the complete capture succeeds. */
+   old_data = state->data;
+   old_capacity = state->data_capacity;
+   state->data = memory_staging.data;
+   state->data_capacity = memory_staging.data_capacity;
+   memory_staging.data = old_data;
+   memory_staging.data_capacity = old_capacity;
+   state->data_size = st.len;
+   old_gpu = state->gpu;
+   old_pgxp = state->pgxp;
+   state->gpu = memory_staging.gpu;
+   state->pgxp = memory_staging.pgxp;
+   state->captured = true;
+   memory_staging.gpu = old_gpu;
+   GPU_MemorySnapshotReleaseVRAM(memory_staging.gpu);
+   memory_staging.pgxp = old_pgxp;
+   memory_staging.captured = false;
+   return true;
+}
+
+static bool memory_checkpoint_load(const void *checkpoint)
+{
+   const MemoryCheckpoint *state = (const MemoryCheckpoint *)checkpoint;
+   StateMem st;
+   bool okay;
+   if (!memory_checkpoint_valid(state) || memory_restoring ||
+       !MainRAM || !PSX_CDC || !PSX_CPU || !PSX_FIO)
+      return false;
+   if (!GPU_MemorySnapshotPrepare(state->gpu))
+      return false;
+   if (state->pgxp && !PGXP_StatePrepare(state->pgxp))
+      return false;
+   memset(&st, 0, sizeof(st));
+   st.data = state->data;
+   st.len = state->data_size;
+   st.fixed = true;
+   PGXP_GTE_InvalidateFogRing();
+   GPU_MemorySnapshotSelect(state->gpu);
+   memory_restoring = true;
+   FastSaveStates = true;
+   okay = MDFNSS_LoadSM(&st, 0, 0);
+   if (okay && state->pgxp)
+      okay = PGXP_StateLoad(state->pgxp);
+   FastSaveStates = false;
+   memory_restoring = false;
+   GPU_MemorySnapshotSelect(NULL);
+   if (!okay)
+      prediction_live_usable = false;
+   return okay;
+}
+
+static bool prediction_context(void)
+{
+   enum retro_savestate_context context = RETRO_SAVESTATE_CONTEXT_NORMAL;
+   return prediction_phase &&
+      environ_cb(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context) &&
+      context == RETRO_SAVESTATE_CONTEXT_RUNAHEAD_MANAGED;
+}
+
+static MemoryCheckpoint *prediction_find(const void *data, size_t size)
+{
+   MemoryCheckpoint *state;
+   uint64_t id;
+   if (!data || size != sizeof(id))
+      return NULL;
+   memcpy(&id, data, sizeof(id));
+   for (state = memory_checkpoints; state; state = state->next)
+      if (state->id == id)
+         return state;
+   return NULL;
+}
+
+static void RETRO_CALLCONV prediction_release(const void *data, size_t size)
+{
+   MemoryCheckpoint *state = prediction_find(data, size);
+   if (state)
+      memory_checkpoint_release(state);
+}
+
+static bool RETRO_CALLCONV prediction_usable(void)
+{
+#ifdef HAVE_VULKAN
+   if (rhi_intf_is_type() == RHI_VULKAN && rhi_vulkan_memory_snapshot_failed())
+      retro_mark_memory_restore_failed();
+#endif
+   return prediction_live_usable;
+}
+
+static bool prediction_save(void *data, size_t size)
+{
+   MemoryCheckpoint *state;
+   unsigned count = 0;
+
+   if (size != sizeof(memory_snapshot_id) || memory_snapshot_id == UINT64_MAX ||
+       !GPU_MemorySnapshotSupported())
+      return false;
+   for (state = memory_checkpoints; state; state = state->next)
+      count++;
+   /* The frontend retains up to twelve replay states plus a replacement. */
+   if (count >= 13 || !(state = memory_checkpoint_create()))
+      return false;
+   if (!memory_checkpoint_save(state))
+   {
+      memory_checkpoint_release(state);
+      return false;
+   }
+   state->id = ++memory_snapshot_id;
+   memcpy(data, &state->id, sizeof(state->id));
+   return true;
+}
+
+bool retro_is_speculative(void)
+{
+   return prediction_phase ? prediction_phase() == RETRO_SAVESTATE_PHASE_SPECULATIVE : false;
+}
+
 size_t retro_serialize_size(void)
 {
+   if (!prediction_live_usable)
+      return 0;
+   if (prediction_context())
+      return sizeof(memory_snapshot_id);
+
    if (enable_variable_serialization_size)
    {
       StateMem st;
@@ -7584,8 +7935,15 @@ bool retro_serialize(void *data, size_t size)
    StateMem st;
    bool     ret;
 
-   if (!data || size == 0)
+   if (!data || size == 0 || !prediction_live_usable)
       return false;
+   if (prediction_context())
+   {
+      ret = prediction_save(data, size);
+      if (!ret && retro_is_speculative())
+         retro_mark_memory_restore_failed();
+      return ret;
+   }
 
    /* Same defensive check as retro_unserialize - StateAction touches
     * every subsystem and segfaults if any of them are NULL. */
@@ -7617,16 +7975,26 @@ bool retro_unserialize(const void *data, size_t size)
    /* The fog sidecar ring is keyed by a push counter that restarts with the
     * loaded state while counts inside RAM shadows survive; stale slots must
     * not satisfy post-load lookups. */
-   PGXP_GTE_InvalidateFogRing();
    StateMem st;
    bool okay;
 
    /* Frontends should only call this when a game is loaded, but be
     * defensive: MDFNSS_LoadSM walks every subsystem's StateAction
     * which derefs MainRAM, PSX_CDC, etc. */
-   if (!data || size == 0 || !MainRAM || !PSX_CDC || !PSX_CPU || !PSX_FIO)
+   if (!data || size == 0 || !prediction_live_usable ||
+       !MainRAM || !PSX_CDC || !PSX_CPU || !PSX_FIO)
+      return false;
+   if (prediction_context())
+   {
+      okay = memory_checkpoint_load(prediction_find(data, size));
+      if (!okay && retro_is_speculative())
+         retro_mark_memory_restore_failed();
+      return okay;
+   }
+   if (size == sizeof(memory_snapshot_id))
       return false;
 
+   PGXP_GTE_InvalidateFogRing();
    st.data           = (uint8_t*)data;
    st.loc            = 0;
    st.len            = size;
@@ -7638,11 +8006,14 @@ bool retro_unserialize(const void *data, size_t size)
    FastSaveStates = UsingFastSavestates();
    okay           = MDFNSS_LoadSM(&st, 0, 0);
    FastSaveStates = false;
+   if (okay)
+      retro_clear_memory_snapshots();
    return okay;
 }
 
 void *retro_get_memory_data(unsigned type)
 {
+   if (!prediction_live_usable) return NULL;
    /* This callback may be invoked before retro_load_game or after
     * retro_unload_game. Returning NULL is a valid response per the
     * libretro spec; the frontend must cope with that. */
@@ -7665,6 +8036,7 @@ void *retro_get_memory_data(unsigned type)
 
 size_t retro_get_memory_size(unsigned type)
 {
+   if (!prediction_live_usable) return 0;
    switch (type)
    {
       case RETRO_MEMORY_SYSTEM_RAM:

@@ -14,10 +14,12 @@
 
 #include "mednafen/mednafen.h"
 #include "mednafen/psx/gpu.h"
+#include "libretro_cbs.h"
 #include "libretro.h"
 #include "libretro_options.h"
 
 #include "rhi_intf.h" /* enums */
+#include "rhi_snapshot_rect.h"
 #include "rhi_interpolation.h"
 #include "rhi_tt.h"  /* shared HD texture replacement/tracking engine */
 #include "rhi_defer.h"
@@ -42,6 +44,7 @@ extern int   psx_hdr_shoulder;
 extern uint16_t psx_hdr_panel_xy[8];
 extern int   psx_hdr_sdr_eotf;
 extern int   psx_hdr_overbright_hot;
+extern enum dither_mode psx_gpu_dither_mode;
 extern unsigned int psx_pgxp_mode;
 extern int   psx_pgxp_color;   /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
 extern int   psx_src_primaries;
@@ -351,6 +354,7 @@ typedef void (BEETLE_GL_APIENTRYP PFN_BEETLE_GL_BLITFRAMEBUFFER)(
       GLbitfield mask, GLenum filter);
 
 typedef void (BEETLE_GL_APIENTRYP PFN_BEETLE_GL_PROVOKINGVERTEX)(GLenum mode);
+typedef GLenum (BEETLE_GL_APIENTRYP PFN_BEETLE_GL_GETRESETSTATUS)(void);
 
 #ifndef GL_LAST_VERTEX_CONVENTION
 #define GL_LAST_VERTEX_CONVENTION 0x8E4E
@@ -385,6 +389,7 @@ typedef struct gl_caps
    /* Resolved entry points.  NULL when not available. */
    PFN_BEETLE_GL_BLITFRAMEBUFFER  fp_glBlitFramebuffer;
    PFN_BEETLE_GL_COPYIMAGESUBDATA fp_glCopyImageSubData;
+   PFN_BEETLE_GL_GETRESETSTATUS fp_glGetGraphicsResetStatus;
    /* Desktop GL 3.2+. Without it the provoking vertex is always the last
     * one, which is the convention the native planes rely on. */
    PFN_BEETLE_GL_PROVOKINGVERTEX  fp_glProvokingVertex;
@@ -1195,7 +1200,29 @@ struct gl_vram_sync_tile
 struct gl_analog;
 struct gl_post;
 
+enum
+{
+   GL_HISTORY_TILE_SIZE = 64,
+   GL_HISTORY_COLS = 1024 / GL_HISTORY_TILE_SIZE,
+   GL_HISTORY_ROWS = 512 / GL_HISTORY_TILE_SIZE,
+   GL_HISTORY_COUNT = GL_HISTORY_COLS * GL_HISTORY_ROWS
+};
+
+typedef struct GLHistoryTile
+{
+   gl_texture image;
+   gl_texture stencil;
+   struct GLHistoryTile *next;
+   unsigned refs;
+} GLHistoryTile;
+
 struct gl_renderer {
+   GLHistoryTile *history_current[GL_HISTORY_COUNT], *history_free;
+   bool history_dirty[GL_HISTORY_COUNT];
+   unsigned history_users;
+   uint64_t history_bytes;
+   gl_texture history_stencil_scratch;
+   gl_program *history_stencil_pack;
    /* Buffer used to handle PlayStation GPU draw commands */
    gl_draw_buffer *command_buffer;
    /* Buffer used to draw to the frontend's framebuffer */
@@ -1372,8 +1399,121 @@ struct gl_renderer {
    bool palette_cache_gpu_written;
    bool palette_cache_valid;
    bool palette_cache_saved;
+   RHISnapshotRect history_rects[GL_HISTORY_COUNT];
 };
 typedef struct gl_renderer gl_renderer;
+
+static bool gl_texture_init(struct gl_texture *, uint32_t, uint32_t, GLenum);
+
+static void gl_history_dirty(gl_renderer *renderer,
+      unsigned x, unsigned y, unsigned w, unsigned h)
+{
+   unsigned nx, ny, i, j;
+   bool track_rects;
+   if (!renderer->history_users || !w || !h) return;
+   track_rects = renderer->internal_upscaling >= 8;
+   nx = ((x % GL_HISTORY_TILE_SIZE) + w + GL_HISTORY_TILE_SIZE - 1) / GL_HISTORY_TILE_SIZE;
+   ny = ((y % GL_HISTORY_TILE_SIZE) + h + GL_HISTORY_TILE_SIZE - 1) / GL_HISTORY_TILE_SIZE;
+   if (nx > GL_HISTORY_COLS) nx = GL_HISTORY_COLS;
+   if (ny > GL_HISTORY_ROWS) ny = GL_HISTORY_ROWS;
+   for (j = 0; j < ny; j++)
+      for (i = 0; i < nx; i++)
+      {
+         unsigned tile = ((y / GL_HISTORY_TILE_SIZE + j) % GL_HISTORY_ROWS) * GL_HISTORY_COLS +
+            ((x / GL_HISTORY_TILE_SIZE + i) % GL_HISTORY_COLS);
+         renderer->history_dirty[tile] = true;
+         if (track_rects)
+            rhi_snapshot_mark(&renderer->history_rects[tile], x, y, w, h,
+                  i, j, GL_HISTORY_TILE_SIZE);
+      }
+}
+
+/* A retained tile can supply a partial restore only while its unchanged
+ * pixels still match the live image. Another tile version needs a full copy. */
+static const RHISnapshotRect *gl_history_restore_rect(const gl_renderer *renderer,
+      unsigned i, const GLHistoryTile *tile)
+{
+   const RHISnapshotRect *rect = &renderer->history_rects[i];
+   return renderer->internal_upscaling >= 8 && !psx_pgxp_mode &&
+      tile == renderer->history_current[i] && rect->right && rect->bottom ? rect : NULL;
+}
+
+static void gl_history_release(gl_renderer *renderer, GLHistoryTile *tile)
+{
+   if (tile && !--tile->refs)
+   {
+      tile->next = renderer->history_free;
+      renderer->history_free = tile;
+   }
+}
+
+static GLHistoryTile *gl_history_allocate(gl_renderer *renderer)
+{
+   GLHistoryTile *tile = renderer->history_free;
+   if (tile) renderer->history_free = tile->next;
+   else
+   {
+      unsigned size = GL_HISTORY_TILE_SIZE * renderer->internal_upscaling;
+      unsigned pixel_bytes = renderer->fb_out.internal_format == GL_RGB5_A1 ? 2 :
+         renderer->fb_out.internal_format == GL_RGBA16F ? 8 : 4;
+      uint64_t bytes = (uint64_t)size * size * pixel_bytes +
+         (uint64_t)(size / 8) * size;
+      uint64_t scratch = (uint64_t)renderer->history_stencil_scratch.width *
+         renderer->history_stencil_scratch.height;
+      if (renderer->history_bytes + bytes + scratch > (UINT64_C(1) << 30))
+         return NULL;
+      tile = (GLHistoryTile *)calloc(1, sizeof(*tile));
+      if (!tile) return NULL;
+      if (!gl_texture_init(&tile->image, GL_HISTORY_TILE_SIZE * renderer->internal_upscaling,
+               GL_HISTORY_TILE_SIZE * renderer->internal_upscaling, renderer->fb_out.internal_format) ||
+          !gl_texture_init(&tile->stencil, tile->image.width / 8, tile->image.height, GL_R8))
+      {
+         glDeleteTextures(1, &tile->image.id);
+         glDeleteTextures(1, &tile->stencil.id);
+         free(tile);
+         return NULL;
+      }
+      renderer->history_bytes += bytes;
+   }
+   tile->refs = 1;
+   tile->next = NULL;
+   return tile;
+}
+
+static void gl_draw_buffer_free(gl_draw_buffer *);
+
+static void gl_program_free(gl_program *program);
+
+static void gl_history_finish(gl_renderer *renderer)
+{
+   unsigned i;
+   GLHistoryTile *tile;
+   for (i = 0; i < GL_HISTORY_COUNT; i++)
+   {
+      gl_history_release(renderer, renderer->history_current[i]);
+      renderer->history_current[i] = NULL;
+   }
+   while ((tile = renderer->history_free) != NULL)
+   {
+      renderer->history_free = tile->next;
+      glDeleteTextures(1, &tile->image.id);
+      glDeleteTextures(1, &tile->stencil.id);
+      free(tile);
+   }
+   renderer->history_bytes = 0;
+   memset(renderer->history_rects, 0, sizeof(renderer->history_rects));
+   if (renderer->history_stencil_pack)
+   {
+      gl_program_free(renderer->history_stencil_pack);
+      free(renderer->history_stencil_pack);
+      renderer->history_stencil_pack = NULL;
+   }
+   glDeleteTextures(1, &renderer->history_stencil_scratch.id);
+   memset(&renderer->history_stencil_scratch, 0, sizeof(renderer->history_stencil_scratch));
+   memset(renderer->history_dirty, 1, sizeof(renderer->history_dirty));
+}
+
+
 
 
 struct retro_gl
@@ -2785,6 +2925,8 @@ static void gl_vram_sync_update_gpu_written_rect(gl_renderer *renderer,
    unsigned raw_tx;
    unsigned raw_ty;
 
+   gl_history_dirty(renderer, x, y, w, h);
+
    if (!w || !h)
       return;
 
@@ -2907,6 +3049,8 @@ static void gl_vram_sync_mark_rect(gl_renderer *renderer,
    unsigned raw_tx;
    unsigned raw_ty;
    uint64_t sequence;
+
+   gl_history_dirty(renderer, x, y, w, h);
 
    if (!w || !h)
       return;
@@ -5818,6 +5962,8 @@ static void gl_renderer_free(gl_renderer *renderer)
    if (!renderer)
       return;
 
+   retro_clear_memory_snapshots();
+
    gl_dt_free();
 
    if (renderer->fb_out_fbo)
@@ -6378,6 +6524,7 @@ static bool retro_refresh_variables(gl_renderer *renderer)
          if (!gl_texture_init(&new_depth, w, h, GL_DEPTH24_STENCIL8))
             goto framebuffer_failed;
       }
+      retro_clear_memory_snapshots();
       glDeleteTextures(1, &renderer->fb_out.id);
       renderer->fb_out = new_out;
       renderer->fb_out_internal_format = texture_storage;
@@ -7083,6 +7230,39 @@ static void gl_caps_parse_version(const char *version,
    *minor = mn;
 }
 
+static bool gl_caps_has_extension(const char *name)
+{
+   const char *extensions;
+   const char *found;
+   size_t length = strlen(name);
+#if defined(GL_NUM_EXTENSIONS)
+   if (gl_caps.version_packed >= 0x0300)
+   {
+      GLint count = 0;
+      GLint i;
+      glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+      for (i = 0; i < count; i++)
+      {
+         const char *value = (const char *)glGetStringi(GL_EXTENSIONS, i);
+         if (value && strcmp(value, name) == 0)
+            return true;
+      }
+      return false;
+   }
+#endif
+   if (gl_caps.profile == GL_PROFILE_CORE)
+      return false;
+   extensions = (const char *)glGetString(GL_EXTENSIONS);
+   if (!extensions)
+      return false;
+   for (found = extensions; (found = strstr(found, name)) != NULL; found += length)
+      if ((found == extensions || found[-1] == ' ') &&
+            (found[length] == '\0' || found[length] == ' '))
+         return true;
+   return false;
+}
+
+
 /* Initialise gl_caps once a real GL context is current.
  * Must be called after rglgen_resolve_symbols(...) so the
  * baseline GL function-pointer table is populated. */
@@ -7166,6 +7346,21 @@ static void gl_caps_init(void)
       gl_caps.fp_glCopyImageSubData =
          (PFN_BEETLE_GL_COPYIMAGESUBDATA)gl_caps_resolve(
             get_proc, "glCopyImageSubData", copy_image_suffixes);
+
+      if ((gl_caps.api == GL_API_DESKTOP && gl_caps.version_packed >= 0x0405) ||
+          (gl_caps.api == GL_API_GLES && gl_caps.version_packed >= 0x0302) ||
+          (gl_caps.api == GL_API_DESKTOP && gl_caps_has_extension("GL_KHR_robustness")))
+         gl_caps.fp_glGetGraphicsResetStatus =
+            (PFN_BEETLE_GL_GETRESETSTATUS)get_proc("glGetGraphicsResetStatus");
+      if (!gl_caps.fp_glGetGraphicsResetStatus && gl_caps_has_extension("GL_KHR_robustness"))
+         gl_caps.fp_glGetGraphicsResetStatus =
+            (PFN_BEETLE_GL_GETRESETSTATUS)get_proc("glGetGraphicsResetStatusKHR");
+      if (!gl_caps.fp_glGetGraphicsResetStatus && gl_caps_has_extension("GL_ARB_robustness"))
+         gl_caps.fp_glGetGraphicsResetStatus =
+            (PFN_BEETLE_GL_GETRESETSTATUS)get_proc("glGetGraphicsResetStatusARB");
+      if (!gl_caps.fp_glGetGraphicsResetStatus && gl_caps_has_extension("GL_EXT_robustness"))
+         gl_caps.fp_glGetGraphicsResetStatus =
+            (PFN_BEETLE_GL_GETRESETSTATUS)get_proc("glGetGraphicsResetStatusEXT");
 
       if (gl_caps.api == GL_API_DESKTOP && gl_caps.version_packed >= 0x0302)
          gl_caps.fp_glProvokingVertex =
@@ -7378,6 +7573,9 @@ static void gl_context_reset(void)
    {
       static_renderer.inited = true;
       static_renderer.state  = GL_STATE_VALID;
+
+      /* The tracker is created after the initial option reads. */
+      retro_refresh_variables(static_renderer.state_data);
 
       GPU_RestoreStateP1(true, false);
       GPU_RestoreStateP2(true);
@@ -7710,6 +7908,8 @@ void rhi_gl_refresh_variables(void)
    gl_renderer* renderer = NULL;
    bool reconfigure_frontend;
 
+   if (retro_is_speculative())
+      return;
    if (!static_renderer.inited)
       return;
 
@@ -7745,6 +7945,27 @@ void rhi_gl_refresh_variables(void)
          log_cb(RETRO_LOG_DEBUG, "Try resetting to enable the new configuration\n");
       }
    }
+}
+
+static void gl_prepare_draw_state(gl_renderer *renderer)
+{
+   /* In case we're upscaling we need to increase the line width
+    * proportionally */
+   glLineWidth((GLfloat)renderer->internal_upscaling);
+   glEnable(GL_SCISSOR_TEST);
+   glEnable(GL_DEPTH_TEST);
+   glDepthFunc(GL_LEQUAL);
+   /* Used for PSX GPU command blending */
+   glBlendColor(0.25, 0.25, 0.25, 0.5);
+
+   apply_scissor(renderer);
+
+   glActiveTexture(GL_TEXTURE0);
+   glBindTexture(GL_TEXTURE_2D, renderer->fb_texture.id);
+   glActiveTexture(GL_TEXTURE3);
+   glBindTexture(GL_TEXTURE_2D, renderer->fb_feedback_texture.id ?
+         renderer->fb_feedback_texture.id : renderer->fb_texture.id);
+   glActiveTexture(GL_TEXTURE0);
 }
 
 void rhi_gl_prepare_frame(void)
@@ -7787,23 +8008,519 @@ void rhi_gl_prepare_frame(void)
       gl_normalize_inherited_state();
    }
 
-   /* In case we're upscaling we need to increase the line width
-    * proportionally */
-   glLineWidth((GLfloat)renderer->internal_upscaling);
+   gl_prepare_draw_state(renderer);
+}
+
+typedef struct
+{
+   gl_renderer *owner;
+   gl_texture images[3];
+   GLHistoryTile *tiles[GL_HISTORY_COUNT];
+   GLuint read_fbo, draw_fbo;
+   gl_draw_config config;
+   uint8_t sync[sizeof(((gl_renderer *)0)->vram_sync)];
+   uint16_t palette_x, palette_y;
+   uint8_t palette_depth;
+   bool palette_gpu_written, palette_valid, palette_saved, captured;
+   uint8_t filter;
+   int color_policy, dither_policy;
+   double analog_phase;
+} GLMemorySnapshot;
+
+bool rhi_gl_memory_snapshot_supported(void)
+{
+   gl_renderer *renderer = static_renderer.state_data;
+   return static_renderer.state != GL_STATE_INVALID && renderer &&
+      (gl_caps.fp_glCopyImageSubData || gl_caps.fp_glBlitFramebuffer);
+}
+
+void *rhi_gl_memory_snapshot_tracker(void *snapshot)
+{
+   GLMemorySnapshot *state = (GLMemorySnapshot *)snapshot;
+   return state->owner->texture_tracking_enabled ? state->owner->tracker : NULL;
+}
+
+void rhi_gl_memory_snapshot_discard_tiles(void *snapshot)
+{
+   GLMemorySnapshot *state = (GLMemorySnapshot *)snapshot;
+   unsigned i;
+   for (i = 0; i < sizeof(state->tiles) / sizeof(state->tiles[0]); i++)
+   {
+      gl_history_release(state->owner, state->tiles[i]);
+      state->tiles[i] = NULL;
+   }
+   state->captured = false;
+}
+
+void rhi_gl_memory_snapshot_free(void *snapshot)
+{
+   GLMemorySnapshot *state = (GLMemorySnapshot *)snapshot;
+   unsigned i;
+   if (!state)
+      return;
+   rhi_gl_memory_snapshot_discard_tiles(state);
+   if (!--state->owner->history_users) gl_history_finish(state->owner);
+   for (i = 0; i < 3; i++) glDeleteTextures(1, &state->images[i].id);
+   glDeleteFramebuffers(1, &state->read_fbo);
+   glDeleteFramebuffers(1, &state->draw_fbo);
+   free(state);
+}
+
+static void gl_snapshot_sources(gl_renderer *renderer, gl_texture **images)
+{
+   images[0] = &renderer->fb_texture;
+   images[1] = &renderer->fb_out;
+   images[2] = &renderer->palette_texture;
+}
+
+#ifndef GL_STENCIL_INDEX
+#define GL_STENCIL_INDEX 0x1901
+#endif
+
+#ifndef GL_DEPTH_STENCIL_TEXTURE_MODE
+#define GL_DEPTH_STENCIL_TEXTURE_MODE 0x90EA
+#endif
+
+static const char *gl_history_pack_fragment = GLSL_FRAGMENT(
+      uniform highp usampler2D stencil_plane;
+      uniform highp ivec2 mask_origin;
+      out vec4 frag_color;
+
+      void main()
+      {
+         ivec2 p = ivec2(gl_FragCoord.xy);
+         p = ivec2(p.x * 8, p.y) + mask_origin;
+         highp uint bits = 0u;
+         for (int i = 0; i < 8; i++)
+            bits |= (texelFetch(stencil_plane, p + ivec2(i, 0), 0).r & 1u) << uint(i);
+         frag_color = vec4(float(bits) / 255.0, 0.0, 0.0, 1.0);
+      }
+);
+
+static void gl_history_try_direct_stencil(gl_renderer *renderer)
+{
+   if (renderer->history_stencil_pack || renderer->history_stencil_scratch.id ||
+       gl_caps.api != GL_API_DESKTOP || gl_caps.version_packed < 0x0403)
+      return;
+   renderer->history_stencil_pack = gl_program_build(image_load_vertex,
+         gl_history_pack_fragment);
+}
+
+#ifndef GL_CONTEXT_LOST
+#define GL_CONTEXT_LOST 0x0507
+#endif
+
+static bool gl_snapshot_check_errors(bool inherited)
+{
+   GLenum error;
+   unsigned i;
+   bool okay = true;
+   if (gl_caps.fp_glGetGraphicsResetStatus &&
+         gl_caps.fp_glGetGraphicsResetStatus() != GL_NO_ERROR)
+   {
+      retro_mark_memory_restore_failed();
+      return false;
+   }
+   /* Error flags are finite, but never trust a broken or lost driver to
+    * drain indefinitely. An uncleared scope cannot be used for a snapshot. */
+   for (i = 0; i < 16; i++)
+   {
+      error = glGetError();
+      if (error == GL_NO_ERROR)
+         return okay;
+      if (error == GL_OUT_OF_MEMORY || error == GL_CONTEXT_LOST)
+      {
+         retro_mark_memory_restore_failed();
+         return false;
+      }
+      if (!inherited)
+         okay = false;
+   }
+   return false;
+}
+
+void *rhi_gl_memory_snapshot_create(void)
+{
+   GLMemorySnapshot *state;
+   gl_texture *sources[3];
+   GLint texture;
+   unsigned i;
+   if (!rhi_gl_memory_snapshot_supported() || !gl_snapshot_check_errors(true))
+      return NULL;
+   state = (GLMemorySnapshot *)calloc(1, sizeof(*state));
+   if (!state)
+      return NULL;
+   state->owner = static_renderer.state_data;
+   state->owner->history_users++;
+   glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+   gl_snapshot_sources(state->owner, sources);
+   state->images[1] = *sources[1]; state->images[1].id = 0;
+   for (i = 0; i < 3; i++)
+      if (i != 1 && !gl_texture_init(&state->images[i], sources[i]->width,
+               sources[i]->height, sources[i]->internal_format)) break;
+   glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+   if (i == 3)
+   {
+      gl_history_try_direct_stencil(state->owner);
+      if (!state->owner->history_stencil_pack && !state->owner->history_stencil_scratch.id &&
+            !gl_texture_init(&state->owner->history_stencil_scratch,
+               sources[1]->width, sources[1]->height, GL_R8))
+      {
+         glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+         rhi_gl_memory_snapshot_free(state);
+         return NULL;
+      }
+      glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+      glGenFramebuffers(1, &state->read_fbo);
+      glGenFramebuffers(1, &state->draw_fbo);
+      if (state->read_fbo && state->draw_fbo && gl_snapshot_check_errors(false))
+         return state;
+   }
+   rhi_gl_memory_snapshot_free(state);
+   return NULL;
+}
+
+bool rhi_gl_memory_snapshot_matches(void *snapshot)
+{
+   GLMemorySnapshot *state = (GLMemorySnapshot *)snapshot;
+   gl_renderer *renderer = static_renderer.state_data;
+   gl_texture *sources[3];
+   unsigned i;
+   if (!state || !rhi_gl_memory_snapshot_supported() || state->owner != renderer)
+      return false;
+   gl_snapshot_sources(renderer, sources);
+   for (i = 0; i < 3; i++)
+      if (state->images[i].width != sources[i]->width ||
+          state->images[i].height != sources[i]->height ||
+          state->images[i].internal_format != sources[i]->internal_format)
+         return false;
+   return !state->captured || (state->filter == renderer->filter_type &&
+         state->color_policy == (int)psx_internal_color_mode &&
+         state->dither_policy == (int)psx_gpu_dither_mode);
+}
+
+bool rhi_gl_memory_snapshot_prepare(void *snapshot)
+{
+   gl_renderer *renderer = static_renderer.state_data;
+   if (!rhi_gl_memory_snapshot_matches(snapshot) || !gl_snapshot_check_errors(true))
+      return false;
+   if (!gl_draw_buffer_is_empty(renderer->command_buffer))
+   {
+      gl_normalize_inherited_state();
+      gl_prepare_draw_state(renderer);
+      gl_renderer_draw(renderer);
+      cleanup_gl_state();
+   }
+   return gl_snapshot_check_errors(false);
+}
+
+static bool gl_checkpoint_stencil(gl_renderer *renderer, GLuint draw_fbo,
+      GLHistoryTile **tiles, bool load)
+{
+   gl_program *stencil_program = renderer->image_load_program;
+   const struct gl_uniform_map *uniforms;
+   GLint program, vao, array_buffer, active_texture, texture, sampler, viewport[4], clip[4];
+   GLint func, ref, value_mask, write_mask, fail, zfail, zpass, clear_stencil;
+   GLfloat clear_color[4];
+   GLboolean blend, depth, stencil, scissor, color_mask[4], depth_mask;
+   GLenum color = GL_COLOR_ATTACHMENT0, none = GL_NONE;
+   unsigned i, factor = renderer->internal_upscaling;
+   unsigned min_x = renderer->fb_out.width, min_y = renderer->fb_out.height;
+   unsigned max_x = 0, max_y = 0;
+   bool okay;
+   bool direct = !load && renderer->history_stencil_pack;
+   GLint origin_uniform, rect_uniform;
+   if (direct)
+      stencil_program = renderer->history_stencil_pack;
+   if (!stencil_program)
+      return false;
+   for (i = 0; i < GL_HISTORY_COUNT; i++)
+      if (tiles[i] != renderer->history_current[i] || renderer->history_dirty[i])
+      {
+         unsigned x = (i % GL_HISTORY_COLS) * GL_HISTORY_TILE_SIZE * factor, y = (i / GL_HISTORY_COLS) * GL_HISTORY_TILE_SIZE * factor;
+         if (x < min_x) min_x = x;
+         if (y < min_y) min_y = y;
+         if (x + GL_HISTORY_TILE_SIZE * factor > max_x) max_x = x + GL_HISTORY_TILE_SIZE * factor;
+         if (y + GL_HISTORY_TILE_SIZE * factor > max_y) max_y = y + GL_HISTORY_TILE_SIZE * factor;
+      }
+   if (!load && !max_x)
+      return true;
+   uniforms = &stencil_program->uniforms;
+   rect_uniform = gl_uniform_map_get(uniforms, "rect");
+   glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+   glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+   glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &array_buffer);
+   glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
+   glGetIntegerv(GL_VIEWPORT, viewport);
+   glGetIntegerv(GL_SCISSOR_BOX, clip);
+   glGetIntegerv(GL_STENCIL_FUNC, &func);
+   glGetIntegerv(GL_STENCIL_REF, &ref);
+   glGetIntegerv(GL_STENCIL_VALUE_MASK, &value_mask);
+   glGetIntegerv(GL_STENCIL_WRITEMASK, &write_mask);
+   glGetIntegerv(GL_STENCIL_FAIL, &fail);
+   glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL, &zfail);
+   glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS, &zpass);
+   glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &clear_stencil);
+   glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color);
+   glGetBooleanv(GL_COLOR_WRITEMASK, color_mask);
+   glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
+   glActiveTexture(GL_TEXTURE0);
+   glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+   glGetIntegerv(GL_SAMPLER_BINDING, &sampler);
+   glBindSampler(0, 0);
+   blend = glIsEnabled(GL_BLEND);
+   depth = glIsEnabled(GL_DEPTH_TEST);
+   stencil = glIsEnabled(GL_STENCIL_TEST);
+   scissor = glIsEnabled(GL_SCISSOR_TEST);
+   glDisable(GL_BLEND);
+   glDisable(GL_DEPTH_TEST);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
+   glUseProgram(stencil_program->id);
+   origin_uniform = gl_uniform_map_get(uniforms, "mask_origin");
+   glUniform1i(gl_uniform_map_get(uniforms, direct ? "stencil_plane" : "fb_texture"), 0);
+   glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+         GL_TEXTURE_2D, direct ? 0 : renderer->fb_out_depth.id, 0);
+   glViewport(0, 0, renderer->fb_out.width, renderer->fb_out.height);
+   if (load)
+   {
+      glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+      glDrawBuffers(1, &none);
+      glDisable(GL_SCISSOR_TEST);
+      glDepthMask(GL_TRUE);
+      glClear(GL_DEPTH_BUFFER_BIT);
+      glClearStencil(0);
+      glStencilFunc(GL_ALWAYS, 1, 1);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+      glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+      glEnable(GL_STENCIL_TEST);
+      glUniform1ui(gl_uniform_map_get(uniforms, "mask_pass"), 5);
+   }
+   else if (direct)
+   {
+      glDrawBuffers(1, &color);
+      glDisable(GL_STENCIL_TEST);
+      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      glBindTexture(GL_TEXTURE_2D, renderer->fb_out_depth.id);
+      glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_STENCIL_INDEX);
+      glViewport(0, 0, 8 * factor, 64 * factor);
+      glScissor(0, 0, 8 * factor, 64 * factor);
+   }
+   else
+   {
+      /* Extract once with the depth/stencil image attached, then pack tiles. */
+      glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D, renderer->history_stencil_scratch.id, 0);
+      glDrawBuffers(1, &color);
+      glEnable(GL_SCISSOR_TEST);
+      glScissor(min_x, min_y, max_x - min_x, max_y - min_y);
+      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      glClearColor(0, 0, 0, 0);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glStencilMask(0);
+      glStencilFunc(GL_EQUAL, 1, 1);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+      glEnable(GL_STENCIL_TEST);
+      glBindTexture(GL_TEXTURE_2D, 0);
+      glUniform1ui(gl_uniform_map_get(uniforms, "mask_pass"), 3);
+      gl_draw_rect(renderer, rect_uniform, 0, 0, 1024, 512);
+      glDisable(GL_STENCIL_TEST);
+      glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+      glBindTexture(GL_TEXTURE_2D, renderer->history_stencil_scratch.id);
+      glViewport(0, 0, (GL_HISTORY_TILE_SIZE / 8) * factor, GL_HISTORY_TILE_SIZE * factor);
+      glScissor(0, 0, (GL_HISTORY_TILE_SIZE / 8) * factor, GL_HISTORY_TILE_SIZE * factor);
+      glUniform1ui(gl_uniform_map_get(uniforms, "mask_pass"), 4);
+   }
    glEnable(GL_SCISSOR_TEST);
-   glEnable(GL_DEPTH_TEST);
-   glDepthFunc(GL_LEQUAL);
-   /* Used for PSX GPU command blending */
-   glBlendColor(0.25, 0.25, 0.25, 0.5);
+   for (i = 0; i < GL_HISTORY_COUNT; i++)
+   {
+      GLHistoryTile *tile = tiles[i];
+      unsigned x = (i % GL_HISTORY_COLS) * GL_HISTORY_TILE_SIZE * factor, y = (i / GL_HISTORY_COLS) * GL_HISTORY_TILE_SIZE * factor;
+      unsigned size = GL_HISTORY_TILE_SIZE * factor;
+      if (tile == renderer->history_current[i] && !renderer->history_dirty[i])
+         continue;
+      glUniform2i(origin_uniform, x, y);
+      if (load)
+      {
+         const RHISnapshotRect *rect = gl_history_restore_rect(renderer, i, tile);
+         if (rect)
+            glScissor(x + rect->left * factor, y + rect->top * factor,
+                  (rect->right - rect->left) * factor, (rect->bottom - rect->top) * factor);
+         else
+            glScissor(x, y, size, size);
+         glStencilMask(0xff);
+         glClear(GL_STENCIL_BUFFER_BIT);
+         glStencilMask(1);
+         glBindTexture(GL_TEXTURE_2D, tile->stencil.id);
+      }
+      else
+         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tile->stencil.id, 0);
+      gl_draw_rect(renderer, rect_uniform, 0, 0, 1024, 512);
+   }
+   if (direct)
+      glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_DEPTH_COMPONENT);
+   okay = gl_snapshot_check_errors(false);
+   if (!direct)
+      glUniform1ui(gl_uniform_map_get(uniforms, "mask_pass"), 0);
+   glUniform2i(origin_uniform, 0, 0);
+   glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+   glBindSampler(0, (GLuint)sampler);
+   glActiveTexture((GLenum)active_texture);
+   glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
+   glDepthMask(depth_mask);
+   glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+   glClearStencil(clear_stencil);
+   glStencilMask((GLuint)write_mask);
+   glStencilFunc((GLenum)func, ref, (GLuint)value_mask);
+   glStencilOp((GLenum)fail, (GLenum)zfail, (GLenum)zpass);
+   glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+   glScissor(clip[0], clip[1], clip[2], clip[3]);
+   glUseProgram((GLuint)program);
+   glBindVertexArray((GLuint)vao);
+   glBindBuffer(GL_ARRAY_BUFFER, (GLuint)array_buffer);
+   if (blend) glEnable(GL_BLEND);
+   if (depth) glEnable(GL_DEPTH_TEST);
+   if (stencil) glEnable(GL_STENCIL_TEST);
+   else glDisable(GL_STENCIL_TEST);
+   if (!scissor) glDisable(GL_SCISSOR_TEST);
+   return okay;
+}
 
-   apply_scissor(renderer);
+static bool gl_history_copy_image(GLMemorySnapshot *state, gl_texture *source,
+      gl_texture *target, unsigned sx, unsigned sy, unsigned tx, unsigned ty,
+      unsigned width, unsigned height)
+{
+   GLenum color = GL_COLOR_ATTACHMENT0;
+   if (gl_caps.fp_glCopyImageSubData)
+      gl_caps.fp_glCopyImageSubData(source->id, GL_TEXTURE_2D, 0, sx, sy, 0,
+            target->id, GL_TEXTURE_2D, 0, tx, ty, 0, width, height, 1);
+   else
+   {
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, state->read_fbo);
+      glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+      glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source->id, 0);
+      glReadBuffer(color);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state->draw_fbo);
+      glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+      glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target->id, 0);
+      glDrawBuffers(1, &color);
+      if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+          glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return false;
+      gl_caps.fp_glBlitFramebuffer(sx, sy, sx + width, sy + height,
+            tx, ty, tx + width, ty + height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+   }
+   return glGetError() == GL_NO_ERROR;
+}
 
-   glActiveTexture(GL_TEXTURE0);
-   glBindTexture(GL_TEXTURE_2D, renderer->fb_texture.id);
-   glActiveTexture(GL_TEXTURE3);
-   glBindTexture(GL_TEXTURE_2D, renderer->fb_feedback_texture.id ?
-         renderer->fb_feedback_texture.id : renderer->fb_texture.id);
-   glActiveTexture(GL_TEXTURE0);
+static bool gl_checkpoint_copy(GLMemorySnapshot *state, bool load)
+{
+   gl_renderer *renderer = static_renderer.state_data;
+   GLHistoryTile *next[GL_HISTORY_COUNT] = {0};
+   gl_texture *live[3];
+   GLint read_fbo, draw_fbo, texture;
+   GLboolean scissor;
+   unsigned i, factor;
+   bool okay = true;
+   if (!rhi_gl_memory_snapshot_prepare(state)) return false;
+   gl_snapshot_sources(renderer, live);
+   glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
+   glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+   glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+   scissor = glIsEnabled(GL_SCISSOR_TEST);
+   glDisable(GL_SCISSOR_TEST);
+   factor = renderer->internal_upscaling;
+   if (!load)
+      for (i = 0; i < GL_HISTORY_COUNT; i++)
+      {
+         GLHistoryTile *tile = renderer->history_current[i];
+         if (tile && !renderer->history_dirty[i]) { tile->refs++; next[i] = tile; }
+         else if (!(next[i] = gl_history_allocate(renderer))) { okay = false; break; }
+      }
+   for (i = 0; okay && i < GL_HISTORY_COUNT; i++)
+   {
+      unsigned x = (i % GL_HISTORY_COLS) * GL_HISTORY_TILE_SIZE * factor, y = (i / GL_HISTORY_COLS) * GL_HISTORY_TILE_SIZE * factor;
+      GLHistoryTile *tile = load ? state->tiles[i] : next[i];
+      if (!tile) { okay = false; break; }
+      if (tile != renderer->history_current[i] || renderer->history_dirty[i])
+      {
+         unsigned local_x = 0, local_y = 0;
+         unsigned size = GL_HISTORY_TILE_SIZE * factor, width = size, height = size;
+         const RHISnapshotRect *rect = load ? gl_history_restore_rect(renderer, i, tile) : NULL;
+         if (rect)
+         {
+            local_x = rect->left * factor;
+            local_y = rect->top * factor;
+            width = (rect->right - rect->left) * factor;
+            height = (rect->bottom - rect->top) * factor;
+         }
+         okay = gl_history_copy_image(state, load ? &tile->image : live[1],
+               load ? live[1] : &tile->image, load ? local_x : x, load ? local_y : y,
+               load ? x + local_x : 0, load ? y + local_y : 0, width, height);
+      }
+   }
+   for (i = 0; okay && i < 3; i += 2)
+      okay = gl_history_copy_image(state, load ? &state->images[i] : live[i],
+            load ? live[i] : &state->images[i], 0, 0, 0, 0, live[i]->width, live[i]->height);
+   if (okay) okay = gl_checkpoint_stencil(state->owner, state->draw_fbo, load ? state->tiles : next, load);
+   if (okay)
+      for (i = 0; i < GL_HISTORY_COUNT; i++)
+      {
+         GLHistoryTile *tile = load ? state->tiles[i] : next[i];
+         if (!load) { gl_history_release(renderer, state->tiles[i]); state->tiles[i] = tile; next[i] = NULL; }
+         gl_history_release(renderer, renderer->history_current[i]);
+         renderer->history_current[i] = tile;
+         tile->refs++;
+         renderer->history_dirty[i] = false;
+      }
+   if (okay && factor >= 8)
+      memset(renderer->history_rects, 0, sizeof(renderer->history_rects));
+   for (i = 0; i < GL_HISTORY_COUNT; i++) gl_history_release(renderer, next[i]);
+   glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read_fbo);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw_fbo);
+   if (scissor) glEnable(GL_SCISSOR_TEST);
+   if (!okay) return false;
+   if (load)
+   {
+      renderer->config = state->config;
+      memcpy(&renderer->vram_sync, state->sync, sizeof(state->sync));
+      gl_vram_sync_invalidate_scaled(renderer);
+      renderer->palette_cache_x = state->palette_x;
+      renderer->palette_cache_y = state->palette_y;
+      renderer->palette_cache_depth = state->palette_depth;
+      renderer->palette_cache_gpu_written = state->palette_gpu_written;
+      renderer->palette_cache_valid = state->palette_valid;
+      renderer->palette_cache_saved = state->palette_saved;
+      renderer->analog_phase = state->analog_phase;
+      renderer->hd_handle = hd_handle_make_none();
+   }
+   else
+   {
+      state->config = renderer->config;
+      memcpy(state->sync, &renderer->vram_sync, sizeof(state->sync));
+      state->palette_x = renderer->palette_cache_x;
+      state->palette_y = renderer->palette_cache_y;
+      state->palette_depth = renderer->palette_cache_depth;
+      state->palette_gpu_written = renderer->palette_cache_gpu_written;
+      state->palette_valid = renderer->palette_cache_valid;
+      state->palette_saved = renderer->palette_cache_saved;
+      state->analog_phase = renderer->analog_phase;
+      state->filter = renderer->filter_type;
+      state->color_policy = psx_internal_color_mode;
+      state->dither_policy = psx_gpu_dither_mode;
+      state->captured = true;
+   }
+   return true;
+}
+
+bool rhi_gl_memory_snapshot_save(void *snapshot)
+{
+   return gl_checkpoint_copy((GLMemorySnapshot *)snapshot, false);
+}
+
+bool rhi_gl_memory_snapshot_load(void *snapshot)
+{
+   GLMemorySnapshot *state = (GLMemorySnapshot *)snapshot;
+   return state && state->captured && gl_checkpoint_copy(state, true);
 }
 
 static void compute_vram_framebuffer_dimensions(gl_renderer *renderer)
@@ -7894,13 +8611,22 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
     * out this frame has been consumed. */
    if (renderer->tracker)
    {
-      texture_tracker_endFrame(renderer->tracker);
       renderer->hd_handle = hd_handle_make_none();
+      texture_tracker_on_queues_reset(renderer->tracker);
+      texture_tracker_endFrame(renderer->tracker);
    }
 
    /* Calculate native PSX framebuffer dimensions to update renderer
       state before calling bind_libretro_framebuffer */
    compute_vram_framebuffer_dimensions(renderer);
+
+   if (!retro_video_enabled())
+   {
+      glDisable(GL_SCISSOR_TEST);
+      glDisable(GL_DEPTH_TEST);
+      glDisable(GL_BLEND);
+      goto resolve_native_vram;
+   }
 
    /* Analog cable chain. When engaged the display draw is redirected into a
     * texture and run through the chain, whose resolve draws the result into
@@ -8103,6 +8829,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    /* Resolve rendered bounds into native VRAM for next-frame sampling.
     * CPU uploads already update both surfaces. Retain pending bounds if the
     * draw buffer is unavailable, so a later successful frame can retry. */
+resolve_native_vram:
    if (renderer->vram_sync.pending_count)
    {
       const GLint *loc = renderer->image_load_loc;
@@ -8133,7 +8860,8 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    /* When using a hardware renderer we set the data pointer to
     * -1 to notify the frontend that the frame has been rendered
     * in the framebuffer. */
-   video_cb(   RETRO_HW_FRAME_BUFFER_VALID,
+   if (retro_video_enabled())
+      video_cb(RETRO_HW_FRAME_BUFFER_VALID,
          renderer->frontend_resolution[0],
          renderer->frontend_resolution[1], 0);
 }

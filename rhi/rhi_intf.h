@@ -25,6 +25,15 @@ enum force_renderer_type
    FORCE_VULKAN
 };
 
+void *rhi_intf_memory_snapshot_create(void);
+void rhi_intf_memory_snapshot_free(enum rhi_renderer_type type, void *snapshot);
+bool rhi_intf_memory_snapshot_supported(void);
+void rhi_intf_memory_snapshot_discard_tiles(void *snapshot);
+bool rhi_intf_memory_snapshot_matches(void *snapshot);
+bool rhi_intf_memory_snapshot_prepare(void *snapshot);
+bool rhi_intf_memory_snapshot_save(void *snapshot);
+bool rhi_intf_memory_snapshot_load(void *snapshot);
+
 enum blending_modes
 {
    BLEND_MODE_OPAQUE     = -1,
@@ -196,8 +205,8 @@ float rhi_common_get_aspect_ratio(bool pal_content, int crop_overscan,
                                   int aspect_ratio_setting, bool vram_override, bool widescreen_override,
                                   int widescreen_hack_aspect_ratio_setting);
 
+
 #ifdef __cplusplus
 }
 #endif
-
 #endif /*__RHI_H__*/

@@ -41,13 +41,181 @@ enum rhi_renderer_type rhi_type                 = RHI_SOFTWARE;
 static bool gl_initialized                      = false;
 static bool vk_initialized                      = false;
 
+#include "rhi_coherence.h"
+
+typedef struct
+{
+   bool (*supported)(void);
+   void *(*create)(void);
+   void (*release)(void *);
+   void (*discard_tiles)(void *);
+   bool (*matches)(void *);
+   bool (*save)(void *);
+   bool (*prepare)(void *);
+   bool (*load)(void *);
+   void *(*tracker)(void *);
+} RHISnapshotOps;
+
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+static const RHISnapshotOps gl_snapshot_ops = {
+   rhi_gl_memory_snapshot_supported,
+   rhi_gl_memory_snapshot_create,
+   rhi_gl_memory_snapshot_free, rhi_gl_memory_snapshot_discard_tiles,
+   rhi_gl_memory_snapshot_matches,
+   rhi_gl_memory_snapshot_save, rhi_gl_memory_snapshot_prepare,
+   rhi_gl_memory_snapshot_load, rhi_gl_memory_snapshot_tracker
+};
+#endif
+#ifdef HAVE_VULKAN
+static const RHISnapshotOps vk_snapshot_ops = {
+   rhi_vulkan_memory_snapshot_supported,
+   rhi_vulkan_memory_snapshot_create,
+   rhi_vulkan_memory_snapshot_free, rhi_vulkan_memory_snapshot_discard_tiles,
+   rhi_vulkan_memory_snapshot_matches,
+   rhi_vulkan_memory_snapshot_save, rhi_vulkan_memory_snapshot_prepare,
+   rhi_vulkan_memory_snapshot_load, rhi_vulkan_memory_snapshot_tracker
+};
+#endif
+
+static const RHISnapshotOps *rhi_snapshot_ops(void)
+{
+   switch (rhi_type)
+   {
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+      case RHI_OPENGL: return &gl_snapshot_ops;
+#endif
+#ifdef HAVE_VULKAN
+      case RHI_VULKAN: return &vk_snapshot_ops;
+#endif
+      default: return NULL;
+   }
+}
+
+typedef struct
+{
+   const RHISnapshotOps *ops;
+   void *backend;
+   uint8_t clean[TT_COH_BH * TT_COH_BW];
+   uint16_t x, y, w, h;
+   bool pending;
+   void *textures;
+} RHIMemorySnapshot;
+
+bool rhi_intf_memory_snapshot_supported(void)
+{
+   const RHISnapshotOps *ops = rhi_snapshot_ops();
+   return ops && ops->supported();
+}
+
+void *rhi_intf_memory_snapshot_create(void)
+{
+   const RHISnapshotOps *ops = rhi_snapshot_ops();
+   RHIMemorySnapshot *state;
+   if (!ops || !ops->supported())
+      return NULL;
+   state = (RHIMemorySnapshot *)calloc(1, sizeof(*state));
+   if (!state)
+      return NULL;
+   state->ops = ops;
+   state->backend = ops->create();
+   if (!state->backend)
+   {
+      free(state);
+      return NULL;
+   }
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (ops->tracker(state->backend))
+   {
+      state->textures = texture_tracker_memory_new();
+      if (!state->textures)
+      {
+         ops->release(state->backend);
+         free(state);
+         return NULL;
+      }
+   }
+#endif
+   return state;
+}
+
+void rhi_intf_memory_snapshot_free(enum rhi_renderer_type type, void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   (void)type;
+   if (!state)
+      return;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   texture_tracker_memory_free(state->textures);
+#endif
+   state->ops->release(state->backend);
+   free(state);
+}
+
+void rhi_intf_memory_snapshot_discard_tiles(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   if (state)
+      state->ops->discard_tiles(state->backend);
+}
+
+bool rhi_intf_memory_snapshot_matches(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   return state && state->ops == rhi_snapshot_ops() &&
+      (!!state->textures == !!state->ops->tracker(state->backend)) &&
+      state->ops->matches(state->backend);
+}
+
+bool rhi_intf_memory_snapshot_save(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   if (!rhi_intf_memory_snapshot_matches(state) || !state->ops->save(state->backend))
+      return false;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (state->textures && !texture_tracker_memory_save(
+         (TextureTracker *)state->ops->tracker(state->backend), state->textures))
+      return false;
+#endif
+   memcpy(state->clean, tt_coh_clean, sizeof(state->clean));
+   state->x = tt_coh_dax; state->y = tt_coh_day;
+   state->w = tt_coh_daw; state->h = tt_coh_dah;
+   state->pending = tt_coh_da_pending;
+   return true;
+}
+
+bool rhi_intf_memory_snapshot_prepare(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   if (!rhi_intf_memory_snapshot_matches(state) || !state->ops->prepare(state->backend))
+      return false;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (state->textures && !texture_tracker_memory_prepare(state->textures))
+      return false;
+#endif
+   return true;
+}
+
+bool rhi_intf_memory_snapshot_load(void *snapshot)
+{
+   RHIMemorySnapshot *state = (RHIMemorySnapshot *)snapshot;
+   if (!rhi_intf_memory_snapshot_prepare(state) || !state->ops->load(state->backend))
+      return false;
+#if defined(TEXTURE_DUMPING_ENABLED)
+   if (state->textures)
+      texture_tracker_memory_load((TextureTracker *)state->ops->tracker(state->backend), state->textures);
+#endif
+   memcpy(tt_coh_clean, state->clean, sizeof(state->clean));
+   tt_coh_dax = state->x; tt_coh_day = state->y;
+   tt_coh_daw = state->w; tt_coh_dah = state->h;
+   tt_coh_da_pending = state->pending;
+   return true;
+}
+
 /* GPU reset defaults */
 static int rhi_width_mode = WIDTH_MODE_256;
 static int rhi_height_mode = HEIGHT_MODE_240;
 /* GP1(06h) range: x1 in the low 16 bits, x2 in the high 16 bits. */
 static uint32_t rhi_hrange = 0x200u | (0xC00u << 16);
-
-#include "rhi_coherence.h"
 
 static bool rhi_soft_open(bool is_pal)
 {
@@ -414,7 +582,8 @@ void rhi_intf_finalize_frame(const void *fb, unsigned width,
    switch (rhi_type)
    {
       case RHI_SOFTWARE:
-         video_cb(fb, width, height, pitch);
+         if (retro_video_enabled())
+            video_cb(fb, width, height, pitch);
          break;
       case RHI_OPENGL:
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)

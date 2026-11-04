@@ -2480,6 +2480,17 @@ enum retro_mod
 #define RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT (72 | RETRO_ENVIRONMENT_EXPERIMENTAL)
 
 /**
+ * Register before loading content to opt into same-instance state lifetime.
+ *
+ * @param[in,out] data <tt>struct retro_savestate_lifetime *</tt>.
+ * On success, the frontend sets \c get_phase and keeps the callbacks until
+ * core deinitialization.
+ * @returns true if the frontend accepts the registration.
+ * @see RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT
+ */
+#define RETRO_ENVIRONMENT_SET_SAVESTATE_LIFETIME (105 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+
+/**
  * Before calling \c SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, will query which interface is supported.
  *
  * Frontend looks at \c retro_hw_render_interface_type and returns the maximum supported
@@ -7272,10 +7283,62 @@ enum retro_savestate_context
    RETRO_SAVESTATE_CONTEXT_ROLLBACK_NETPLAY       = 3,
 
    /**
+    * Returned only during managed size, save and load calls.
+    * States stay in the same core instance and may reference its resources.
+    * They are never written to disk or sent over a network.
+    */
+   RETRO_SAVESTATE_CONTEXT_RUNAHEAD_MANAGED       = 4,
+
+   /**
     * @private Defined to ensure <tt>sizeof(retro_savestate_context) == sizeof(int)</tt>.
     * Do not use.
     */
    RETRO_SAVESTATE_CONTEXT_UNKNOWN                = INT_MAX
+};
+
+/** Execution phase of a registered core. */
+enum retro_savestate_phase
+{
+   RETRO_SAVESTATE_PHASE_NORMAL,
+   RETRO_SAVESTATE_PHASE_CANONICAL,
+   RETRO_SAVESTATE_PHASE_SPECULATIVE,
+   RETRO_SAVESTATE_PHASE_UNKNOWN = INT_MAX
+};
+
+#define RETRO_SAVESTATE_LIFETIME_VERSION 1
+
+/**
+ * Optional lifetime callbacks for existing serialization calls.
+ * Core callbacks run on the core execution thread. Release has the core's
+ * hardware context when available.
+ */
+struct retro_savestate_lifetime
+{
+   /** Set to RETRO_SAVESTATE_LIFETIME_VERSION. */
+   unsigned version;
+   /** Set to sizeof(struct retro_savestate_lifetime). */
+   unsigned size;
+
+   /**
+    * Releases each successful managed save once, with intact bytes, after
+    * its last use. Copies borrow the same state. Loads do not consume it.
+    * Failed saves are never released. Invalidated saves remain releasable.
+    */
+   void (RETRO_CALLCONV *release)(const void *data, size_t size);
+
+   /**
+    * Reports whether emulation and memory access are safe. If a failed save
+    * or load leaves live state changed or unsafe, return false until a new
+    * content session or complete recovery.
+    */
+   bool (RETRO_CALLCONV *is_usable)(void);
+
+   /**
+    * Frontend callback. Canonical advances retained state. Speculative
+    * covers replay or discardable execution. Normal is ordinary execution.
+    * GET_AUDIO_VIDEO_ENABLE separately controls video output.
+    */
+   enum retro_savestate_phase (RETRO_CALLCONV *get_phase)(void);
 };
 
 /** @} */

@@ -17,6 +17,7 @@
 
 #include "psx.h"
 #include "gpu.h"
+#include "../../libretro_cbs.h"
 #include "irq.h"
 #include "timer.h"
 #include "FastFIFO.h"
@@ -58,6 +59,17 @@
  * because it's used only inside this translation unit. */
 static void texel_put(uint32_t x, uint32_t y, uint16_t v);
 
+static uint8_t checkpoint_dirty[16384];
+static bool checkpoint_tracking;
+static void checkpoint_mark_range(size_t position, size_t count)
+{
+   size_t first, last;
+   if (!checkpoint_tracking || !count) return;
+   first = position / 8192;
+   last = (position + count - 1) / 8192;
+   if (last < sizeof(checkpoint_dirty)) memset(checkpoint_dirty + first, 1, last - first + 1);
+}
+#include "history_pages.h"
 #include "gpu_common.h"
 
 #include "gpu_polygon.c"
@@ -574,6 +586,7 @@ static void Command_FBFill(PS_GPU* gpu, const uint32_t *cb)
             uint16_t       *row     = &GPU.vram[(uint32_t)d_y << 10];
             const int32_t   to_wrap = 1024 - destX; /* pixels before x hits 1024 */
             const int32_t   contig  = (width < to_wrap) ? width : to_wrap;
+            checkpoint_mark_range((size_t)d_y * 1024 + destX, contig);
 #if defined(__SSE2__)
             const __m128i   splat   = _mm_set1_epi16((short)fill_value);
 
@@ -1147,6 +1160,103 @@ static uint16_t *VRAM_Alloc(uint8_t upscale_shift)
    return vram;
 }
 
+typedef struct VRAMBuffer
+{
+   uint16_t *pixels;
+   size_t bytes;
+   unsigned refs;
+} VRAMBuffer;
+
+static VRAMBuffer *vram_current, *vram_spare;
+
+static void vram_buffer_free(VRAMBuffer *buffer)
+{
+   if (!buffer)
+      return;
+   free(buffer->pixels);
+   free(buffer);
+}
+
+static void vram_buffer_release(VRAMBuffer *buffer)
+{
+   if (!buffer || --buffer->refs)
+      return;
+   vram_buffer_free(vram_spare);
+   vram_spare = buffer;
+}
+
+static bool vram_reserve_spare(size_t bytes)
+{
+   VRAMBuffer *buffer;
+   if (vram_spare && vram_spare->bytes == bytes)
+      return true;
+   buffer = (VRAMBuffer *)calloc(1, sizeof(*buffer));
+   if (!buffer)
+      return false;
+   buffer->pixels = (uint16_t *)malloc(bytes);
+   if (!buffer->pixels)
+   {
+      free(buffer);
+      return false;
+   }
+   buffer->bytes = bytes;
+   vram_buffer_free(vram_spare);
+   vram_spare = buffer;
+   return true;
+}
+
+/* Capture reserves the next writer's storage before publishing shared VRAM. */
+static bool vram_share_current(size_t bytes)
+{
+   VRAMBuffer *buffer = vram_current;
+   if (!buffer)
+   {
+      buffer = (VRAMBuffer *)calloc(1, sizeof(*buffer));
+      if (!buffer)
+         return false;
+      buffer->pixels = GPU.vram;
+      buffer->bytes = bytes;
+      buffer->refs = 1;
+   }
+   if (!vram_reserve_spare(bytes))
+   {
+      if (!vram_current)
+         free(buffer);
+      return false;
+   }
+   vram_current = buffer;
+   return true;
+}
+
+static bool gpu_vram_writable(void)
+{
+   VRAMBuffer *old = vram_current;
+   if (!old || old->refs == 1)
+      return true;
+   if (!vram_reserve_spare(old->bytes))
+      return false;
+   vram_current = vram_spare;
+   vram_spare = NULL;
+   vram_current->refs = 1;
+   memcpy(vram_current->pixels, old->pixels, old->bytes);
+   GPU.vram = vram_current->pixels;
+   vram_buffer_release(old);
+   return true;
+}
+
+void GPU_MemorySnapshotTrim(void)
+{
+   history_pages_free(&history_current);
+   checkpoint_tracking = false;
+   if (vram_current && vram_current->refs != 1)
+      return;
+   if (vram_current)
+      free(vram_current);
+   vram_current = NULL;
+   vram_buffer_free(vram_spare);
+   vram_spare = NULL;
+}
+
 bool GPU_Init(bool pal_clock_and_tv,
       int sls, int sle, uint8_t upscale_shift)
 {
@@ -1213,8 +1323,122 @@ void GPU_RecalcClockRatio(void) {
    overclock_cpu_to_device(&GPU.GPUClockRatio);
 }
 
+typedef struct
+{
+   uint16_t *pixels;
+   VRAMBuffer *buffer;
+   HistoryPages pages;
+   size_t bytes;
+   uint8_t shift;
+   enum rhi_renderer_type type;
+   void *hardware;
+} GPUMemorySnapshot;
+
+static GPUMemorySnapshot *memory_snapshot_load;
+static GPUMemorySnapshot *memory_snapshot_save;
+
+bool GPU_MemorySnapshotSupported(void)
+{
+   if (!GPU.vram || GPU.upscale_shift > 4)
+      return false;
+   if (rhi_intf_is_type() == RHI_SOFTWARE)
+      return true;
+   return rhi_intf_memory_snapshot_supported();
+}
+
+void GPU_MemorySnapshotFree(void *snapshot)
+{
+   GPUMemorySnapshot *state = (GPUMemorySnapshot *)snapshot;
+   if (!state)
+      return;
+   rhi_intf_memory_snapshot_free(state->type, state->hardware);
+   free(state->pixels);
+   vram_buffer_release(state->buffer);
+   history_pages_free(&state->pages);
+   free(state);
+}
+
+void GPU_MemorySnapshotReleaseVRAM(void *snapshot)
+{
+   GPUMemorySnapshot *state = (GPUMemorySnapshot *)snapshot;
+   if (!state)
+      return;
+   vram_buffer_release(state->buffer);
+   state->buffer = NULL;
+   history_pages_free(&state->pages);
+   rhi_intf_memory_snapshot_discard_tiles(state->hardware);
+}
+
+void *GPU_MemorySnapshotCreate(void)
+{
+   GPUMemorySnapshot *state;
+   if (!GPU_MemorySnapshotSupported())
+      return NULL;
+   state = (GPUMemorySnapshot *)calloc(1, sizeof(*state));
+   if (!state)
+      return NULL;
+   state->shift = GPU.upscale_shift;
+   state->type = rhi_intf_is_type();
+   state->bytes = (size_t)1024 * 512 * sizeof(uint16_t) << (2 * state->shift);
+
+   if (state->type != RHI_SOFTWARE)
+      state->hardware = rhi_intf_memory_snapshot_create();
+   if (state->type != RHI_SOFTWARE && !state->hardware)
+   {
+      GPU_MemorySnapshotFree(state);
+      return NULL;
+   }
+   return state;
+}
+
+bool GPU_MemorySnapshotMatches(void *snapshot)
+{
+   GPUMemorySnapshot *state = (GPUMemorySnapshot *)snapshot;
+   return state && GPU_MemorySnapshotSupported() &&
+      state->shift == GPU.upscale_shift && state->type == rhi_intf_is_type() &&
+      (state->type == RHI_SOFTWARE || rhi_intf_memory_snapshot_matches(state->hardware));
+}
+
+bool GPU_MemorySnapshotSave(void *snapshot)
+{
+   GPUMemorySnapshot *state = (GPUMemorySnapshot *)snapshot;
+   if (!GPU_MemorySnapshotMatches(state))
+      return false;
+   if (state->hardware && !rhi_intf_memory_snapshot_save(state->hardware))
+      return false;
+   if (state->type == RHI_SOFTWARE && state->shift)
+   {
+      if (!checkpoint_tracking) { memset(checkpoint_dirty, 1, sizeof(checkpoint_dirty)); checkpoint_tracking = true; }
+      if (!history_pages_save(&state->pages, GPU.vram, state->bytes)) return false;
+   }
+
+   return true;
+}
+
+bool GPU_MemorySnapshotPrepare(void *snapshot)
+{
+   GPUMemorySnapshot *state = (GPUMemorySnapshot *)snapshot;
+   if (!GPU_MemorySnapshotMatches(state))
+      return false;
+   if (state->buffer && vram_current != state->buffer &&
+       vram_current->refs != 1 && !vram_reserve_spare(state->bytes))
+      return false;
+   return !state->hardware || rhi_intf_memory_snapshot_prepare(state->hardware);
+}
+
+void GPU_MemorySnapshotSelect(void *snapshot)
+{
+   memory_snapshot_load = (GPUMemorySnapshot *)snapshot;
+}
+
+void GPU_MemorySnapshotSelectSave(void *snapshot)
+{
+   memory_snapshot_save = (GPUMemorySnapshot *)snapshot;
+}
+
 void GPU_Destroy(void)
 {
+   retro_clear_memory_snapshots();
    free(GPU.vram);
    GPU.vram = NULL;
    free(state_vram_1x);
@@ -1275,6 +1499,7 @@ bool GPU_Rescale(uint8_t ushift)
    /* Past the OOM cliff. Now we can commit: switch upscale_shift
     * before texel_put runs (it reads upscale_shift to compute
     * destination coords) and swap the vram pointer. */
+   retro_clear_memory_snapshots();
    GPU.vram = new_vram;
    GPU_set_upscale_shift(ushift);
 
@@ -1370,6 +1595,7 @@ static void GPU_SoftReset(void) /* Control command 0x00 */
 
 void GPU_Power(void)
 {
+   retro_clear_memory_snapshots();
    memset(GPU.vram, 0, 512 * 1024 * UPSCALE(&GPU) * UPSCALE(&GPU) * sizeof(*GPU.vram));
 
    memset(GPU.CLUT_Cache, 0, sizeof(GPU.CLUT_Cache));
@@ -1494,6 +1720,9 @@ void GPU_ResetTS(void)
 
 static void ProcessFIFO(uint32_t in_count)
 {
+   if (!gpu_vram_writable())
+      return;
+
    uint32_t CB[0x10], InData;
    unsigned i;
    unsigned command_len;
@@ -3057,7 +3286,10 @@ void GPU_RestoreStateP1(bool load, bool sizing)
             rhi_intf_load_image(GPU.FBRW_X, GPU.FBRW_CurY,
                   (GPU.FBRW_CurX - GPU.FBRW_X) & 1023, 1, GPU.vram, mt, ms);
       }
-      rhi_intf_read_vram(0, 0, 1024, 512, GPU.vram);
+      /* A complete GPU capture retains both GPU pixels and the CPU mirror's
+       * coherence map. Native byte states still need the synchronous mirror. */
+      if (!memory_snapshot_save || !memory_snapshot_save->hardware)
+         rhi_intf_read_vram(0, 0, 1024, 512, GPU.vram);
    }
 
    if (GPU.upscale_shift == 0)
@@ -3237,8 +3469,7 @@ static void gpu_restore_state_p3(bool upload_all)
    GPU.last_tex_c    = NULL;
    RecalcTexWindowStuff(&GPU);
    rhi_intf_set_tex_window(GPU.tww, GPU.twh, GPU.twx, GPU.twy);
-   /* The retained CLUT in the hardware renderers cannot be restored with
-    * the state; refetching from VRAM on the next draw is the closest match. */
+   /* Byte states refetch the hardware CLUT; checkpoints restore it below. */
    rhi_intf_invalidate_clut_cache();
 
    FastFIFO_SaveStatePostLoad(&GPU_BlitterFIFO);
@@ -3268,11 +3499,11 @@ static void gpu_restore_state_p3(bool upload_all)
    rhi_intf_set_draw_area( GPU.ClipX0, GPU.ClipY0,
                            GPU.ClipX1, GPU.ClipY1);
 
-   if (upload_all)
+   if (!memory_snapshot_load && upload_all)
       rhi_intf_load_image( 0,    0,
                            1024, 512,
                            GPU.vram, false, false);
-   else
+   else if (!memory_snapshot_load)
       gpu_upload_changed_rows(!rhi_intf_has_software_renderer());
 
    rhi_intf_set_vram_framebuffer_coords(GPU.DisplayFB_XStart, GPU.DisplayFB_YStart);
@@ -3306,6 +3537,11 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
    uint32_t fbw_cury = GPU.FBRW_CurY;
    uint32_t fbw_curx = (GPU.FBRW_CurX - GPU.FBRW_X) & 1023;
    int      ret;
+   if (load && memory_snapshot_load && memory_snapshot_load->hardware &&
+         !rhi_intf_memory_snapshot_prepare(memory_snapshot_load->hardware))
+      return 0;
+   if (load && !memory_snapshot_load && !gpu_vram_writable())
+      return 0;
    GPU_RestoreStateP1(load, sm->sizing);
 
    /* Invalidate cache tags missing from older states. */
@@ -3472,7 +3708,7 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
       SFEND
    };
 
-   if (load && GPU.upscale_shift == 0)
+   if (load && GPU.upscale_shift == 0 && !memory_snapshot_load)
    {
       /* Compare before copying: a state one frame old leaves most of VRAM
        * as it is. */
@@ -3491,12 +3727,32 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
       GPU.may_be_2d = may_be_2d;
    }
 
-   GPU_RestoreStateP2(load);
+   if (load && ret && memory_snapshot_load)
+   {
+      if (memory_snapshot_load->pages.count)
+         history_pages_load(&memory_snapshot_load->pages, GPU.vram);
+      else if (memory_snapshot_load->buffer)
+      {
+         VRAMBuffer *old = vram_current;
+         vram_current = memory_snapshot_load->buffer;
+         vram_current->refs++;
+         GPU.vram = vram_current->pixels;
+         vram_buffer_release(old);
+      }
+      else if (memory_snapshot_load->pixels)
+         memcpy(GPU.vram, memory_snapshot_load->pixels, memory_snapshot_load->bytes);
+      if (GPU.upscale_shift > 0)
+         vram_new = NULL;
+   }
+   else
+      GPU_RestoreStateP2(load);
 
    if(load)
    {
       gpu_restore_state_p3(!(diff_load && ret));
-      if (fbw && ret)
+      if (memory_snapshot_load && ret && memory_snapshot_load->hardware)
+         ret = rhi_intf_memory_snapshot_load(memory_snapshot_load->hardware);
+      if (fbw && ret && !memory_snapshot_load)
       {
          if (fbw_rows)
             rhi_intf_load_image(fbw_x, fbw_y, fbw_w, fbw_rows, GPU.vram,

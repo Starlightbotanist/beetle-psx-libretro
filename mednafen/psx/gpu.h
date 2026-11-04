@@ -319,6 +319,17 @@ void GPU_WakeVirtual(void);
 bool GPU_EventVirtual(void);
 int32_t  GPU_GetScanlineNum(void);
 
+bool GPU_MemorySnapshotSupported(void);
+void *GPU_MemorySnapshotCreate(void);
+void GPU_MemorySnapshotFree(void *snapshot);
+bool GPU_MemorySnapshotSave(void *snapshot);
+bool GPU_MemorySnapshotPrepare(void *snapshot);
+bool GPU_MemorySnapshotMatches(void *snapshot);
+void GPU_MemorySnapshotSelect(void *snapshot);
+void GPU_MemorySnapshotSelectSave(void *snapshot);
+void GPU_MemorySnapshotTrim(void);
+void GPU_MemorySnapshotReleaseVRAM(void *snapshot);
+
 /* Used by rhi_lib_gl.c to access the VRAM contents and
  * to drive state restore points. */
 uint16_t *GPU_get_vram(void);
@@ -386,5 +397,7 @@ void GPU_set_visible_scanlines(int sls, int sle); // Beetle PSX addition
 #ifdef __cplusplus
 }
 #endif
+
+
 
 #endif

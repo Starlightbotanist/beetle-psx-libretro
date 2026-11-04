@@ -117,9 +117,20 @@ void rhi_vulkan_toggle_display(bool status);
 
 bool rhi_vulkan_has_software_renderer(void);
 bool rhi_vulkan_context_ready(void);
+void *rhi_vulkan_memory_snapshot_tracker(void *snapshot);
+
+void *rhi_vulkan_memory_snapshot_create(void);
+void rhi_vulkan_memory_snapshot_free(void *snapshot);
+void rhi_vulkan_memory_snapshot_discard_tiles(void *snapshot);
+bool rhi_vulkan_memory_snapshot_supported(void);
+bool rhi_vulkan_memory_snapshot_failed(void);
+bool rhi_vulkan_memory_snapshot_matches(void *snapshot);
+bool rhi_vulkan_memory_snapshot_prepare(void *snapshot);
+bool rhi_vulkan_memory_snapshot_save(void *snapshot);
+bool rhi_vulkan_memory_snapshot_load(void *snapshot);
+
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif /*__RHI_LIB_VULKAN_H__*/

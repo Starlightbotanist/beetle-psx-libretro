@@ -10,6 +10,7 @@
 #include "rhi_lib_vulkan.h"
 #include "mednafen/mednafen.h"
 #include "mednafen/psx/gpu.h"
+#include "libretro_cbs.h"
 
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
 #include "rhi_interpolation.h"
@@ -19,6 +20,7 @@
 #include <retro_inline.h>
 #include <math.h>
 #include "rhi_tt.h"
+#include <retro_atomic.h>
 #include "rhi_upscaler.h"
 
 /* Force-inline shim for converted accessors. Must resolve to a real
@@ -4757,6 +4759,7 @@ static void cbh_move(struct CommandBufferHandle *dst,
 
    struct Device
    {
+         retro_atomic_int_t submission_failed;
          /* Device-based objects which need to poke at internal data structures
           * when their lifetimes end. Don't want to expose a lot of internal
           * guts to make this work. */
@@ -5965,6 +5968,15 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    typedef struct SaveState SaveState;
    enum { RENDERER_UPLOAD_RINGS = 8 };
    enum { RENDERER_IMAGE_CACHE = 32 };
+   enum { MEMORY_TILE_SIZE = 64, MEMORY_TILE_COLS = 1024 / MEMORY_TILE_SIZE,
+      MEMORY_TILE_ROWS = 512 / MEMORY_TILE_SIZE,
+      MEMORY_TILE_COUNT = MEMORY_TILE_COLS * MEMORY_TILE_ROWS, MEMORY_DOMAINS = 3 };
+   typedef struct MemoryTile
+   {
+      ImageHandle image;
+      struct MemoryTile *next;
+      unsigned refs, domain;
+   } MemoryTile;
    struct Renderer
    {
          /* batch-7 out-of-line methods -> free functions. */
@@ -6030,6 +6042,12 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          ImageViewHandleVec scaled_views;
          FBAtlas atlas;
    uint32_t vram_gpu_written[VRAM_PROV_WORDS];
+   MemoryTile *memory_tiles[MEMORY_DOMAINS][MEMORY_TILE_COUNT];
+   MemoryTile *memory_free[MEMORY_DOMAINS];
+   bool memory_dirty[MEMORY_DOMAINS][MEMORY_TILE_COUNT];
+   bool memory_active;
+   unsigned memory_users;
+   uint64_t memory_bytes;
          bool texture_tracking_enabled;
          TextureTracker *tracker;
          bool hd_staging_uncached; /* no cached host memory for HD upload memory */
@@ -6154,6 +6172,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
           * the frame's primitives, and the jitter they are drawn with, in
           * native pixels */
          psx_upscaler_t *upscaler;
+         psx_upscaler_t *upscaler_restore;
          float upscaler_jitter_x, upscaler_jitter_y;
          /* Analog path intermediates. sig holds the modulated signal at the
           * CRTC base clock, sep the separated luma/chroma; both are RG16F and
@@ -6902,6 +6921,100 @@ static INLINE void fbcolor_to_rgba32f(float *v, uint32_t color, bool expanded)
 }
 
 
+static void memory_tiles_dirty(Renderer *self, Domain domain, const TTRect *rect)
+{
+   unsigned x, y, nx, ny;
+   if (!self || !self->memory_active || !rect->width || !rect->height)
+      return;
+   nx = min_(MEMORY_TILE_COLS, (rect->x % MEMORY_TILE_SIZE + rect->width + MEMORY_TILE_SIZE - 1) / MEMORY_TILE_SIZE);
+   ny = min_(MEMORY_TILE_ROWS, (rect->y % MEMORY_TILE_SIZE + rect->height + MEMORY_TILE_SIZE - 1) / MEMORY_TILE_SIZE);
+   for (y = 0; y < ny; y++)
+      for (x = 0; x < nx; x++)
+      {
+         unsigned tile = ((rect->y / MEMORY_TILE_SIZE + y) % MEMORY_TILE_ROWS) * MEMORY_TILE_COLS +
+            ((rect->x / MEMORY_TILE_SIZE + x) % MEMORY_TILE_COLS);
+         self->memory_dirty[domain][tile] = true;
+         if (domain == Domain_Scaled && self->msaa > 1)
+            self->memory_dirty[2][tile] = true;
+      }
+}
+
+static Image *memory_live_image(Renderer *self, unsigned domain)
+{
+   return ih_get(domain == 2 ? &self->scaled_framebuffer_msaa :
+         domain == Domain_Scaled ? &self->scaled_framebuffer : &self->framebuffer);
+}
+
+static void memory_tile_release(Renderer *self, MemoryTile *tile)
+{
+   if (tile && !--tile->refs)
+   {
+      tile->next = self->memory_free[tile->domain];
+      self->memory_free[tile->domain] = tile;
+   }
+}
+
+static MemoryTile *memory_tile_allocate(Renderer *self, unsigned domain)
+{
+   MemoryTile *tile = self->memory_free[domain];
+   if (tile)
+      self->memory_free[domain] = tile->next;
+   else
+   {
+      unsigned factor = domain == Domain_Unscaled ? 1 : self->scaling;
+      Image *live = memory_live_image(self, domain);
+      ImageCreateInfo info = *image_get_create_info(live);
+      unsigned pixel_bytes = info.format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4;
+      uint64_t bytes = (uint64_t)factor * factor * MEMORY_TILE_SIZE *
+         MEMORY_TILE_SIZE * info.samples * pixel_bytes;
+      if (self->memory_bytes + bytes > (UINT64_C(1) << 30))
+         return NULL;
+      tile = (MemoryTile *)calloc(1, sizeof(*tile));
+      if (!tile)
+         return NULL;
+      info.width = info.height = MEMORY_TILE_SIZE * factor;
+      info.levels = 1;
+      info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
+      ih_move(&tile->image, device_create_image(self->device, &info, NULL));
+      if (!ih_is_valid(&tile->image))
+      {
+         free(tile);
+         return NULL;
+      }
+      image_set_layout(ih_get(&tile->image), Layout_General);
+      tile->domain = domain;
+      self->memory_bytes += bytes;
+   }
+   tile->refs = 1;
+   tile->next = NULL;
+   return tile;
+}
+
+static void memory_tiles_fini(Renderer *self)
+{
+   unsigned d, i;
+   for (d = 0; d < MEMORY_DOMAINS; d++)
+   {
+      MemoryTile *tile;
+      for (i = 0; i < MEMORY_TILE_COUNT; i++)
+      {
+         memory_tile_release(self, self->memory_tiles[d][i]);
+         self->memory_tiles[d][i] = NULL;
+      }
+      while ((tile = self->memory_free[d]) != NULL)
+      {
+         self->memory_free[d] = tile->next;
+         ih_reset(&tile->image);
+         free(tile);
+      }
+   }
+   self->memory_bytes = 0;
+   self->memory_active = false;
+   psx_upscaler_free(self->upscaler_restore);
+   self->upscaler_restore = NULL;
+}
+
 static void renderer_init(Renderer *self,
       Device *device_,
       unsigned scaling_,
@@ -7029,7 +7142,7 @@ static void renderer_init(Renderer *self,
    {
       struct ImageCreateInfo palette_info = image_create_info_render_target(256, 1, VK_FORMAT_R32_UINT);
       palette_info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
-      palette_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+      palette_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT;
       ih_move(&self->palette_cache, device_create_image(self->device, &palette_info, NULL));
       image_set_layout(ih_get(&self->palette_cache), Layout_General);
@@ -9708,6 +9821,8 @@ static void renderer_resolve(Renderer *self,
       unsigned x,
       unsigned y)
 {
+   TTRect changed = { x, y, BLOCK_WIDTH, BLOCK_HEIGHT };
+   memory_tiles_dirty(self, target_domain, &changed);
    if (target_domain == Domain_Scaled)
       {
          VkRect2D _vpush = { { (int)(x), (int)(y) }, { BLOCK_WIDTH, BLOCK_HEIGHT } };
@@ -12117,6 +12232,8 @@ static uint16_t *renderer_copy_cpu_to_vram(Renderer *self, const TTRect *rect,
 
 static void renderer_fini(Renderer *self)
 {
+   retro_clear_memory_snapshots();
+   memory_tiles_fini(self);
    renderer_flush(self);
    psx_upscaler_free(self->upscaler);
    self->upscaler = NULL;
@@ -17082,8 +17199,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
    static void commandbuffer_end(struct CommandBuffer *self)
    {
-      if (vkEndCommandBuffer(self->cmd) != VK_SUCCESS)
+      VkResult result = vkEndCommandBuffer(self->cmd);
+      if (result != VK_SUCCESS)
+      {
+         retro_atomic_store_release_int(&self->device->submission_failed, 1);
          LOGE("Failed to end command buffer.\n");
+      }
 
       if (self->vbo_block.mapped)
          device_request_vertex_block_nolock(self->device, &self->vbo_block, 0);
@@ -18948,6 +19069,7 @@ fail_jobs:
        * that guarantee so any member not explicitly assigned below is not heap
        * garbage (a release-only / -O3 uninitialised-read hazard). */
       memset(self, 0, sizeof(*self));
+      retro_atomic_int_init(&self->submission_failed, 0);
       /* Scalar handles / ids (the VK_NULL_HANDLE and 0 NSDMIs). */
       self->instance       = VK_NULL_HANDLE;
       self->gpu            = VK_NULL_HANDLE;
@@ -19671,7 +19793,10 @@ fail_jobs:
       device_retire_tail_fence(self, data);
 
       if (result != VK_SUCCESS)
+      {
+         retro_atomic_store_release_int(&self->submission_failed, 1);
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
+      }
 
       SemaphoreVec_free_storage(&waits);
       SemaphoreVec_free_storage(&signals);
@@ -19949,7 +20074,10 @@ fail_jobs:
       result = vkQueueSubmit(queue, VkSubmitInfoVec_size(&submits), VkSubmitInfoVec_data(&submits), cleared_fence);
       device_queue_unlock(self, queue_locked); }
       if (result != VK_SUCCESS)
+      {
+         retro_atomic_store_release_int(&self->submission_failed, 1);
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
+      }
       device_retire_tail_fence(self, data);
       cbhvec_clear(submissions);
 
@@ -20126,7 +20254,11 @@ fail_jobs:
 
       VkCommandBufferBeginInfo info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
       info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-      vkBeginCommandBuffer(cmd, &info);
+      {
+         VkResult result = vkBeginCommandBuffer(cmd, &info);
+         if (result != VK_SUCCESS)
+            retro_atomic_store_release_int(&self->submission_failed, 1);
+      }
       device_add_frame_counter_nolock(self);
       _cb = (struct CommandBuffer *)object_pool_raw_allocate(&self->handle_pool.command_buffers); commandbuffer_init(_cb, self, cmd, type);
       return cbh_make(_cb);
@@ -20312,6 +20444,7 @@ static void device_wait_queues_idle(Device *self)
          fences[num_fences++] = fence;
       else
       {
+         retro_atomic_store_release_int(&self->submission_failed, 1);
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
          vkDestroyFence(self->device, fence, NULL);
       }
@@ -21834,6 +21967,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    {
       unsigned xend;
       unsigned xbegin;
+      memory_tiles_dirty(self->listener, domain, rect);
       if (fbatlas_inside_render_pass(self, rect))
          fbatlas_flush_render_pass(self);
 
@@ -22383,7 +22517,6 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
 #include "libretro_vulkan.h"
 
-#include "libretro_cbs.h"
 #include "libretro_options.h"
 #include "beetle_psx_globals.h"
 
@@ -22391,6 +22524,286 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 static Context *context = NULL;
 static Device *device = NULL;
 static Renderer *renderer = NULL;
+static bool adaptive_smoothing;
+static bool super_sampling;
+static bool upscaler_on;
+static bool upscaler_reset_pending = true;
+
+typedef struct
+{
+   Renderer *owner;
+   ImageHandle palette;
+   MemoryTile *tiles[MEMORY_DOMAINS][MEMORY_TILE_COUNT];
+   FBAtlas atlas;
+   RenderState state;
+   uint32_t written[VRAM_PROV_WORDS];
+   unsigned scaling;
+   FilterMode filter;
+   bool captured;
+   int color_policy, dither_policy;
+   double analog_phase;
+   psx_upscaler_t *upscaler;
+   float jitter_x, jitter_y;
+   bool temporal_reset;
+} VulkanMemorySnapshot;
+
+extern enum dither_mode psx_gpu_dither_mode;
+
+bool rhi_vulkan_memory_snapshot_failed(void)
+{
+   return device && retro_atomic_load_acquire_int(&device->submission_failed) != 0;
+}
+
+bool rhi_vulkan_memory_snapshot_supported(void)
+{
+   return renderer && renderer->valid;
+}
+
+void *rhi_vulkan_memory_snapshot_tracker(void *snapshot)
+{
+   VulkanMemorySnapshot *state = (VulkanMemorySnapshot *)snapshot;
+   return state->owner->texture_tracking_enabled ? state->owner->tracker : NULL;
+}
+
+void rhi_vulkan_memory_snapshot_discard_tiles(void *snapshot)
+{
+   VulkanMemorySnapshot *state = (VulkanMemorySnapshot *)snapshot;
+   unsigned d, i;
+   for (d = 0; d < MEMORY_DOMAINS; d++)
+      for (i = 0; i < MEMORY_TILE_COUNT; i++)
+      {
+         memory_tile_release(state->owner, state->tiles[d][i]);
+         state->tiles[d][i] = NULL;
+      }
+   state->captured = false;
+}
+
+void rhi_vulkan_memory_snapshot_free(void *snapshot)
+{
+   VulkanMemorySnapshot *state = (VulkanMemorySnapshot *)snapshot;
+   if (!state)
+      return;
+   rhi_vulkan_memory_snapshot_discard_tiles(state);
+   ih_reset(&state->palette);
+   psx_upscaler_free(state->upscaler);
+   if (!--state->owner->memory_users) memory_tiles_fini(state->owner);
+   free(state);
+}
+
+void *rhi_vulkan_memory_snapshot_create(void)
+{
+   VulkanMemorySnapshot *state;
+   ImageCreateInfo info;
+   if (!rhi_vulkan_memory_snapshot_supported())
+      return NULL;
+   state = (VulkanMemorySnapshot *)calloc(1, sizeof(*state));
+   if (!state)
+      return NULL;
+   state->owner = renderer;
+   renderer->memory_users++;
+   state->scaling = renderer->scaling;
+   info = *image_get_create_info(ih_get(&renderer->palette_cache));
+   info.levels = 1;
+   info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+   info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
+   ih_move(&state->palette, device_create_image(device, &info, NULL));
+   if (!ih_is_valid(&state->palette))
+   {
+      rhi_vulkan_memory_snapshot_free(state);
+      return NULL;
+   }
+   image_set_layout(ih_get(&state->palette), Layout_General);
+   renderer->memory_active = true;
+   return state;
+}
+
+bool rhi_vulkan_memory_snapshot_matches(void *snapshot)
+{
+   VulkanMemorySnapshot *state = (VulkanMemorySnapshot *)snapshot;
+   return state && rhi_vulkan_memory_snapshot_supported() &&
+      state->owner == renderer && state->scaling == renderer->scaling &&
+      (!state->captured || (state->filter == (FilterMode)filter_mode &&
+       state->color_policy == (int)psx_internal_color_mode &&
+       state->dither_policy == (int)psx_gpu_dither_mode && !!state->upscaler == upscaler_on));
+}
+
+static bool vulkan_memory_snapshot_flush(void)
+{
+   if (rhi_vulkan_memory_snapshot_failed())
+      return false;
+   fbatlas_flush_render_pass(&renderer->atlas);
+   renderer_flush_blits(renderer);
+   renderer_flush_resolves(renderer);
+   renderer_flush(renderer);
+   return !rhi_vulkan_memory_snapshot_failed();
+}
+
+bool rhi_vulkan_memory_snapshot_prepare(void *snapshot)
+{
+   VulkanMemorySnapshot *state = (VulkanMemorySnapshot *)snapshot;
+   if (!rhi_vulkan_memory_snapshot_matches(state))
+      return false;
+   if (state->upscaler)
+   {
+      if (!renderer->upscaler_restore)
+         renderer->upscaler_restore = psx_upscaler_new();
+      if (!psx_upscaler_copy(renderer->upscaler_restore, state->upscaler))
+         return false;
+   }
+   return vulkan_memory_snapshot_flush();
+}
+
+static bool vulkan_memory_snapshot_copy(VulkanMemorySnapshot *state, bool load)
+{
+   MemoryTile *next[MEMORY_DOMAINS][MEMORY_TILE_COUNT] = {{ NULL }};
+   Image *live[MEMORY_DOMAINS];
+   CommandBuffer *cmd;
+   VkOffset3D origin = { 0, 0, 0 };
+   VkExtent3D palette_extent = { 256, 1, 1 };
+   unsigned d, i, domains = renderer->msaa > 1 ? MEMORY_DOMAINS : 2;
+   if (!rhi_vulkan_memory_snapshot_matches(state) || (load && !state->captured))
+      return false;
+   /* Emit CPU-side queues before taking a checkpoint or restoring over them. */
+   if (!vulkan_memory_snapshot_flush())
+      return false;
+   if (!load)
+   {
+      if (upscaler_on)
+      {
+         if (!state->upscaler)
+            state->upscaler = psx_upscaler_new();
+         if (!psx_upscaler_copy(state->upscaler, renderer->upscaler))
+            return false;
+      }
+      else
+      {
+         psx_upscaler_free(state->upscaler);
+         state->upscaler = NULL;
+      }
+   }
+   if (!load)
+   {
+      /* A dirty tile's old cache copy can no longer describe live VRAM.
+       * Drop only the cache reference. Saved states still own their copies. */
+      for (d = 0; d < domains; d++)
+         for (i = 0; i < MEMORY_TILE_COUNT; i++)
+            if (renderer->memory_dirty[d][i])
+            {
+               memory_tile_release(renderer, renderer->memory_tiles[d][i]);
+               renderer->memory_tiles[d][i] = NULL;
+            }
+      for (d = 0; d < domains; d++)
+         for (i = 0; i < MEMORY_TILE_COUNT; i++)
+         {
+            MemoryTile *tile = renderer->memory_tiles[d][i];
+            if (tile && !renderer->memory_dirty[d][i])
+            {
+               tile->refs++;
+               next[d][i] = tile;
+            }
+            else if (!(next[d][i] = memory_tile_allocate(renderer, d)))
+            {
+               unsigned dd, ii;
+               for (dd = 0; dd < domains; dd++)
+                  for (ii = 0; ii < MEMORY_TILE_COUNT; ii++)
+                     memory_tile_release(renderer, next[dd][ii]);
+               return false;
+            }
+         }
+   }
+   renderer_ensure_command_buffer(renderer);
+   cmd = cbh_get(&renderer->cmd);
+   commandbuffer_barrier_simple(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+   for (d = 0; d < domains; d++) live[d] = memory_live_image(renderer, d);
+   for (d = 0; d < domains; d++)
+      for (i = 0; i < MEMORY_TILE_COUNT; i++)
+      {
+         unsigned factor = d == Domain_Unscaled ? 1 : renderer->scaling;
+         MemoryTile *tile = load ? state->tiles[d][i] : next[d][i];
+         VkOffset3D offset = { (int32_t)(i % MEMORY_TILE_COLS * MEMORY_TILE_SIZE * factor),
+            (int32_t)(i / MEMORY_TILE_COLS * MEMORY_TILE_SIZE * factor), 0 };
+         VkExtent3D extent = { MEMORY_TILE_SIZE * factor, MEMORY_TILE_SIZE * factor, 1 };
+         if (tile != renderer->memory_tiles[d][i] || renderer->memory_dirty[d][i])
+            commandbuffer_copy_image(cmd, load ? live[d] : ih_get(&tile->image),
+                  load ? ih_get(&tile->image) : live[d], load ? &offset : &origin,
+                  load ? &origin : &offset, &extent);
+      }
+   commandbuffer_copy_image(cmd, load ? ih_get(&renderer->palette_cache) : ih_get(&state->palette),
+         load ? ih_get(&state->palette) : ih_get(&renderer->palette_cache), &origin, &origin, &palette_extent);
+   commandbuffer_barrier_simple(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+         VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+   renderer_flush(renderer);
+   if (rhi_vulkan_memory_snapshot_failed())
+   {
+      for (d = 0; d < domains; d++)
+         for (i = 0; i < MEMORY_TILE_COUNT; i++)
+            memory_tile_release(renderer, next[d][i]);
+      return false;
+   }
+   for (d = 0; d < domains; d++)
+      for (i = 0; i < MEMORY_TILE_COUNT; i++)
+      {
+         MemoryTile *tile = load ? state->tiles[d][i] : next[d][i];
+         if (!load)
+         {
+            memory_tile_release(renderer, state->tiles[d][i]);
+            state->tiles[d][i] = tile;
+         }
+         memory_tile_release(renderer, renderer->memory_tiles[d][i]);
+         renderer->memory_tiles[d][i] = tile;
+         tile->refs++;
+         renderer->memory_dirty[d][i] = false;
+      }
+   if (load)
+   {
+      if (state->upscaler)
+      {
+         psx_upscaler_t *old = renderer->upscaler;
+         renderer->upscaler = renderer->upscaler_restore;
+         renderer->upscaler_restore = old;
+      }
+      renderer->upscaler_jitter_x = state->jitter_x;
+      renderer->upscaler_jitter_y = state->jitter_y;
+      upscaler_reset_pending = state->temporal_reset;
+      renderer->atlas = state->atlas;
+      renderer->atlas.listener = renderer;
+      renderer->render_state = state->state;
+      memcpy(renderer->vram_gpu_written, state->written, sizeof(state->written));
+      renderer->analog_phase = state->analog_phase;
+      ih_reset(&renderer->last_scanout);
+   }
+   else
+   {
+      state->atlas = renderer->atlas;
+      state->state = renderer->render_state;
+      state->filter = (FilterMode)filter_mode;
+      state->color_policy = (int)psx_internal_color_mode;
+      state->dither_policy = (int)psx_gpu_dither_mode;
+      state->analog_phase = renderer->analog_phase;
+      state->jitter_x = renderer->upscaler_jitter_x;
+      state->jitter_y = renderer->upscaler_jitter_y;
+      state->temporal_reset = upscaler_reset_pending;
+      state->captured = true;
+      memcpy(state->written, renderer->vram_gpu_written, sizeof(state->written));
+   }
+   return true;
+}
+
+bool rhi_vulkan_memory_snapshot_save(void *snapshot)
+{
+   return vulkan_memory_snapshot_copy((VulkanMemorySnapshot *)snapshot, false);
+}
+
+bool rhi_vulkan_memory_snapshot_load(void *snapshot)
+{
+   VulkanMemorySnapshot *state = (VulkanMemorySnapshot *)snapshot;
+   if (!rhi_vulkan_memory_snapshot_matches(state))
+      return false;
+   return vulkan_memory_snapshot_copy(state, true);
+}
 static unsigned scaling = 4;
 extern enum dither_mode psx_gpu_dither_mode;
 /* Deferred geometry-change state. refresh_variables must not call
@@ -22418,8 +22831,6 @@ static void upscaler_poll(void);
 static unsigned upscaler_jitter_phase(void);
 static void upscaler_hand_over(Renderer *r, Image *scanout, unsigned index);
 static const struct retro_hw_render_upscaler_interface *upscaler_iface;
-static bool upscaler_on;
-static bool upscaler_reset_pending = true;
 /* What the renderer was built for (it may have settled for less) */
 static unsigned built_scaling, built_msaa;
 
@@ -22501,8 +22912,6 @@ static bool has_software_fb;
 static bool scaled_uv_offset;
 static int filter_exclude_sprites;
 static int filter_exclude_2d_polygons;
-static bool adaptive_smoothing;
-static bool super_sampling;
 static unsigned msaa = 1;
 static bool mdec_yuv;
 /*
@@ -22953,6 +23362,8 @@ void rhi_vulkan_refresh_variables(void)
    unsigned old_scaling;
    struct retro_variable var = {0};
 
+   if (retro_is_speculative())
+      return;
    var.key = BEETLE_OPT(renderer_software_fb);
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -23396,14 +23807,18 @@ static void upscaler_poll(void)
 {
    bool requested = false;
    bool on        = false;
+   bool changed   = false;
    unsigned factor = 0;
+
+   if (retro_is_speculative())
+      return;
 
    if (upscaler_iface && upscaler_iface->get_request(upscaler_iface->handle, &upscaler_request))
    {
       static struct retro_hw_upscaler_request last_request;
       psx_upscaler_range_t range;
       /* a changed request (the output changed) is picked for afresh */
-      bool changed      = memcmp(&last_request, &upscaler_request, sizeof(last_request)) != 0;
+      changed           = memcmp(&last_request, &upscaler_request, sizeof(last_request)) != 0;
       last_request      = upscaler_request;
       requested         = true;
       range.want_width  = upscaler_request.render_width;
@@ -23415,8 +23830,11 @@ static void upscaler_poll(void)
             upscaler_on && !changed ? upscaler_factor : 0, upscaler_picked_width, upscaler_picked_height);
       on = factor != 0;
    }
-   if (on != upscaler_on)
+   if (on != upscaler_on || changed || (on && factor != upscaler_factor))
+   {
+      retro_clear_memory_snapshots();
       upscaler_reset_pending = true;
+   }
    if (on && (factor != upscaler_factor || !upscaler_on))
    {
       upscaler_factor        = factor;
@@ -23816,6 +24234,16 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
       renderer->render_state.scanout_mdec_filter = mdec_yuv ? ScanoutFilter_MDEC_YUV : ScanoutFilter_None;
    else
       renderer->render_state.scanout_mdec_filter = ScanoutFilter_None;
+
+   if (!retro_video_enabled() && !upscaler_on)
+   {
+      fbatlas_flush_render_pass(&renderer->atlas);
+      renderer_flush_blits(renderer);
+      renderer_flush_resolves(renderer);
+      renderer_flush(renderer);
+      inside_frame = false;
+      return;
+   }
 
    scanout = show_vram ? renderer_scanout_vram_to_texture(renderer, true) : renderer_scanout_to_texture(renderer);
    index = vulkan->get_sync_index(vulkan->handle);

@@ -738,14 +738,16 @@ static int ReadStateChunk(StateMem *st, SFORMAT *sf, int size)
          }
          else
          {
-#ifndef MSB_FIRST
-            if ((tmp->flags & MDFNSTATE_DIFF) && diff_map && diff_chunk)
+            if ((tmp->flags & MDFNSTATE_DIFF) && diff_map && diff_chunk
+#ifdef MSB_FIRST
+                  && tmp->flags == MDFNSTATE_DIFF
+#endif
+               )
             {
                if (!smem_read_diff(st, (uint8_t *)tmp->v, expected_size))
                   return 0;
                continue;
             }
-#endif
             /* Refuse to load a partial subsystem region. A short
              * read here would leave tmp->v half-old / half-new and
              * silently break determinism for the entire run. */

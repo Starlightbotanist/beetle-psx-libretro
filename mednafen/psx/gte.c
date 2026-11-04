@@ -432,7 +432,7 @@ int GTE_StateAction(StateMem *sm, int load, int data_only)
    };
    int ret = MDFNSS_StateAction(sm, load, data_only, StateRegs, "GTE");
 
-   if(load)
+   if(load && ret)
    {
       DR[0] = (uint16_t)Vectors[0][0] | ((uint16_t)Vectors[0][1] << 16);
       DR[1] = (int16_t)Vectors[0][2];
@@ -441,7 +441,7 @@ int GTE_StateAction(StateMem *sm, int load, int data_only)
       DR[4] = (uint16_t)Vectors[2][0] | ((uint16_t)Vectors[2][1] << 16);
       DR[5] = (int16_t)Vectors[2][2];
       DR[6] = RGB.c.R | (RGB.c.G << 8) | (RGB.c.B << 16) | (RGB.c.CD << 24);
-      DR[7] = (uint16_t)OTZ;
+      DR[7] = _OTZ;
       DR[8] = (int16_t)IR[0];
       DR[9] = (int16_t)IR[1];
       DR[10] = (int16_t)IR[2];
@@ -450,22 +450,22 @@ int GTE_StateAction(StateMem *sm, int load, int data_only)
       DR[13] = (uint16_t)XY_FIFO[1].X | ((uint16_t)XY_FIFO[1].Y << 16);
       DR[14] = (uint16_t)XY_FIFO[2].X | ((uint16_t)XY_FIFO[2].Y << 16);
       DR[15] = (uint16_t)XY_FIFO[3].X | ((uint16_t)XY_FIFO[3].Y << 16);
-      DR[16] = (uint16_t)Z_FIFO(0);
-      DR[17] = (uint16_t)Z_FIFO(1);
-      DR[18] = (uint16_t)Z_FIFO(2);
-      DR[19] = (uint16_t)Z_FIFO(3);
+      DR[16] = (uint16_t)Z_FIFO[0];
+      DR[17] = (uint16_t)Z_FIFO[1];
+      DR[18] = (uint16_t)Z_FIFO[2];
+      DR[19] = (uint16_t)Z_FIFO[3];
       DR[20] = RGB_FIFO[0].c.R | (RGB_FIFO[0].c.G << 8) | (RGB_FIFO[0].c.B << 16) | (RGB_FIFO[0].c.CD << 24);
       DR[21] = RGB_FIFO[1].c.R | (RGB_FIFO[1].c.G << 8) | (RGB_FIFO[1].c.B << 16) | (RGB_FIFO[1].c.CD << 24);
       DR[22] = RGB_FIFO[2].c.R | (RGB_FIFO[2].c.G << 8) | (RGB_FIFO[2].c.B << 16) | (RGB_FIFO[2].c.CD << 24);
-      DR[23] = Reg23;
+      DR[23] = _Reg23;
       DR[24] = MAC[0];
       DR[25] = MAC[1];
       DR[26] = MAC[2];
       DR[27] = MAC[3];
       DR[28] = Sat5(IR[1] >> 7) | (Sat5(IR[2] >> 7) << 5) | (Sat5(IR[3] >> 7) << 10);
       DR[29] = Sat5(IR[1] >> 7) | (Sat5(IR[2] >> 7) << 5) | (Sat5(IR[3] >> 7) << 10);
-      DR[30] = LZCS;
-      DR[31] = LZCR;
+      DR[30] = _LZCS;
+      DR[31] = _LZCR;
    }
 
    return(ret);
