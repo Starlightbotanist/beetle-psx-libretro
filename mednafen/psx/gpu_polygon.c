@@ -1922,7 +1922,9 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
       { \
          memcpy(&vertices[0], &gpu->InQuad_F3Vertices[1], 2 * sizeof(tri_vertex)); \
          clut     = gpu->InQuad_clut; \
-         invalidW = gpu->InQuad_invalidW; \
+         invalidW = gpu->InQuad_invalidW || \
+            gpu->InQuad_normalized_depth != \
+            !!(PGXP_LIT && (PGXP_GetModes() & PGXP_NORMALIZE_DEPTH)); \
          sv       = 2; \
       } \
    } \
@@ -2095,6 +2097,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          memcpy(&gpu->InQuad_F3Vertices[0], &vertices[0], sizeof(tri_vertex)); \
          gpu->InQuad_clut = clut; \
          gpu->InQuad_invalidW = invalidW; \
+         gpu->InQuad_normalized_depth = \
+            !!(PGXP_LIT && (PGXP_GetModes() & PGXP_NORMALIZE_DEPTH)); \
       } \
    } \
    if (abs(vertices[2].y - vertices[0].y) >= (512 << gpu->upscale_shift) || \

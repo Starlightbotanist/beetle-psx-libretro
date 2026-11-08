@@ -27,6 +27,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <libretro.h>
 
@@ -36,6 +37,7 @@
 #include "pgxp_mem.h"
 #include "pgxp_cpu.h"
 #include "pgxp_gpu.h"
+#include "../mednafen/psx/gte.h"
 
 /* Same declaration pgxp_gpu.c uses; the frontend owns the callback. */
 extern retro_log_printf_t log_cb;
@@ -105,24 +107,56 @@ void PGXP_InvalidateVertexFIFO(void)
 	SXY2.flags = 0;
 }
 
+/* Normalize only the depth shadow. The native projection and its hot path
+ * stay unchanged when a game does not need this compatibility setting. */
+static float pgxp_normalize_depth(float depth)
+{
+	static uint32_t previous_xy, previous_z;
+	static double scale;
+	static bool valid;
+	uint32_t xy = GTE_ReadCR(3);
+	uint32_t z = GTE_ReadCR(4) & 0xffffu;
+
+	/* Exact native-row keys also cover reset, restoration and register-bank
+	 * changes. A zero row uses raw depth instead of a previous scale. */
+	if (!valid || xy != previous_xy || z != previous_z)
+	{
+		double x = (int16_t)xy;
+		double y = (int16_t)(xy >> 16);
+		double third = (int16_t)z;
+		double length = sqrt(x * x + y * y + third * third);
+		scale = length > 0.0 ? 4096.0 / length : 1.0;
+		previous_xy = xy;
+		previous_z = z;
+		valid = true;
+	}
+	return (float)(depth * scale);
+}
+
 void PGXP_pushSXYZ2f(float _x, float _y, float _z, uint32_t _v)
 {
 	static uint32_t uCount = 0;
 	low_value temp;
+	uint32_t modes = PGXP_GetModes();
 	/* push values down FIFO */
 	SXY0 = SXY1;
 	SXY1 = SXY2;
 	
 	SXY2.x		= _x;
 	SXY2.y		= _y;
-	SXY2.z		= (PGXP_GetModes() & PGXP_TEXTURE_CORRECTION) ? _z : 1.f;
+	if (!(modes & PGXP_TEXTURE_CORRECTION))
+		SXY2.z = 1.f;
+	else if (modes & PGXP_NORMALIZE_DEPTH)
+		SXY2.z = pgxp_normalize_depth(_z);
+	else
+		SXY2.z = _z;
 	SXY2.value	= _v;
 	SXY2.flags	= VALID_ALL;
 	SXY2.count	= uCount++;
 
 	/* cache value in GPU plugin */
 	temp.word = _v;
-	if(PGXP_GetModes() & PGXP_VERTEX_CACHE)
+	if(modes & PGXP_VERTEX_CACHE)
 		PGXP_CacheVertex(temp.x, temp.y, &SXY2);
 	else
 		PGXP_CacheVertex(0, 0, NULL);
