@@ -6056,10 +6056,12 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
              * plain scaled quad there. */
             Program *hdr_scaled_quad_blitter;
             Program *hdr_unscaled_quad_blitter;
+            Program *hdr_ssaa_quad_blitter;
             Program *hdr_bpp24_quad_blitter;
             Program *hdr_bpp24_yuv_quad_blitter;
             Program *resolve_to_scaled;
             Program *resolve_to_unscaled;
+            Program *resolve_to_ssaa;
             Program *reduce_cached_color;
             Program *msaa_resolve_weighted;       /* light-domain MSAA resolve, Karis-weighted (rgba16f) */
             Program *msaa_resolve_weighted_sdr;   /* light-domain MSAA resolve, plain box (rgba8) */
@@ -6613,6 +6615,9 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static const uint32_t hdr_unscaled_quad_frag[] =
 #include "shaders_vulkan/prebuilt/hdr.unscaled.quad.frag.inc"
       ;
+   static const uint32_t hdr_ssaa_quad_frag[] =
+#include "shaders_vulkan/prebuilt/hdr.ssaa.quad.frag.inc"
+      ;
    static const uint32_t hdr_bpp24_quad_frag[] =
 #include "shaders_vulkan/prebuilt/hdr.bpp24.quad.frag.inc"
       ;
@@ -6645,6 +6650,12 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       ;
    static const uint32_t resolve_msaa_to_unscaled[] =
 #include "shaders_vulkan/prebuilt/resolve.msaa.unscaled.comp.inc"
+      ;
+   static const uint32_t resolve_to_ssaa[] =
+#include "shaders_vulkan/prebuilt/resolve.ssaa.comp.inc"
+      ;
+   static const uint32_t resolve_msaa_to_ssaa[] =
+#include "shaders_vulkan/prebuilt/resolve.msaa.ssaa.comp.inc"
       ;
    static const uint32_t msaa_resolve_weighted_comp[] =
 #include "shaders_vulkan/prebuilt/msaa_resolve_weighted.comp.inc"
@@ -7023,8 +7034,6 @@ static void renderer_init(Renderer *self,
    };
    ih_move(&self->framebuffer, device_create_image(self->device, &info, state ? &initial_vram : NULL));
    image_set_layout(ih_get(&self->framebuffer), Layout_General);
-   ih_move(&self->framebuffer_ssaa, device_create_image(self->device, &info, NULL));
-   image_set_layout(ih_get(&self->framebuffer_ssaa), Layout_General);
 
    {
       struct ImageCreateInfo palette_info = image_create_info_render_target(256, 1, VK_FORMAT_R32_UINT);
@@ -7057,6 +7066,19 @@ static void renderer_init(Renderer *self,
             VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT,
             VK_IMAGE_TILING_OPTIMAL))
       self->scaled_fb_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+   /* SSAA is a display intermediate, never the content-visible VRAM owner.
+    * Match the actual source storage so HDR highlights survive the resolve. */
+   {
+      ImageCreateInfo ssaa_info = image_create_info_render_target(FB_WIDTH, FB_HEIGHT,
+            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
+            ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R32_UINT);
+      ssaa_info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
+      ssaa_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      ih_move(&self->framebuffer_ssaa, device_create_image(self->device, &ssaa_info, NULL));
+      image_set_layout(ih_get(&self->framebuffer_ssaa), Layout_General);
+   }
    info.format = self->scaled_fb_format;
    info.levels = trailing_zeroes(self->scaling) + 1;
    info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -7305,6 +7327,13 @@ static void renderer_init_pipelines(Renderer *self)
    else
       self->pipelines.resolve_to_unscaled = device_request_program_compute_code(self->device, resolve_to_unscaled, sizeof(resolve_to_unscaled));
 
+   if (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT)
+      self->pipelines.resolve_to_ssaa = self->msaa > 1
+         ? device_request_program_compute_code(self->device, resolve_msaa_to_ssaa, sizeof(resolve_msaa_to_ssaa))
+         : device_request_program_compute_code(self->device, resolve_to_ssaa, sizeof(resolve_to_ssaa));
+   else
+      self->pipelines.resolve_to_ssaa = self->pipelines.resolve_to_unscaled;
+
    self->pipelines.msaa_resolve_weighted = device_request_program_compute_code(self->device, msaa_resolve_weighted_comp, sizeof(msaa_resolve_weighted_comp));
    self->pipelines.msaa_resolve_weighted_sdr = device_request_program_compute_code(self->device, msaa_resolve_weighted_sdr_comp, sizeof(msaa_resolve_weighted_sdr_comp));
 
@@ -7324,6 +7353,9 @@ static void renderer_init_pipelines(Renderer *self)
       device_request_program_graphics_code(self->device, quad_vert, sizeof(quad_vert), hdr_scaled_quad_frag, sizeof(hdr_scaled_quad_frag));
    self->pipelines.hdr_unscaled_quad_blitter =
       device_request_program_graphics_code(self->device, quad_vert, sizeof(quad_vert), hdr_unscaled_quad_frag, sizeof(hdr_unscaled_quad_frag));
+   self->pipelines.hdr_ssaa_quad_blitter = self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
+      ? device_request_program_graphics_code(self->device, quad_vert, sizeof(quad_vert), hdr_ssaa_quad_frag, sizeof(hdr_ssaa_quad_frag))
+      : self->pipelines.hdr_unscaled_quad_blitter;
    self->pipelines.hdr_bpp24_quad_blitter =
       device_request_program_graphics_code(self->device, quad_vert, sizeof(quad_vert), hdr_bpp24_quad_frag, sizeof(hdr_bpp24_quad_frag));
    self->pipelines.hdr_bpp24_yuv_quad_blitter =
@@ -7812,6 +7844,9 @@ static void renderer_ssaa_framebuffer(Renderer *self)
 
    unsigned cols = right > left ? right - left : 0;
    unsigned size = (bottom > top && cols) ? (bottom - top) * cols : 0;
+   unsigned specialization_mask = (1u << SpecConstIndex_Samples) |
+      (1u << SpecConstIndex_FilterMode) | (1u << SpecConstIndex_Scaling) |
+      (1u << SpecConstIndex_ResolveEotf);
 
    renderer_ensure_command_buffer(self);
 
@@ -7819,10 +7854,14 @@ static void renderer_ssaa_framebuffer(Renderer *self)
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, 1);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_ResolveEotf, psx_hdr_sdr_eotf);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
-         SpecConstIndex_ExpandedColor, !psx_hdr_active &&
-         self->render_state.color_mode == PSX_INTERNAL_COLOR_32BPP);
-   commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.resolve_to_unscaled);
+   if (self->scaled_fb_format != VK_FORMAT_R16G16B16A16_SFLOAT)
+   {
+      commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+            SpecConstIndex_ExpandedColor, !psx_hdr_active &&
+            self->render_state.color_mode == PSX_INTERNAL_COLOR_32BPP);
+      specialization_mask |= 1u << SpecConstIndex_ExpandedColor;
+   }
+   commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.resolve_to_ssaa);
    commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer_ssaa)));
    if (self->msaa > 1)
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
@@ -7847,7 +7886,7 @@ static void renderer_ssaa_framebuffer(Renderer *self)
          ptr[j].extent.width  = BLOCK_WIDTH;
          ptr[j].extent.height = BLOCK_HEIGHT;
       }
-      commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
+      commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), specialization_mask);
       commandbuffer_dispatch(cbh_get(&self->cmd), 1, 1, to_run);
    } }
 }
@@ -9337,7 +9376,10 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
    }
    else if (ssaa)
    {
-      commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_unscaled_quad_blitter : self->pipelines.unscaled_quad_blitter);
+      if (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT)
+         commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_ssaa_quad_blitter : self->pipelines.scaled_quad_blitter);
+      else
+         commandbuffer_set_program(cbh_get(&self->cmd), hdr_quad ? self->pipelines.hdr_unscaled_quad_blitter : self->pipelines.unscaled_quad_blitter);
 
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer_ssaa)), StockSampler_NearestWrap);
    }
