@@ -129,7 +129,8 @@ void main()
 	highp vec3 rgb;
 #if defined(SCALED)
 	rgb = textureLod(uTexture, vUV, 0.0).rgb;
-	#if defined(HDR)
+	#if defined(HDR) && !defined(SSAA_FLOAT)
+		/* Supersampling already preserves sub-8-bit display precision. */
 		rgb = hdr_deband(rgb, gl_FragCoord.xy);
 	#endif
 #elif defined(UNSCALED)

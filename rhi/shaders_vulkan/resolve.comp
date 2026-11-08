@@ -23,7 +23,12 @@ layout(set = 0, binding = 0, SCALED_STORE_FMT) uniform writeonly image2D uScaled
 #endif
 layout(set = 0, binding = 1) uniform usampler2D uUnscaled;
 #else
+#if defined(SSAA_FLOAT)
+/* Display-only resolve. Native VRAM still uses the packed integer variant. */
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D uSSAA;
+#else
 layout(set = 0, binding = 0, r32ui) uniform writeonly uimage2D uUnscaled;
+#endif
 #if defined(MSAA)
 layout(set = 0, binding = 1) uniform sampler2DMS uScaledMS;
 #else
@@ -54,6 +59,18 @@ layout(push_constant, std430) uniform PushMe
 	vec2 inv_source_size;
 	uint scale;
 } registers;
+
+#if defined(SSAA_FLOAT)
+highp vec3 resolve_rgb(highp vec3 rgb)
+{
+	/* An overflowing rgba16f store may become infinity. Keep it out of the
+	 * light-domain mean, and bound inverse-transfer rounding before export. */
+	/* The ordered positive test also rejects NaNs. */
+	return mix(vec3(0.0), min(rgb, vec3(65504.0)), greaterThan(rgb, vec3(0.0)));
+}
+#else
+#define resolve_rgb(rgb) max(rgb, vec3(0.0))
+#endif
 
 void main()
 {
@@ -91,7 +108,7 @@ void main()
 				for (int i = 0; i < NUM_SAMPLES; i++)
 				{
 					vec4 t = texelFetch(uScaledMS, uv + ivec2(x, y), i);
-					value.rgb += sdr_to_linear(max(t.rgb, vec3(0.0)), RESOLVE_EOTF);
+					value.rgb += sdr_to_linear(resolve_rgb(t.rgb), RESOLVE_EOTF);
 					value.a   += t.a;
 				}
 		value /= SCALE * SCALE * NUM_SAMPLES;
@@ -112,7 +129,7 @@ void main()
 			for (int x = 0; x < SCALE; x++)
 			{
 				vec4 t = texelFetch(uScaled, clamp(base + ivec2(x, y), ivec2(0), srcmax), 0);
-				value.rgb += sdr_to_linear(max(t.rgb, vec3(0.0)), RESOLVE_EOTF);
+				value.rgb += sdr_to_linear(resolve_rgb(t.rgb), RESOLVE_EOTF);
 				value.a   += t.a;
 			}
 		}
@@ -130,9 +147,14 @@ void main()
 	 * a no-op. */
 	value = mix(value, vec4(0.0), isnan(value));
 
+#if defined(SSAA_FLOAT)
+	value.rgb = resolve_rgb(value.rgb);
+	imageStore(uSSAA, ivec2(coord), value);
+#else
 	uint packed_color = pack_abgr1555(value);
 	if (EXPANDED_COLOR != 0)
 		packed_color |= ABGR1555_BYTE_COLOR;
 	imageStore(uUnscaled, ivec2(coord), uvec4(packed_color));
+#endif
 #endif
 }
