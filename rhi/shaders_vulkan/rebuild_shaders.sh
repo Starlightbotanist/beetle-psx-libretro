@@ -48,6 +48,8 @@ mkdir -p prebuilt
 "$GLSLC" -o prebuilt/resolve.msaa.scaled.comp.inc -mfmt=c -DSCALED -DMSAA resolve.comp
 "$GLSLC" -o prebuilt/resolve.unscaled.comp.inc -mfmt=c -DUNSCALED resolve.comp
 "$GLSLC" -o prebuilt/resolve.msaa.unscaled.comp.inc -mfmt=c -DUNSCALED -DMSAA resolve.comp
+"$GLSLC" -o prebuilt/resolve.ssaa.comp.inc -mfmt=c -DSSAA_FLOAT resolve.comp
+"$GLSLC" -o prebuilt/resolve.msaa.ssaa.comp.inc -mfmt=c -DSSAA_FLOAT -DMSAA resolve.comp
 
 # Quads
 "$GLSLC" -o prebuilt/quad.vert.inc -mfmt=c quad.vert
@@ -61,6 +63,7 @@ mkdir -p prebuilt
 # Rec.2020 absolute luminance; selected by the rhi only when the "Color
 # Format = 30-bit (HDR)" path is engaged on Vulkan (psx_hdr_active).
 "$GLSLC" -o prebuilt/hdr.scaled.quad.frag.inc -mfmt=c -DHDR -DSCALED quad.frag
+"$GLSLC" -o prebuilt/hdr.ssaa.quad.frag.inc -mfmt=c -DHDR -DSCALED -DSSAA_FLOAT quad.frag
 "$GLSLC" -o prebuilt/hdr.unscaled.quad.frag.inc -mfmt=c -DHDR -DUNSCALED quad.frag
 "$GLSLC" -o prebuilt/hdr.bpp24.quad.frag.inc -mfmt=c -DHDR -DUNSCALED -DBPP24 quad.frag
 "$GLSLC" -o prebuilt/hdr.bpp24.yuv.quad.frag.inc -mfmt=c -DHDR -DUNSCALED -DBPP24 -DBPP24_YUV quad.frag
