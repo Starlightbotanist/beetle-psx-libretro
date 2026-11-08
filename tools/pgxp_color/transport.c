@@ -147,12 +147,7 @@ static void test_mfc2_ori_sw(void)
 
    if (!PGXP_GetColor(0, &with_cmd, rgb))
    {
-      /* Not a hard failure: PGXP's bitwise-op tracking may legitimately
-       * invalidate here (see pgxp_cpu.c INVALID_BITWISE_OP). Report it,
-       * because it bounds what the hit rate can be in content that uses
-       * this idiom. */
-      printf("    note: mfc2+or+sw not tracked through the bitwise op "
-             "(expected if PGXP invalidates on OR)\n");
+      fail("mfc2+or+sw: command-byte insertion lost RGB", 0, 1);
       return;
    }
    if (rgb[0] != (float)m1 / 16.0f ||
@@ -433,7 +428,9 @@ int main(void)
    test_swc2_direct();
 
    printf("[T2] mfc2 + or(cmd byte) + sw -> GP0\n");
+   PGXP_EnableModes(PGXP_MODE_CPU);
    test_mfc2_ori_sw();
+   PGXP_DisableModes(PGXP_MODE_CPU);
 
    printf("[T3] three-vertex gouraud packet, colours at real offsets\n");
    test_gouraud_packet();

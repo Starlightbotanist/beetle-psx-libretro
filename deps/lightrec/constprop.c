@@ -323,6 +323,9 @@ void lightrec_consts_propagate(const struct block *block,
 		}
 	}
 
+	if (op_flag_load_discard(flags))
+		return;
+
 	c = list[idx - 1].c;
 
 	switch (c.i.op) {

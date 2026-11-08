@@ -35,6 +35,36 @@ extern "C" {
 
 #include "pgxp_types.h"
 
+#define PGXP_RAM_WORDS (2048 * 1024 / 4)
+
+   /* Logical ownership bits. Readers must resolve entries through this module;
+    * raw shadow bytes can outlive their owner after reset or a DMA write. */
+   extern uint32_t PGXP_MemInitialized[];
+#ifdef HAVE_LIGHTREC
+   /* Written only by the memory module; DMA tests this rare state inline. */
+   extern int PGXP_IsolatedRAMValid;
+   void PGXP_InvalidateIsolatedRAMWord(uint32_t addr);
+#endif
+
+   static inline void PGXP_InvalidateRAMWord(uint32_t addr)
+   {
+      uint32_t word = addr >> 2;
+      if (word < PGXP_RAM_WORDS)
+      {
+         PGXP_MemInitialized[word >> 5] &= ~((uint32_t)1 << (word & 31));
+#ifdef HAVE_LIGHTREC
+         if (PGXP_IsolatedRAMValid)
+            PGXP_InvalidateIsolatedRAMWord(addr);
+#endif
+      }
+   }
+
+   void PGXP_InvalidateRAM(uint32_t addr, uint32_t words, int decrement);
+   void PGXP_InvalidateMem(uint32_t addr);
+#ifdef HAVE_LIGHTREC
+   void PGXP_CacheIsolation(int isolated);
+#endif
+
    void PGXP_InitMem(void);
 
    uint32_t		PGXP_ConvertAddress(uint32_t addr);

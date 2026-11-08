@@ -110,6 +110,14 @@ struct lightrec_mem_map {
 	const struct lightrec_mem_map *mirror_of;
 };
 
+enum lightrec_load_action {
+	LIGHTREC_LOAD_SAVE,
+	LIGHTREC_LOAD_DEFER,
+	LIGHTREC_LOAD_COMMIT,
+	LIGHTREC_LOAD_CANCEL,
+	LIGHTREC_LOAD_DISCARD,
+};
+
 struct lightrec_ops {
 	void (*cop2_notify)(struct lightrec_state *state, u32 op, u32 data);
 	void (*cop2_op)(struct lightrec_state *state, u32 op);
@@ -134,6 +142,14 @@ struct lightrec_ops {
 	 * destination value needs to cross the callback boundary. */
 	void (*pgxp_addu_identity)(struct lightrec_state *state, u32 instr,
 				    u32 value);
+	/* Optional metadata observer for deferred or cancelled loads. Ordinary
+	 * loads use only the existing memory/coprocessor callbacks. */
+	void (*load_delay)(struct lightrec_state *state, u32 reg, u32 value,
+			   enum lightrec_load_action action);
+	/* Original effective address and source store value or merged load value.
+	 * Word callbacks see aligned addresses and cannot reconstruct these. */
+	void (*unaligned_access)(struct lightrec_state *state, u32 opcode,
+				u32 addr, u32 value);
 };
 
 struct lightrec_registers {

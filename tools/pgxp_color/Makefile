@@ -7,10 +7,11 @@ CPPFLAGS := -DPGXP_DIAG=1 -I$(ROOT) -I$(ROOT)/pgxp -I$(ROOT)/libretro-common/inc
 # Links the real PGXP sources, so the code under test is the shipping code
 # rather than a copy of it.
 PGXP_SRC := $(ROOT)/pgxp/pgxp_gpu.c $(ROOT)/pgxp/pgxp_gte.c \
-            $(ROOT)/pgxp/pgxp_cpu.c $(ROOT)/pgxp/pgxp_mem.c \
+            $(ROOT)/pgxp/pgxp_cpu.c $(ROOT)/pgxp/pgxp_cpu_dispatch.c \
+            $(ROOT)/pgxp/pgxp_mem.c \
             $(ROOT)/pgxp/pgxp_main.c $(ROOT)/pgxp/pgxp_value.c
 
-all: oracle transport range
+all: oracle transport range precision isolation
 
 oracle: oracle.c $(PGXP_SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ oracle.c $(PGXP_SRC) stub_log.c -lm
@@ -21,14 +22,22 @@ range: range.c $(PGXP_SRC)
 transport: transport.c $(PGXP_SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ transport.c $(PGXP_SRC) stub_log.c -lm
 
-check: oracle transport range
+precision: precision.c $(PGXP_SRC)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ precision.c $(PGXP_SRC) stub_log.c -lm
+
+isolation: isolation.c $(PGXP_SRC)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DHAVE_LIGHTREC=1 -o $@ isolation.c $(PGXP_SRC) stub_log.c -lm
+
+check: oracle transport range precision isolation
 	./oracle
 	@echo
 	./transport
 	@echo
 	./range
+	./precision
+	./isolation
 
 clean:
-	rm -f oracle transport range
+	rm -f oracle transport range precision isolation
 
 .PHONY: all check clean

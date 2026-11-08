@@ -33,6 +33,17 @@ extern "C" {
 #endif
 
 #include "pgxp_types.h"
+#include "pgxp_value.h"
+#include "pgxp_main.h"
+
+/* Untracked CPU operations can alter a colour without changing its packed,
+ * saturated native word. Keep RGB precision in GPRs only with CPU tracking.
+ * Direct GTE/memory transport and geometry precision remain independent. */
+static inline void PGXP_CPU_ValidateColor(PGXP_value *value)
+{
+	if ((value->flags & PGXP_COLOR) && !(PGXP_GetModes() & PGXP_MODE_CPU))
+		value->flags &= ~PGXP_COLOR;
+}
 
 extern PGXP_value* CPU_reg;
 extern PGXP_value* CP0_reg;
@@ -40,6 +51,14 @@ extern PGXP_value* CP0_reg;
 #define CPU_Lo CPU_reg[33]
 
 void PGXP_InitCPU();
+
+/* The interpreter publishes these shadows at its native load boundary. */
+PGXP_value *PGXP_CPU_PendingLoad(uint32_t instr);
+void PGXP_CPU_LoadDelayed(uint32_t instr, uint32_t value, uint32_t addr);
+void PGXP_CPU_CommitLoad(uint32_t reg, uint32_t value, uint32_t written);
+void PGXP_CPU_SaveLoad(uint32_t reg);
+void PGXP_CPU_DeferLoad(uint32_t reg, int discard);
+void PGXP_CPU_FinishLoad(uint32_t reg, uint32_t value, int commit);
 
 // -- CPU functions
 

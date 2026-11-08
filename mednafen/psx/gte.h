@@ -3,7 +3,8 @@
 
 #include "../state.h"
 
-void GTE_SwitchRegisters(bool use_regs, uint32_t *regs);
+/* Select a register bank, or NULL for native storage, preserving active data. */
+void GTE_SwitchRegisters(uint32_t *regs);
 
 void GTE_Init(void);
 void GTE_Power(void);

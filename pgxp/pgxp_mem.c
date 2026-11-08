@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "pgxp_mem.h"
+#include "pgxp_main.h"
 #include "pgxp_cpu.h"
 #include "pgxp_gte.h"
 #include "pgxp_value.h"
@@ -18,7 +19,7 @@
  * constants are kept so callers that print or compare with
  * InvalidAddress continue to work, but the offsets are now packed
  * back-to-back instead of on 524288-entry strides. */
-#define USER_MEM_COUNT		(2048 * 1024 / 4)	/* 524288 entries: 2 MB / 4 */
+#define USER_MEM_COUNT		PGXP_RAM_WORDS	/* 524288 entries: 2 MB / 4 */
 #define SCRATCH_MEM_COUNT	(1024 / 4)		/* 256 entries: 1 KB / 4 */
 #define REGISTER_MEM_COUNT	(0x2000 / 4)		/* 2048 entries: 8 KB / 4 */
 
@@ -28,33 +29,55 @@ static PGXP_value RegisterMem[REGISTER_MEM_COUNT];
 
 #define PGXP_MEM_TOTAL (USER_MEM_COUNT + SCRATCH_MEM_COUNT + REGISTER_MEM_COUNT)
 
-/* One-way "ever PGXP-written" bitmap over the packed address space,
- * one bit per shadow word (~64 KB total, L2-resident).
- *
- * The shadow arrays above total ~14.4 MB of 28-byte entries walked in
- * lockstep with guest loads, but for most games the overwhelming
- * majority of guest words are never stored through a PGXP-tracked
- * path: their entries stay exactly as PGXP_InitMem's memset left them
- * (all zero), and the 28-byte read on every guest load is pure L2/L3
- * traffic for a predetermined answer.  A clear bit proves the entry
- * is that memset zero, so the load path can synthesize the identical
- * result without touching the entry's cache line at all.
- *
- * Invariants that make this bit-exact rather than approximate:
- *   - The ONLY mutation paths into the arrays are WriteMem and
- *     WriteMem16 (InvalidStore funnels through WriteMem; ReadMem /
- *     GetPtr consumers in pgxp_cpu.c are read-only), and both set
- *     the bit before writing.
- *   - Validate()/MaskValidate() on an all-zero entry are no-ops
- *     (flags &= x on flags == 0), so the skipped array access could
- *     never have changed the entry either.
- *   - The bit is never cleared except by PGXP_InitMem, matching the
- *     lifetime of the memset.  Entries that were written once keep
- *     taking the full path even after invalidation - conservative,
- *     but the touched set (stack, vertex scratch) stays small.
- * PGXP state is not serialised in savestates, so there is nothing to
- * version. */
-static uint32_t MemEverWritten[(PGXP_MEM_TOTAL + 31) / 32];
+/* One bit per initialized shadow word. Reset and state restore retire all
+ * entries by clearing this bitmap. Copy-only readers can synthesize zero;
+ * pointer readers and halfword merges materialize a zero entry on first use.
+ * Full-word writes initialize the entire entry without reading the old bytes. */
+uint32_t PGXP_MemInitialized[(PGXP_MEM_TOTAL + 31) / 32];
+
+#ifdef HAVE_LIGHTREC
+/* Match Lightrec's temporary first64KB RAM window. Already consumed register
+ * and command copies remain independent owners when RAM is restored. */
+#define ISOLATED_RAM_WORDS (64 * 1024 / 4)
+static PGXP_value isolated_ram[ISOLATED_RAM_WORDS];
+static uint32_t isolated_initialized[ISOLATED_RAM_WORDS / 32];
+int PGXP_IsolatedRAMValid;
+
+void PGXP_CacheIsolation(int isolated)
+{
+	if (isolated)
+	{
+		PGXP_IsolatedRAMValid = 0;
+		if (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_MODE_GTE))
+		{
+			memcpy(isolated_ram, UserMem, sizeof(isolated_ram));
+			memcpy(isolated_initialized, PGXP_MemInitialized,
+				sizeof(isolated_initialized));
+			PGXP_IsolatedRAMValid = 1;
+		}
+	}
+	else
+	{
+		if (PGXP_IsolatedRAMValid)
+		{
+			memcpy(UserMem, isolated_ram, sizeof(isolated_ram));
+			memcpy(PGXP_MemInitialized, isolated_initialized,
+				sizeof(isolated_initialized));
+		}
+		else
+			/* Reset or a mode change retired the original timeline. */
+			memset(PGXP_MemInitialized, 0, sizeof(isolated_initialized));
+		PGXP_IsolatedRAMValid = 0;
+	}
+}
+
+void PGXP_InvalidateIsolatedRAMWord(uint32_t addr)
+{
+	uint32_t word = addr >> 2;
+	if (word < ISOLATED_RAM_WORDS)
+		isolated_initialized[word >> 5] &= ~((uint32_t)1 << (word & 31));
+}
+#endif
 
 const uint32_t UserMemOffset  = 0;
 const uint32_t ScratchOffset  = USER_MEM_COUNT;
@@ -63,31 +86,97 @@ const uint32_t InvalidAddress = USER_MEM_COUNT + SCRATCH_MEM_COUNT + REGISTER_ME
 
 static inline int MemBitTest(uint32_t paddr)
 {
-	return (MemEverWritten[paddr >> 5] >> (paddr & 31)) & 1;
+	return (PGXP_MemInitialized[paddr >> 5] >> (paddr & 31)) & 1;
 }
 
 static inline void MemBitSet(uint32_t paddr)
 {
-	MemEverWritten[paddr >> 5] |= (uint32_t)1 << (paddr & 31);
+	PGXP_MemInitialized[paddr >> 5] |= (uint32_t)1 << (paddr & 31);
 }
 
 /* Resolve an already-converted (packed) address to its entry.
  * Caller guarantees paddr < InvalidAddress. */
 static inline PGXP_value* PtrFromPacked(uint32_t paddr)
 {
+	PGXP_value *value;
 	if (paddr < ScratchOffset)
-		return &UserMem[paddr - UserMemOffset];
-	if (paddr < RegisterOffset)
-		return &ScratchMem[paddr - ScratchOffset];
-	return &RegisterMem[paddr - RegisterOffset];
+		value = &UserMem[paddr - UserMemOffset];
+	else if (paddr < RegisterOffset)
+		value = &ScratchMem[paddr - ScratchOffset];
+	else
+		value = &RegisterMem[paddr - RegisterOffset];
+	if (!MemBitTest(paddr))
+	{
+		memset(value, 0, sizeof(*value));
+		MemBitSet(paddr);
+	}
+	return value;
 }
 
 void PGXP_InitMem()
 {
-	memset(UserMem,     0, sizeof(UserMem));
-	memset(ScratchMem,  0, sizeof(ScratchMem));
-	memset(RegisterMem, 0, sizeof(RegisterMem));
-	memset(MemEverWritten, 0, sizeof(MemEverWritten));
+	/* Untouched entries are logically zero and initialized on pointer access.
+	 * State restore only clears this small bitmap, not the full shadow RAM. */
+	memset(PGXP_MemInitialized, 0, sizeof(PGXP_MemInitialized));
+#ifdef HAVE_LIGHTREC
+	PGXP_IsolatedRAMValid = 0;
+#endif
+}
+
+/* Retire exactly [first, end), preserving adjacent words in the bitmap. */
+static void InvalidateBitmapRange(uint32_t *bitmap, uint32_t first, uint32_t end)
+{
+	uint32_t first_bit = UINT32_MAX << (first & 31);
+	uint32_t last_bit = UINT32_MAX >> (31 - ((end - 1) & 31));
+	uint32_t first_index = first >> 5;
+	uint32_t last_index = (end - 1) >> 5;
+	if (first_index == last_index)
+		bitmap[first_index] &= ~(first_bit & last_bit);
+	else
+	{
+		bitmap[first_index] &= ~first_bit;
+		memset(&bitmap[first_index + 1], 0,
+			(last_index - first_index - 1) * sizeof(uint32_t));
+		bitmap[last_index] &= ~last_bit;
+	}
+}
+
+static void InvalidateRange(uint32_t first, uint32_t end)
+{
+	InvalidateBitmapRange(PGXP_MemInitialized, first, end);
+#ifdef HAVE_LIGHTREC
+	/* External DMA must not revive an overwritten owner when the isolated
+	 * window ends. CPU stores use the active window, not this DMA entry. */
+	if (PGXP_IsolatedRAMValid && first < ISOLATED_RAM_WORDS)
+		InvalidateBitmapRange(isolated_initialized, first,
+			end < ISOLATED_RAM_WORDS ? end : ISOLATED_RAM_WORDS);
+#endif
+}
+
+void PGXP_InvalidateRAM(uint32_t addr, uint32_t words, int decrement)
+{
+	uint32_t first = PGXP_ConvertAddress(addr);
+	if (!words || first >= USER_MEM_COUNT)
+		return;
+	if (words >= USER_MEM_COUNT)
+		InvalidateRange(0, USER_MEM_COUNT);
+	else if (decrement)
+	{
+		if (words <= first + 1)
+			InvalidateRange(first + 1 - words, first + 1);
+		else
+		{
+			InvalidateRange(0, first + 1);
+			InvalidateRange(USER_MEM_COUNT - (words - first - 1), USER_MEM_COUNT);
+		}
+	}
+	else if (words <= USER_MEM_COUNT - first)
+		InvalidateRange(first, first + words);
+	else
+	{
+		InvalidateRange(first, USER_MEM_COUNT);
+		InvalidateRange(0, words - (USER_MEM_COUNT - first));
+	}
 }
 
 /*  Playstation Memory Map (from Playstation doc by Joshua Walker)
@@ -131,37 +220,16 @@ uint32_t PGXP_ConvertAddress(uint32_t addr)
 {
 	uint32_t paddr = addr;
 
-	switch (paddr >> 24)
-	{
-	case 0x80:
-	case 0xa0:
-	case 0x00:
-		/* RAM further mirrored over 8MB */
-		paddr = ((paddr & 0x7FFFFF) % 0x200000) >> 2;
-		paddr = UserMemOffset + paddr;
-		break;
-	default:
-		if ((paddr >> 20) == 0x1f8)
-		{
-			if (paddr >= 0x1f801000)
-			{
-				paddr = ((paddr & 0xFFFF) - 0x1000) >> 2;
-				paddr = RegisterOffset + paddr;
-				break;
-			}
-			else
-			{
-				paddr = (paddr & 0x3FF) >> 2;
-				paddr = ScratchOffset + paddr;
-				break;
-			}
-		}
-
-		paddr = InvalidAddress;
-		break;
-	}
-
-	return paddr;
+	/* KSEG0 and KSEG1 alias the physical bus; other segments do not. */
+	if ((paddr & 0xc0000000u) == 0x80000000u)
+		paddr &= 0x1fffffffu;
+	if (paddr < 0x00800000u)
+		return UserMemOffset + ((paddr & 0x1fffffu) >> 2);
+	if (paddr >= 0x1f800000u && paddr < 0x1f800400u)
+		return ScratchOffset + ((paddr - 0x1f800000u) >> 2);
+	if (paddr >= 0x1f801000u && paddr < 0x1f803000u)
+		return RegisterOffset + ((paddr - 0x1f801000u) >> 2);
+	return InvalidAddress;
 }
 
 PGXP_value* GetPtr(uint32_t addr)
@@ -178,6 +246,13 @@ PGXP_value* ReadMem(uint32_t addr)
 	return GetPtr(addr);
 }
 
+void PGXP_InvalidateMem(uint32_t addr)
+{
+	uint32_t paddr = PGXP_ConvertAddress(addr);
+	if (paddr < InvalidAddress)
+		PGXP_MemInitialized[paddr >> 5] &= ~((uint32_t)1 << (paddr & 31));
+}
+
 void ValidateAndCopyMem(PGXP_value* dest, uint32_t addr, uint32_t value)
 {
 	uint32_t paddr = PGXP_ConvertAddress(addr);
@@ -187,10 +262,9 @@ void ValidateAndCopyMem(PGXP_value* dest, uint32_t addr, uint32_t value)
 
 		if (!MemBitTest(paddr))
 		{
-			/* Entry is provably the InitMem memset zero: Validate()
-			 * on a zero entry is a no-op and the copy would yield
-			 * all-zero.  Synthesize that without touching the
-			 * entry's cache line. */
+			/* Retired entries are logically zero. Synthesize that
+			 * without reading stale shadow bytes or touching their
+			 * cache line. */
 			memset(dest, 0, sizeof(*dest));
 			return;
 		}
@@ -251,6 +325,7 @@ void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int s
 		*dest = *pMem;
 
 		/* if high word then shift */
+		dest->flags &= ~PGXP_COLOR;
 		if ((addr % 4) == 2)
 		{
 			dest->x = dest->y;
@@ -259,7 +334,7 @@ void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int s
 		}
 
 		/* truncate value */
-		dest->y = (dest->x < 0) ? -1.f * sign : 0.f;/* 0.f; */
+		dest->y = (sign && (value & 0x8000u)) ? -1.f : 0.f;
 		dest->hFlags = 0;
 		dest->value = value;
 		dest->compFlags[1] = VALID;	/* iCB: High word is valid, just 0 */
@@ -287,11 +362,7 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 
 	if (paddr < InvalidAddress)
 	{
-		/* The halfword merge below reads the entry's other half, so
-		 * the bit must be set even though a never-written entry is
-		 * still all-zero at this point - reading zeros from the
-		 * array here is exactly the pre-bitmap behaviour. */
-		MemBitSet(paddr);
+		/* Materialize both halves before preserving the untouched half. */
 		dest = PtrFromPacked(paddr);
 	}
 
@@ -324,6 +395,7 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 		}
 
 		dest->value = pVal.d;
+		dest->flags &= ~PGXP_COLOR;
 
 		/* overwrite z/w if valid */
 		if (src->compFlags[2] == VALID)

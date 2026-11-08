@@ -328,8 +328,8 @@ bool psx_pgxp_gl_line_expansion;
 
 static void apply_pgxp_settings(void)
 {
-   PGXP_SetModes(psx_pgxp_mode | psx_pgxp_vertex_caching |
-         psx_pgxp_texture_correction | psx_pgxp_nclip);
+   PGXP_SetModes(psx_pgxp_mode ? psx_pgxp_mode | psx_pgxp_vertex_caching |
+         psx_pgxp_texture_correction | psx_pgxp_nclip : PGXP_MODE_NONE);
 }
 
 static void apply_game_compatibility_settings(void)
@@ -4017,7 +4017,14 @@ int StateAction(StateMem *sm, int load, int data_only)
    };
 
 
-   int ret = MDFNSS_StateAction(sm, load, data_only, StateRegs, "MAIN");
+   int ret;
+
+   /* Shadows are not serialized. Retire the previous timeline only after
+    * the state header has been accepted, before native state can change. */
+   if (load && PGXP_GetModes())
+      PGXP_Init();
+
+   ret = MDFNSS_StateAction(sm, load, data_only, StateRegs, "MAIN");
 
    /* Call SetDisc() BEFORE we load CDC state, since SetDisc() has emulation side effects.
     * We might want to clean this up in the future. */
@@ -7613,10 +7620,6 @@ bool retro_serialize(void *data, size_t size)
 
 bool retro_unserialize(const void *data, size_t size)
 {
-   /* The fog sidecar ring is keyed by a push counter that restarts with the
-    * loaded state while counts inside RAM shadows survive; stale slots must
-    * not satisfy post-load lookups. */
-   PGXP_GTE_InvalidateFogRing();
    StateMem st;
    bool okay;
 

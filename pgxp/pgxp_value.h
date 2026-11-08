@@ -28,6 +28,9 @@
 #ifndef _PGXP_VALUE_H_
 #define _PGXP_VALUE_H_
 
+#include <math.h>
+#include <string.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -79,11 +82,13 @@ extern "C" {
 #define VALID_01  (VALID_0 | VALID_1)
 #define VALID_012  (VALID_0 | VALID_1 | VALID_2)
 #define VALID_ALL  (VALID_0 | VALID_1 | VALID_2 | VALID_3)
-#define INV_VALID_ALL  (ALL ^ VALID_ALL)
+/* RGB channels are not packed coordinate halves or a geometry depth. */
+#define PGXP_COLOR (1u << 25)
+#define INV_VALID_ALL  (ALL ^ (VALID_ALL | PGXP_COLOR))
 //} PGXP_value_flags;
 
         static const PGXP_value PGXP_value_invalid_address = { 0.f, 0.f, 0.f, {0}, 0, 0, INVALID_ADDRESS, 0, 0 };
-        static const PGXP_value PGXP_value_zero = { 0.f, 0.f, 0.f, {0}, 0, VALID_ALL, 0, 0, 0 };
+        static const PGXP_value PGXP_value_zero = { 0.f, 0.f, 0.f, {VALID_01}, 0, 0, 0, 0, 0 };
 
 	void	SetValue(PGXP_value *pV, uint32_t psxV);
 	void	MakeValid(PGXP_value *pV, uint32_t psxV);
@@ -96,21 +101,46 @@ extern "C" {
 	static inline void Validate(PGXP_value *pV, uint32_t psxV)
 	{
 		/* assume pV is not NULL */
-		pV->flags &= (pV->value == psxV) ? ALL : INV_VALID_ALL;
+		if (pV->value != psxV)
+			pV->flags &= INV_VALID_ALL;
 	}
 
 	static inline void MaskValidate(PGXP_value *pV, uint32_t psxV, uint32_t mask, uint32_t validMask)
 	{
 		/* assume pV is not NULL */
-		pV->flags &= ((pV->value & mask) == (psxV & mask)) ? ALL : (ALL ^ (validMask));
+		if ((pV->value & mask) != (psxV & mask))
+			pV->flags &= ALL ^ (validMask | PGXP_COLOR);
 	}
 
 	uint32_t		ValueToTolerance(PGXP_value *pV, uint32_t psxV, float tolerance);
 
-	double f16Sign(double in);
-	double f16Unsign(double in);
+	/* Wrap signed 16.16 values without aliasing or overflowing a conversion.
+	 * Keep these small arithmetic helpers visible to their hot callers. */
+	static inline double f16Sign(double in)
+	{
+		uint32_t u;
+		int32_t s;
+		if (!(fabs(in) < 140737488355328.0))
+		{
+			if (!isfinite(in))
+				return 0.0;
+			in = fmod(in, 65536.0);
+		}
+		u = (uint32_t)(int64_t)(in * 65536.0);
+		memcpy(&s, &u, sizeof(s));
+		return (double)s / 65536.0;
+	}
+
+	static inline double f16Unsign(double in)
+	{
+		return in >= 0.0 ? in : in + 65536.0;
+	}
+
 	double fu16Trunc(double in);
-	double f16Overflow(double in);
+	static inline double f16Overflow(double in)
+	{
+		return floor(in / 65536.0);
+	}
 
 	typedef union
 	{

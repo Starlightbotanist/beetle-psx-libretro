@@ -195,13 +195,19 @@ struct lightrec_compiled {
 #define CODE_PAGE_SHIFT	12
 #define CODE_NB_PAGES	(0x200000 >> CODE_PAGE_SHIFT)
 
+enum lightrec_load_target {
+	LIGHTREC_LOAD_GPR,
+	LIGHTREC_LOAD_TEMP,
+	LIGHTREC_LOAD_UNUSED,
+};
+
 struct lightrec_state {
 	struct lightrec_registers regs;
 	u32 temp_reg;
 	u32 curr_pc;
 	u32 next_pc;
 	uintptr_t wrapper_regs[NUM_TEMPS];
-	u8 in_delay_slot_n;
+	u8 load_target;
 	u32 current_cycle;
 	u32 target_cycle;
 	u32 exit_flags;

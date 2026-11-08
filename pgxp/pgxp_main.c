@@ -17,29 +17,34 @@ void PGXP_Init(void)
 	PGXP_InitMem();
 	PGXP_InitCPU();
 	PGXP_InitGTE();
+	PGXP_InitGPU();
+	PGXP_GTE_ResetColorCount();
 }
 
 void PGXP_Shutdown(void)
 {
 	gMode = 0;
+	PGXP_InitMem();
 	PGXP_FreeVertexCache();
 }
 
 /* Apply a mode transition.  If the PGXP_VERTEX_CACHE bit is being
  * cleared (user toggled the vertex-cache core option off at runtime),
- * the 448 MB heap allocation backing the cache is freed immediately
+ * the 256 MiB heap allocation backing the cache is freed immediately
  * rather than waiting for retro_deinit. */
 static void apply_modes(uint32_t new_modes)
 {
 	uint32_t old_modes = gMode;
+	uint32_t tracking_modes = PGXP_MODE_MEMORY | PGXP_MODE_CPU | PGXP_MODE_GTE |
+		PGXP_TEXTURE_CORRECTION;
+
+	/* Disabled tracking cannot describe intervening native writes. Texture
+	 * correction also changes whether producers retain depth or unit W. */
+	if ((old_modes ^ new_modes) & tracking_modes)
+		PGXP_Init();
 	gMode = new_modes;
 	if ((old_modes & PGXP_VERTEX_CACHE) && !(new_modes & PGXP_VERTEX_CACHE))
 		PGXP_FreeVertexCache();
-	/* Off to on: TransformXY skips the vertex push entirely while gMode is
-	 * zero, so the screen-XY FIFO holds entries from before PGXP was last
-	 * disabled. Retire them rather than let a stale one match by chance. */
-	if (!old_modes && new_modes)
-		PGXP_InvalidateVertexFIFO();
 }
 
 void PGXP_SetModes(uint32_t modes)

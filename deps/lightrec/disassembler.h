@@ -28,6 +28,7 @@
 #define LIGHTREC_NO_INVALIDATE	BIT(3)
 #define LIGHTREC_NO_MASK	BIT(4)
 #define LIGHTREC_LOAD_DELAY	BIT(5)
+#define LIGHTREC_DISCARD_LOAD BIT(10)
 
 /* I/O mode for load/store opcodes */
 #define LIGHTREC_IO_MODE_LSB	6
@@ -329,9 +330,20 @@ static inline _Bool op_flag_no_mask(u32 flags)
 	return OPT_FLAG_IO && (flags & LIGHTREC_NO_MASK);
 }
 
+static inline _Bool opcode_is_addu_identity(union code c)
+{
+	return c.i.op == OP_SPECIAL && c.r.op == OP_SPECIAL_ADDU &&
+		c.r.rt == 0 && c.r.rd != 0 && c.r.rd != c.r.rs;
+}
+
 static inline _Bool op_flag_load_delay(u32 flags)
 {
 	return OPT_HANDLE_LOAD_DELAYS && (flags & LIGHTREC_LOAD_DELAY);
+}
+
+static inline _Bool op_flag_load_discard(u32 flags)
+{
+	return OPT_HANDLE_LOAD_DELAYS && (flags & LIGHTREC_DISCARD_LOAD);
 }
 
 static inline _Bool op_flag_emulate_branch(u32 flags)

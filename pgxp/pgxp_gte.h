@@ -39,6 +39,8 @@ extern PGXP_value* GTE_data_reg;
 extern PGXP_value* GTE_ctrl_reg;
 
 void PGXP_InitGTE();
+/* Only after every CPU, memory, GTE and GPU shadow owner has been retired. */
+void PGXP_GTE_ResetColorCount(void);
 
 // -- GTE functions
 // Transforms
@@ -111,6 +113,7 @@ void	PGXP_InvalidateVertexFIFO(void);
 
 void	PGXP_GTE_LWC2(uint32_t instr, uint32_t rtVal, uint32_t addr);	// copy memory to GTE reg
 void	PGXP_GTE_SWC2(uint32_t instr, uint32_t rtVal, uint32_t addr);	// copy GTE reg to memory
+void PGXP_GTE_ReadDelayed(uint32_t instr, uint32_t value);
 
 /* --- Transform-range instrumentation ---------------------------------
  *
