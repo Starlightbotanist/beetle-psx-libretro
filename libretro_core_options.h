@@ -1182,6 +1182,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled"
    },
    {
+      BEETLE_OPT(pgxp_depth_buffer),
+      "PGXP Depth Buffer (Restart)",
+      NULL,
+      "Preserve matching transform precision and test opaque textured 3D geometry against PGXP depth in OpenGL and Vulkan. Can reduce overlapping polygons and disappearing surfaces. Transparent and 2D drawing retain their normal order. Requires PGXP Perspective Correct Texturing. May affect games that rely on polygon drawing order.",
+      NULL,
+      "pgxp",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled"
+   },
+   {
       BEETLE_OPT(display_internal_fps),
       "Display Internal FPS",
       NULL,

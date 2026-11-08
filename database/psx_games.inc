@@ -9686,7 +9686,7 @@ PSX_GAME("68768", "PAPX-90077", "PAPX 90078, PAPX 90077", "Demos", "", "Spyro th
 PSX_GAME("68768", "PAPX-90078", "PAPX 90078, PAPX 90077", "Demos", "", "Spyro the Dragon (Japan) (Demo)")
 PSX_GAME_COMPAT("11432", "SCPS-10083", "SCPS 10083, SCPS 45395", "Games", "", "Spyro the Dragon (Japan, Asia) (Shokai Genteiban)", PSX_COMPAT_PGXP_MEM_CPU | PSX_COMPAT_PGXP_PCT_OFF)
 PSX_GAME_COMPAT("11432", "SCPS-45395", "SCPS 10083, SCPS 45395", "Games", "", "Spyro the Dragon (Japan, Asia) (Shokai Genteiban)", PSX_COMPAT_PGXP_MEM_CPU | PSX_COMPAT_PGXP_PCT_OFF)
-PSX_GAME_COMPAT("576", "SCUS-94228", "SCUS-94228, SCUS-94228CE", "Games", "", "Spyro the Dragon (USA)", PSX_COMPAT_PGXP_MEM_CPU | PSX_COMPAT_PGXP_PCT_OFF)
+PSX_GAME_COMPAT("576", "SCUS-94228", "SCUS-94228, SCUS-94228CE", "Games", "", "Spyro the Dragon (USA)", PSX_COMPAT_PGXP_MEM_CPU | PSX_COMPAT_PGXP_NORMALIZE_DEPTH)
 PSX_GAME("133875", "", "", "Preproduction", "", "Spyro the Dragon (USA) (Beta) (1998-04-21)")
 PSX_GAME("88072", "", "", "Preproduction", "", "Spyro the Dragon (USA) (Beta) (1998-06-15)")
 PSX_GAME("88201", "", "", "Preproduction", "", "Spyro the Dragon (USA) (Beta) (1998-07-19)")

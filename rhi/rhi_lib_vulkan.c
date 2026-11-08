@@ -13,6 +13,7 @@
 
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
 #include "rhi_interpolation.h"
+#include "rhi_pgxp_depth.h"
 #include "beetle_psx_globals.h"
 #include "rhi_defer.h"
 #include "tt_trace.h"
@@ -30,6 +31,17 @@
 #  define RHI_INLINE static __inline__ __attribute__((always_inline))
 #else
 #  define RHI_INLINE static
+#endif
+
+/* Keep infrequent boundaries out of the hot draw paths. */
+#ifndef RHI_NOINLINE
+#if defined(_MSC_VER)
+#define RHI_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__)
+#define RHI_NOINLINE __attribute__((noinline))
+#else
+#define RHI_NOINLINE
+#endif
 #endif
 
 /* Folded from parallel-psx/volk/volk.h ((c) 2018 Arseny Kapoulkine, MIT). */
@@ -90,6 +102,7 @@ extern int   psx_black_setup;    /* NTSC pedestal mismatch: 0 none, 1 lifted, 2 
 extern retro_log_printf_t log_cb;
 extern int   psx_hdr_overbright_hot;   /* additive/sub source: 0 clamped, 1 hot */
 extern unsigned int psx_pgxp_mode;
+extern bool psx_pgxp_depth_buffer;
 extern int   psx_pgxp_color;           /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
 /* "HDR True Multi-Pass Blending": 1 routes non-masked subtractive prims
  * through the per-primitive programmable-blend path; 0 keeps them on
@@ -117,6 +130,7 @@ extern PFN_vkCmdBlitImage vkCmdBlitImage;
 extern PFN_vkCmdCopyImage vkCmdCopyImage;
 extern PFN_vkCmdClearColorImage vkCmdClearColorImage;
 extern PFN_vkCmdClearDepthStencilImage vkCmdClearDepthStencilImage;
+extern PFN_vkCmdClearAttachments vkCmdClearAttachments;
 extern PFN_vkCmdCopyBuffer vkCmdCopyBuffer;
 extern PFN_vkCmdCopyBufferToImage vkCmdCopyBufferToImage;
 extern PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer;
@@ -276,6 +290,7 @@ static void volkGenLoadDevice(void* context,
    vkCmdCopyImage = (PFN_vkCmdCopyImage)load(context, "vkCmdCopyImage");
    vkCmdClearColorImage = (PFN_vkCmdClearColorImage)load(context, "vkCmdClearColorImage");
    vkCmdClearDepthStencilImage = (PFN_vkCmdClearDepthStencilImage)load(context, "vkCmdClearDepthStencilImage");
+   vkCmdClearAttachments = (PFN_vkCmdClearAttachments)load(context, "vkCmdClearAttachments");
    vkCmdCopyBuffer = (PFN_vkCmdCopyBuffer)load(context, "vkCmdCopyBuffer");
    vkCmdCopyBufferToImage = (PFN_vkCmdCopyBufferToImage)load(context, "vkCmdCopyBufferToImage");
    vkCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer)load(context, "vkCmdCopyImageToBuffer");
@@ -380,6 +395,7 @@ PFN_vkCmdBlitImage vkCmdBlitImage;
 PFN_vkCmdCopyImage vkCmdCopyImage;
 PFN_vkCmdClearColorImage vkCmdClearColorImage;
 PFN_vkCmdClearDepthStencilImage vkCmdClearDepthStencilImage;
+PFN_vkCmdClearAttachments vkCmdClearAttachments;
 PFN_vkCmdCopyBuffer vkCmdCopyBuffer;
 PFN_vkCmdCopyBufferToImage vkCmdCopyBufferToImage;
 PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer;
@@ -5804,6 +5820,16 @@ static void render_state_init(struct RenderState *s)
  * scope: the {}-zeroed POD_VEC members and scissor_invariant = false default
  * move into opaque_queue_init, which the Renderer initialiser calls. The
  * backing storage is freed in ~Renderer (already explicit). */
+/* Queue boundaries retain the policy of already encoded vertices. Keeping
+ * their draw ranges in one pass avoids storing/reloading color at each clear. */
+typedef struct PGXPDepthGroup
+{
+   unsigned opaque_end;
+   unsigned textured_end;
+   bool active;
+} PGXPDepthGroup;
+POD_VEC_DECLARE(PGXPDepthGroupVec, PGXPDepthGroup);
+
 struct OpaqueQueue
 {
    /* Every queued primitive's vertices, once, in the order pushed; the
@@ -5821,6 +5847,7 @@ struct OpaqueQueue
 
    /* Blended in order: one per triangle */
    SemiTransparentStateVec semi_transparent_state;
+   PGXPDepthGroupVec depth_groups;
 
    Rect2DVec scaled_resolves;
    Rect2DVec unscaled_resolves;
@@ -5846,6 +5873,7 @@ static void opaque_queue_init(struct OpaqueQueue *q)
    OQ_VEC_ZERO(q->opaque_textured_scissor);
    OQ_VEC_ZERO(q->semi_transparent_opaque_scissor);
    OQ_VEC_ZERO(q->semi_transparent_state);
+   OQ_VEC_ZERO(q->depth_groups);
    OQ_VEC_ZERO(q->scaled_resolves);
    OQ_VEC_ZERO(q->unscaled_resolves);
    OQ_VEC_ZERO(q->scaled_texture_reads);
@@ -6136,6 +6164,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
 
          OpaqueQueue queue;
          unsigned primitive_index;
+         rhi_pgxp_depth_state pgxp_depth;
          bool render_pass_is_feedback;
          float last_uv_scale_x, last_uv_scale_y;
 
@@ -6269,7 +6298,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_dispatch(Renderer *self,
          PrimitiveInfoVec *scissors,
          bool textured);
-   static void renderer_render_opaque_primitives(Renderer *self);
+   static void renderer_render_opaque_primitives(Renderer *self,
+         PrimitiveInfoVec *scissors);
    static void renderer_render_semi_transparent_primitives(Renderer *self);
    static void renderer_semi_transparent_set_state(Renderer *self,
          const SemiTransparentState *state);
@@ -6310,6 +6340,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          const TextureWindow *window);
    static void renderer_reset_scissor_queue(Renderer *self);
    static void renderer_reset_queue(Renderer *self);
+   static void renderer_prepare_pgxp_depth(Renderer *self, const Vertex *vertices,
+         unsigned count);
    static void renderer_preserve_palette(Renderer *self,
          unsigned x, unsigned y, unsigned width);
    static void renderer_ensure_command_buffer(Renderer *self)
@@ -6369,7 +6401,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
 
       commandbuffer_set_opaque_state(cbh_get(&self->cmd));
       commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
-      commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
+      commandbuffer_set_depth_compare(cbh_get(&self->cmd), self->pgxp_depth.active ?
+            VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS);
       renderer_set_opaque_primitive_spec_constants(self, TransMode_SemiTransOpaque);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
       renderer_set_interpolant_attribs(cbh_get(&self->cmd));
@@ -6381,14 +6414,15 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       renderer_dispatch(self, scissors, true);
    }
 
-   static void renderer_render_opaque_texture_primitives(Renderer *self){
-      PrimitiveInfoVec *scissors = &self->queue.opaque_textured_scissor;
+   static void renderer_render_opaque_texture_primitives(Renderer *self,
+         PrimitiveInfoVec *scissors, bool depth){
       if (PrimitiveInfoVec_empty(scissors))
          return;
 
       commandbuffer_set_opaque_state(cbh_get(&self->cmd));
       commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
-      commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
+      commandbuffer_set_depth_compare(cbh_get(&self->cmd), depth ?
+            VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS);
       renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
       renderer_set_interpolant_attribs(cbh_get(&self->cmd));
@@ -7496,6 +7530,7 @@ static void renderer_clear_rect(Renderer *self,
       const TTRect *rect,
       uint32_t fb_color)
 {
+   renderer_prepare_pgxp_depth(self, NULL, 0);
    if (self->texture_tracking_enabled) {
       /* fb_color is 0x00BBGGRR (8-bit channels, low 3 bits ignored). Pack to
        * ABGR1555 (R in the low bits, mask/alpha bit cleared) to match how the
@@ -10164,7 +10199,9 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    for (i = 0; i < count; i++) {
       output[i].x = x[i];
       output[i].y = y[i];
-      output[i].z = z;
+      output[i].z = self->pgxp_depth.active ? vertices[i].w / 65536.f : z;
+      if (self->pgxp_depth.active && vertices[i].w > self->pgxp_depth.maximum)
+         self->pgxp_depth.maximum = vertices[i].w;
       output[i].w = vertices[i].w;
       output[i].color[0] = vertices[i].cf[0];
       output[i].color[1] = vertices[i].cf[1];
@@ -10674,6 +10711,64 @@ static void renderer_upscaler_pass(Renderer *self, const psx_upscaler_geometry_t
          VK_ACCESS_SHADER_READ_BIT);
 }
 
+static RHI_NOINLINE void renderer_split_pgxp_depth(Renderer *self,
+      bool active, unsigned count)
+{
+   PGXPDepthGroupVec *groups = &self->queue.depth_groups;
+   /* Keep projection changes on the fresh-pass fast-clear path. */
+   if (active != self->pgxp_depth.active &&
+       count >= 3 && vkCmdClearAttachments &&
+       self->atlas.renderpass.inside && !self->render_pass_is_feedback &&
+       !self->render_state.mask_test &&
+       self->render_state.semi_transparent == SemiTransparentMode_None &&
+       ClearCandidateVec_empty(&self->queue.clear_candidates) &&
+       !BufferVertexVec_empty(&self->queue.vertices) &&
+       PGXPDepthGroupVec_size(groups) < 256 &&
+       PGXPDepthGroupVec_grow_by_one(groups))
+   {
+      PGXPDepthGroup *group = &groups->items[groups->count++];
+      group->opaque_end = PrimitiveInfoVec_size(&self->queue.opaque_scissor);
+      group->textured_end = PrimitiveInfoVec_size(&self->queue.opaque_textured_scissor);
+      group->active = self->pgxp_depth.active;
+      self->primitive_index = 0;
+      self->pgxp_depth.maximum = 0.f;
+   }
+   else
+      fbatlas_flush_render_pass(&self->atlas);
+}
+
+
+static void renderer_prepare_pgxp_depth(Renderer *self, const Vertex *vertices,
+      unsigned count)
+{
+   /* Feedback uses a separate subpass. Finish earlier groups before
+    * admitting it, including when the depth policy itself stays off. */
+   if (!PGXPDepthGroupVec_empty(&self->queue.depth_groups) &&
+       (count < 3 || self->render_state.mask_test ||
+        self->render_state.semi_transparent != SemiTransparentMode_None))
+      fbatlas_flush_render_pass(&self->atlas);
+
+   if (psx_pgxp_depth_buffer || self->pgxp_depth.active)
+   {
+      float w[4];
+      float maximum = 0.f;
+      unsigned i;
+      bool active;
+      for (i = 0; i < count && i < 4; i++)
+         w[i] = vertices[i].w;
+      active = rhi_pgxp_depth_valid(w, count,
+            psx_pgxp_depth_buffer &&
+            self->render_state.texture_mode != TextureMode_None &&
+            self->render_state.semi_transparent == SemiTransparentMode_None &&
+            !self->render_state.mask_test, &maximum);
+      if (rhi_pgxp_depth_flush(&self->pgxp_depth, active, maximum))
+         renderer_split_pgxp_depth(self, active, count);
+      self->pgxp_depth.active = active;
+      if (!active)
+         self->pgxp_depth.maximum = 0.f;
+   }
+}
+
 static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
 {
    HdTextureHandle hd_texture_index;
@@ -10682,6 +10777,7 @@ static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
       return;
 
    ih_reset(&self->last_scanout);
+   renderer_prepare_pgxp_depth(self, vertices, 3);
    renderer_upscaler_keep(self, vertices, 3);
 
    hd_texture_index = hd_handle_make_none();
@@ -10736,6 +10832,7 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices, bool poly
       return;
 
    ih_reset(&self->last_scanout);
+   renderer_prepare_pgxp_depth(self, vertices, polygon ? 4 : 0);
    if (!line_vertices)
       renderer_upscaler_keep(self, vertices, 4);
 
@@ -11032,6 +11129,53 @@ static bool renderer_upload_queued_vertices(Renderer *self)
    return true;
 }
 
+static RHI_NOINLINE void renderer_render_depth_groups(Renderer *self)
+{
+   unsigned opaque_start = 0, textured_start = 0;
+   unsigned i, count = PGXPDepthGroupVec_size(&self->queue.depth_groups);
+   bool drawn = false;
+   for (i = 0; i <= count; i++)
+   {
+      PrimitiveInfoVec opaque = self->queue.opaque_scissor;
+      PrimitiveInfoVec textured = self->queue.opaque_textured_scissor;
+      PGXPDepthGroup last;
+      const PGXPDepthGroup *group;
+      last.opaque_end = PrimitiveInfoVec_size(&opaque);
+      last.textured_end = PrimitiveInfoVec_size(&textured);
+      last.active = self->pgxp_depth.active;
+      group = i < count ? PGXPDepthGroupVec_at(&self->queue.depth_groups, i) : &last;
+      opaque.count = group->opaque_end - opaque_start;
+      textured.count = group->textured_end - textured_start;
+      if (opaque_start)
+         opaque.items += opaque_start;
+      if (textured_start)
+         textured.items += textured_start;
+      if (opaque.count || textured.count)
+      {
+         if (drawn)
+         {
+            VkClearAttachment attachment = {0};
+            VkClearRect rect;
+            attachment.aspectMask = format_to_aspect_mask(
+                  device_get_default_depth_format(self->device));
+            attachment.clearValue.depthStencil.depth = 1.f;
+            rect.rect = self->queue.default_scissor;
+            rect.baseArrayLayer = 0;
+            rect.layerCount = 1;
+            /* Core Vulkan clears execute in rasterization order and ignore
+             * the current pipeline's scissor and depth write mask. */
+            vkCmdClearAttachments(commandbuffer_get_command_buffer(cbh_get(&self->cmd)),
+                  1, &attachment, 1, &rect);
+         }
+         renderer_render_opaque_primitives(self, &opaque);
+         renderer_render_opaque_texture_primitives(self, &textured, group->active);
+         drawn = true;
+      }
+      opaque_start = group->opaque_end;
+      textured_start = group->textured_end;
+   }
+}
+
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpasses[2];
@@ -11112,8 +11256,14 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    { const bool staged = renderer_upload_queued_vertices(self);
    if (staged)
    {
-      renderer_render_opaque_primitives(self);
-      renderer_render_opaque_texture_primitives(self);
+      if (!PGXPDepthGroupVec_empty(&self->queue.depth_groups))
+         renderer_render_depth_groups(self);
+      else
+      {
+         renderer_render_opaque_primitives(self, &self->queue.opaque_scissor);
+         renderer_render_opaque_texture_primitives(self,
+               &self->queue.opaque_textured_scissor, self->pgxp_depth.active);
+      }
       renderer_render_semi_transparent_opaque_texture_primitives(self);
    }
    if (self->render_pass_is_feedback)
@@ -11289,8 +11439,8 @@ static void renderer_dispatch(Renderer *self,
    commandbuffer_draw_indexed(cbh_get(&self->cmd), 3 * to_draw, 3 * last_draw);
 }
 
-static void renderer_render_opaque_primitives(Renderer *self){
-   PrimitiveInfoVec *scissors = &self->queue.opaque_scissor;
+static void renderer_render_opaque_primitives(Renderer *self,
+      PrimitiveInfoVec *scissors){
    if (PrimitiveInfoVec_empty(scissors))
       return;
 
@@ -12217,6 +12367,7 @@ static void renderer_fini(Renderer *self)
    PrimitiveInfoVec_free_storage(&self->queue.opaque_textured_scissor);
    PrimitiveInfoVec_free_storage(&self->queue.semi_transparent_opaque_scissor);
    SemiTransparentStateVec_free_storage(&self->queue.semi_transparent_state);
+   PGXPDepthGroupVec_free_storage(&self->queue.depth_groups);
    Rect2DVec_free_storage(&self->queue.scaled_resolves);
    Rect2DVec_free_storage(&self->queue.unscaled_resolves);
    Rect2DVec_free_storage(&self->queue.scaled_texture_reads);
@@ -12243,10 +12394,12 @@ static void renderer_reset_scissor_queue(Renderer *self)
 
 static void renderer_reset_queue(Renderer *self)
 {
+   self->pgxp_depth.maximum = 0.f;
    BufferVertexVec_clear(&self->queue.vertices);
    PrimitiveInfoVec_clear(&self->queue.opaque_scissor);
    PrimitiveInfoVec_clear(&self->queue.opaque_textured_scissor);
    SemiTransparentStateVec_clear(&self->queue.semi_transparent_state);
+   PGXPDepthGroupVec_clear(&self->queue.depth_groups);
    PrimitiveInfoVec_clear(&self->queue.semi_transparent_opaque_scissor);
    ClearCandidateVec_clear(&self->queue.clear_candidates);
    Rect2DVec_clear(&self->queue.scaled_texture_reads);
@@ -16017,18 +16170,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
     * (see the pipeline warm-up below). Everything it points at is
     * immutable once made, so a thread other than the renderer's can build
     * from it. */
-   /* Kept out of the flush that calls it: a pipeline that has to be made
-    * is the cold path. */
-#ifndef RHI_NOINLINE
-#if defined(_MSC_VER)
-#define RHI_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__)
-#define RHI_NOINLINE __attribute__((noinline))
-#else
-#define RHI_NOINLINE
-#endif
-#endif
-
    typedef struct PipelineDesc
    {
       Device                  *device;
