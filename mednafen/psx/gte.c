@@ -1140,11 +1140,9 @@ static INLINE void MultiplyMatrixByVector(uint32_t mx, uint32_t v, uint32_t cv, 
    MAC_to_IR(lm);
 }
 
-/* precise_z_acc receives the raw 44-bit Z accumulator, i.e. the value that
- * feeds SZ3 *before* the >>12 truncation and the Lm_D saturation.  It is the
- * exact view-space Z in 1/4096 units and exists solely for the PGXP shadow
- * path; the architectural SZ3 written below is untouched. */
-static INLINE void MultiplyMatrixByVector_PT(uint32_t mx, uint32_t v, uint32_t cv, uint32_t sf, int lm, int64_t *precise_z_acc)
+/* Retain the raw 44-bit transform for the PGXP shadow. The architectural
+ * MAC, IR and SZ results retain their original rounding and saturation. */
+static INLINE void MultiplyMatrixByVector_PT(uint32_t mx, uint32_t v, uint32_t cv, uint32_t sf, int lm, int64_t precise_acc[3])
 {
    int64_t tmp[3];
    unsigned i,m;
@@ -1196,7 +1194,12 @@ static INLINE void MultiplyMatrixByVector_PT(uint32_t mx, uint32_t v, uint32_t c
    SET_Z_FIFO(2, Z_FIFO(3));
    SET_Z_FIFO(3, Lm_D(tmp[2] >> 12, true));
 
-   *precise_z_acc = tmp[2];
+   precise_acc[2] = tmp[2];
+   if (PGXP_GetModes() & PGXP_DEPTH_BUFFER)
+   {
+      precise_acc[0] = tmp[0];
+      precise_acc[1] = tmp[1];
+   }
 }
 
 #define DECODE_FIELDS							\
@@ -1267,7 +1270,21 @@ static INLINE void check_mac_overflow(int64_t value)
       FLAGS |= 1 << 16;
 }
 
-static INLINE void TransformXY(int64_t h_div_sz, float precise_h_div_sz, float precise_z)
+/* Depth testing needs a coherent projection plane. Keep the fractional
+ * matrix result for X/Y as well as Z, while retaining native MAC wrapping
+ * and IR saturation. Architectural GTE state is never changed. */
+static INLINE float pgxp_precise_ir(int64_t acc, unsigned sf, int lm, int native_ir)
+{
+   double value;
+   if ((acc >> sf) < INT32_MIN || (acc >> sf) > INT32_MAX)
+      return (float)native_ir;
+   value = (double)acc * (sf ? 1.0 / 4096.0 : 1.0);
+   if (value > 32767.0) value = 32767.0;
+   if (value < (lm ? 0.0 : -32768.0)) value = lm ? 0.0 : -32768.0;
+   return (float)value;
+}
+
+static INLINE void TransformXY(int64_t h_div_sz, float precise_h_div_sz, float precise_z, const int64_t precise_acc[3], unsigned sf, int lm)
 {
 
    /* Widescreen-hack horizontal aspect scale, as Q16 fixed point
@@ -1340,8 +1357,16 @@ static INLINE void TransformXY(int64_t h_div_sz, float precise_h_div_sz, float p
       float aspect     = widescreen_hack ? (float)aspect_q16 / 65536.0f : 1.0f;
 
       /* Increased precision calculation (sub-pixel precision) */
-      float precise_x  = fofx + ((float)IR1 * precise_h_div_sz) * aspect;
-      float precise_y  = fofy + ((float)IR2 * precise_h_div_sz);
+      float precise_ir1 = (float)IR1;
+      float precise_ir2 = (float)IR2;
+      float precise_x, precise_y;
+      if (PGXP_GetModes() & PGXP_DEPTH_BUFFER)
+      {
+         precise_ir1 = pgxp_precise_ir(precise_acc[0], sf, lm, IR1);
+         precise_ir2 = pgxp_precise_ir(precise_acc[1], sf, lm, IR2);
+      }
+      precise_x = fofx + (precise_ir1 * precise_h_div_sz) * aspect;
+      precise_y = fofy + (precise_ir2 * precise_h_div_sz);
 
       /* Pack the freshly-written XY_FIFO[3] into a u32 for PGXP. The
        * previous code did `*((uint32*)&XY_FIFO[3])` which is a strict
@@ -1494,18 +1519,18 @@ static INLINE float pgxp_precise_h_div_sz(float precise_z)
 static int32_t RTPS(uint32_t instr)
 {
  int64_t h_div_sz;
- int64_t precise_z_acc;
+ int64_t precise_acc[3];
  float precise_z;
  float precise_h_div_sz;
  DECODE_FIELDS;
 
- MultiplyMatrixByVector_PT(Matrices_Rot, 0, CRVectors_T, sf, lm, &precise_z_acc);
+ MultiplyMatrixByVector_PT(Matrices_Rot, 0, CRVectors_T, sf, lm, precise_acc);
  h_div_sz = Divide(H, Z_FIFO(3));
 
- precise_z = pgxp_precise_z(precise_z_acc);
+ precise_z = pgxp_precise_z(precise_acc[2]);
  precise_h_div_sz  = pgxp_precise_h_div_sz(precise_z);
 
- TransformXY(h_div_sz, precise_h_div_sz, precise_z);
+ TransformXY(h_div_sz, precise_h_div_sz, precise_z, precise_acc, sf, lm);
  TransformDQ(h_div_sz);
 
  return(15);
@@ -1519,17 +1544,17 @@ static int32_t RTPT(uint32_t instr)
  for(i = 0; i < 3; i++)
  {
   int64_t h_div_sz;
-  int64_t precise_z_acc;
+  int64_t precise_acc[3];
   float precise_z;
   float precise_h_div_sz;
 
-  MultiplyMatrixByVector_PT(Matrices_Rot, i, CRVectors_T, sf, lm, &precise_z_acc);
+  MultiplyMatrixByVector_PT(Matrices_Rot, i, CRVectors_T, sf, lm, precise_acc);
   h_div_sz = Divide(H, Z_FIFO(3));
 
-  precise_z = pgxp_precise_z(precise_z_acc);
+  precise_z = pgxp_precise_z(precise_acc[2]);
   precise_h_div_sz  = pgxp_precise_h_div_sz(precise_z);
 
-  TransformXY(h_div_sz, precise_h_div_sz, precise_z);
+  TransformXY(h_div_sz, precise_h_div_sz, precise_z, precise_acc, sf, lm);
 
   if(i == 2)
    TransformDQ(h_div_sz);

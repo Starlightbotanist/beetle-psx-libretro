@@ -1418,6 +1418,7 @@ void GPU_Power(void)
    /* Clear pending-quad state; GPU_SoftReset() clears UV corrections. */
    GPU.InQuad_clut = 0;
    GPU.InQuad_invalidW = false;
+   GPU.InQuad_normalized_depth = false;
    GPU.killQuadPart = 0;
    memset(GPU.InQuad_F3Vertices, 0, sizeof(GPU.InQuad_F3Vertices));
    memset(&GPU.InPLine_PrevPoint, 0, sizeof(GPU.InPLine_PrevPoint));
@@ -3289,6 +3290,9 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
    uint16_t off_u = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_u : 0;
    uint16_t off_v = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_v : 0;
    bool may_be_2d = !load && GPU.InCmd == INCMD_QUAD && GPU.may_be_2d;
+   /* Older states contain raw depth. Commit this optional metadata only
+    * after a successful load, just like the retained UV corrections. */
+   bool normalized_depth = !load && GPU.InQuad_normalized_depth;
    /* A load only has to hand the hardware renderer the VRAM it changed,
     * plus, without the software framebuffer, the blocks the coherence map
     * does not know to match GPU.vram. The context must be up. With
@@ -3469,6 +3473,9 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
       SFARRAY32N(TexCache_Tag, 256, "TexCache_Tag"),
       SFARRAY16N(&TexCache_Data[0][0], 256 * 4, "TexCache_Data"),
 
+      /* Append to preserve the order of positional fast-state fields. */
+      SFVARN(normalized_depth, "InQuad_normalized_depth"),
+
       SFEND
    };
 
@@ -3489,6 +3496,7 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
       GPU.off_u = off_u;
       GPU.off_v = off_v;
       GPU.may_be_2d = may_be_2d;
+      GPU.InQuad_normalized_depth = normalized_depth;
    }
 
    GPU_RestoreStateP2(load);

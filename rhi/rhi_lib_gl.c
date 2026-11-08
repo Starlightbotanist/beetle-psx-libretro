@@ -19,6 +19,7 @@
 
 #include "rhi_intf.h" /* enums */
 #include "rhi_interpolation.h"
+#include "rhi_pgxp_depth.h"
 #include "rhi_tt.h"  /* shared HD texture replacement/tracking engine */
 #include "rhi_defer.h"
 #include "tt_trace.h"
@@ -43,6 +44,7 @@ extern uint16_t psx_hdr_panel_xy[8];
 extern int   psx_hdr_sdr_eotf;
 extern int   psx_hdr_overbright_hot;
 extern unsigned int psx_pgxp_mode;
+extern bool psx_pgxp_depth_buffer;
 extern int   psx_pgxp_color;   /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
 extern int   psx_src_primaries;
 
@@ -1070,6 +1072,8 @@ struct gl_primitive_batch {
    bool force_mask;
    bool mask_test;
    bool color_blend;
+   /* Start a new depth group without submitting the shared vertex buffer. */
+   bool clear_depth;
 };
 typedef struct gl_primitive_batch gl_primitive_batch;
 
@@ -1300,6 +1304,7 @@ struct gl_renderer {
    /* Counter for preserving primitive draw order in the z-buffer
     * since we draw semi-transparent primitives out-of-order. */
    int16_t primitive_ordering;
+   rhi_pgxp_depth_state pgxp_depth;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -3590,6 +3595,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
        * Clear the batch bookkeeping and retry the map. */
       renderer->command_buffer->map_index = 0;
       renderer->primitive_ordering        = 0;
+      renderer->pgxp_depth.maximum        = 0.f;
       gl_primitive_batch_vec_clear(&renderer->batches);
       renderer->vertex_index_pos          = 0;
       gl_draw_buffer_map_no_bind(renderer->command_buffer);
@@ -3661,6 +3667,9 @@ static void gl_renderer_draw(gl_renderer *renderer)
                it->transparency_mode == SEMI_TRANSPARENCY_MODE_AVERAGE;
          bool native_quarter = !it->opaque && native_rgb5 &&
                it->transparency_mode == SEMI_TRANSPARENCY_MODE_ADD_QUARTER_SOURCE;
+
+         if (it->clear_depth)
+            glClear(GL_DEPTH_BUFFER_BIT);
 
          /* Mask bits */
          if (it->set_mask)
@@ -3889,6 +3898,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
    gl_draw_buffer_map_no_bind(renderer->command_buffer);
 
    renderer->primitive_ordering = 0;
+   renderer->pgxp_depth.maximum = 0.f;
    gl_primitive_batch_vec_clear(&renderer->batches);
    renderer->opaque = false;
    renderer->vertex_index_pos = 0;
@@ -6628,6 +6638,7 @@ static void vertex_preprocessing(
    bool buffer_full;
    bool index_full;
    bool unmapped;
+   bool clear_depth = false;
 
    if (!renderer)
       return;
@@ -6674,6 +6685,35 @@ static void vertex_preprocessing(
          gl_renderer_draw(renderer);
    }
 
+   if (psx_pgxp_depth_buffer || renderer->pgxp_depth.active)
+   {
+      float w[4];
+      float maximum = 0.f;
+      unsigned i;
+      bool active;
+      for (i = 0; i < count && i < 4; i++)
+         w[i] = v[i].position[3];
+      /* Native interpolation reuses W for packed UV data. Its explicit
+       * geometry tag must win even if those bits resemble a valid depth. */
+      active = rhi_pgxp_depth_valid(w, count,
+            psx_pgxp_depth_buffer && is_textured &&
+            !is_semi_transparent && !mask_test &&
+            !(v[0].native_flags & 12), &maximum);
+      if (rhi_pgxp_depth_flush(&renderer->pgxp_depth, active, maximum))
+      {
+         /* Vertices already contain their depth policy. Keep the old group
+          * queued and clear its depth before the new batch is drawn. */
+         clear_depth = !gl_draw_buffer_is_empty(renderer->command_buffer);
+         renderer->primitive_ordering = 0;
+         renderer->pgxp_depth.maximum = 0.f;
+      }
+      renderer->pgxp_depth.active = active;
+      if (!active)
+         renderer->pgxp_depth.maximum = 0.f;
+      else if (maximum > renderer->pgxp_depth.maximum)
+         renderer->pgxp_depth.maximum = maximum;
+   }
+
    {
       int16_t z = renderer->primitive_ordering;
       unsigned i;
@@ -6681,7 +6721,9 @@ static void vertex_preprocessing(
 
       for (i = 0; i < count; i++)
       {
-         v[i].position[2] = z;
+         /* The existing vertex shader maps this to W/65536 depth. */
+         v[i].position[2] = renderer->pgxp_depth.active ?
+               65536.f - v[i].position[3] : z;
          v[i].texture_window[0] = renderer->tex_x_mask;
          v[i].texture_window[1] = renderer->tex_x_or;
          v[i].texture_window[2] = renderer->tex_y_mask;
@@ -6690,6 +6732,7 @@ static void vertex_preprocessing(
    }
 
    if (renderer->batches.count == 0
+       || clear_depth
        || color_blend
        || mode != renderer->command_draw_mode
        || is_opaque != renderer->opaque
@@ -6707,6 +6750,7 @@ static void vertex_preprocessing(
          struct gl_primitive_batch *last = &renderer->batches.items[renderer->batches.count - 1];
          last->count = renderer->vertex_index_pos - last->first;
       }
+      batch.clear_depth = clear_depth;
       batch.opaque = is_opaque;
       batch.draw_mode = mode;
       batch.transparency_mode = stm;
@@ -6747,6 +6791,7 @@ static void vertex_add_blended_pass(
 
       last->count = renderer->vertex_index_pos - last->first;
 
+      batch.clear_depth = false;
       batch.opaque = false;
       batch.draw_mode = last->draw_mode;
       batch.transparency_mode = last->transparency_mode;

@@ -8,6 +8,7 @@
 
 #include "limits.h"
 
+
 /* CPU registers */
 PGXP_value CPU_reg_mem[34];
 /*PGXP_value CPU_Hi, CPU_Lo; */
@@ -943,7 +944,17 @@ static void PGXP_CPU_ShiftRight(uint32_t instr, uint32_t rdVal,
 		x += ((rtVal >> 16) & (scale - 1)) * (double)(1u << (16 - sh));
 		y = arithmetic ? ret.y : f16Unsign(ret.y);
 		ret.x = f16Sign(x);
-		ret.y = f16Sign(y * inverse_scale);
+		/* Once the upper half contains only sign extension, it no longer
+		 * carries an independent coordinate. Do not retain a fraction there
+		 * that later packed arithmetic would multiply by 65536. */
+		if (arithmetic && ((rdVal >> 16) == 0 || (rdVal >> 16) == 0xffffu))
+		{
+			ret.y = (rtVal & 0x80000000u) ? -1.f : 0.f;
+			ret.compFlags[1] = VALID;
+			ret.hFlags = VALID_HALF;
+		}
+		else
+			ret.y = f16Sign(y * inverse_scale);
 	}
 	ret.value = rdVal;
 	if (sh != 0)

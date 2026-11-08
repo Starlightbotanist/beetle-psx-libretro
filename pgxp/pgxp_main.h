@@ -37,6 +37,8 @@
 #define PGXP_VERTEX_CACHE (1 << 4)
 #define PGXP_TEXTURE_CORRECTION (1 << 5)
 #define PGXP_NCLIP_IMPL (1 << 6)
+#define PGXP_DEPTH_BUFFER (1 << 7)
+#define PGXP_NORMALIZE_DEPTH (1 << 8)
 
 #ifdef __cplusplus
 extern "C" {

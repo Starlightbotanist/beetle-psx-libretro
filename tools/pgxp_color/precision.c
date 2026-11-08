@@ -223,6 +223,14 @@ static void test_reset_and_modes(void)
    PGXP_GetVertex(0, &word, &vertex, 0, 0);
    check(vertex.x == 12.f && vertex.y == 34.f && !vertex.valid_w,
          "off-to-on refuses pre-disable memory precision with equal native word");
+   seed(1, word, 12.25f, 34.75f, 8.f);
+   WriteMem(&CPU_reg[1], 0x10000);
+   PGXP_SetModes(PGXP_MODE_MEMORY | PGXP_TEXTURE_CORRECTION | PGXP_DEPTH_BUFFER);
+   PGXP_CPU_LW(itype(0, 2, 0), word, 0x10000);
+   PGXP_WriteCB(&CPU_reg[2], 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 12.f && vertex.y == 34.f && !vertex.valid_w,
+         "projection-policy change retires old precision through the consumer");
 }
 
 static void test_texture_modes(void)
@@ -313,6 +321,8 @@ static void test_shifts(void)
                CPU_reg[3].y == (float)((int16_t)(result >> 16) + fraction_y),
                "SRLV matches fixed shift reference");
          result = (uint32_t)((int32_t)value >> sh);
+         if (sh && ((result >> 16) == 0 || (result >> 16) == 0xffffu))
+            fraction_y = 0.0;
          SetValue(&CPU_reg[1], value);
          PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (sh << 6), result, value);
          check(CPU_reg[3].x == (float)((int16_t)result + fraction_x) &&
@@ -343,6 +353,46 @@ static void test_shifts(void)
    PGXP_CPU_SLL(rtype(0, 1, 3, 0) | (16u << 6), 0x000c0000u, 0x0022000cu);
    check((CPU_reg[3].flags & VALID_01) == VALID_01 && CPU_reg[3].y == 12.25f,
          "left halfword move transfers validity with its component");
+}
+
+static void test_shift_sign_extension(void)
+{
+   static const uint32_t words[] = {0x00100200u, 0xffeffe00u};
+   unsigned i, variable;
+   PGXP_SetModes(PGXP_MODE_MEMORY | PGXP_MODE_CPU);
+   for (i = 0; i < 2; i++)
+      for (variable = 0; variable < 2; variable++)
+      {
+         uint32_t word = words[i];
+         uint32_t result = (uint32_t)((int32_t)word >> 14);
+         float sign = i ? -1.f : 0.f;
+         OGLVertex vertex = {0};
+         seed(1, word, (int16_t)word + 0.25f,
+               (int16_t)(word >> 16) + 0.5f, 8.f);
+         SetValue(&CPU_reg[2], 14);
+         if (variable)
+            PGXP_CPU_SRAV(rtype(2, 1, 1, 7), result, word, 14);
+         else
+            PGXP_CPU_SRA(rtype(0, 1, 1, 3) | (14u << 6), result, word);
+         check(CPU_reg[1].y == sign && CPU_reg[1].z == 8.f,
+               "arithmetic shift replaces exhausted upper half with sign extension");
+         PGXP_CPU_SW(itype(0, 1, 0), result, 0x10000);
+         PGXP_WriteCB(ReadMem(0x10000), 0);
+         PGXP_GetVertex(0, &result, &vertex, 0, 0);
+         check(vertex.y == sign && vertex.valid_w && vertex.w == 8.f,
+               "vertex consumer receives exact sign extension and retained depth");
+      }
+   seed(1, 0x00640080u, 128.25f, 100.5f, 8.f);
+   PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (1u << 6), 0x00320040u, 0x00640080u);
+   check(CPU_reg[3].x == 64.125f && CPU_reg[3].y == 50.25f,
+         "non-exhausted arithmetic shift retains independent fractions");
+   seed(1, 0x00000080u, 128.25f, 0.5f, 8.f);
+   PGXP_CPU_SRA(rtype(0, 1, 3, 3), 0x00000080u, 0x00000080u);
+   check(CPU_reg[3].x == 128.25f && CPU_reg[3].y == 0.5f,
+         "zero arithmetic shift remains an exact identity");
+   PGXP_CPU_SRL(rtype(0, 1, 3, 2) | (1u << 6), 0x00000040u, 0x00000080u);
+   check(CPU_reg[3].x == 64.125f && CPU_reg[3].y == 0.25f,
+         "logical shift retains its unsigned upper-half fraction");
 }
 
 static void test_zero_register(void)
@@ -858,6 +908,7 @@ int main(void)
    RUN_TEST(test_texture_modes);
    RUN_TEST(test_gte_alias);
    RUN_TEST(test_shifts);
+   RUN_TEST(test_shift_sign_extension);
    RUN_TEST(test_zero_register);
    RUN_TEST(test_numeric_limits);
    RUN_TEST(test_memory_ownership);
