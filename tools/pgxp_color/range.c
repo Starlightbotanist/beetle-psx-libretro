@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdint.h>
 
+#include "pgxp_gte.h"
 #include "pgxp_gpu.h"
 #include "pgxp_value.h"
 #include "pgxp_types.h"
@@ -50,11 +51,9 @@ static uint32_t gte_pack(int32_t m1, int32_t m2, int32_t m3)
 
 static void push(int32_t m1, int32_t m2, int32_t m3, uint32_t word)
 {
-   CB[0].x     = (float)m1 / 16.0f;
-   CB[0].y     = (float)m2 / 16.0f;
-   CB[0].z     = (float)m3 / 16.0f;
-   CB[0].value = word;
-   CB[0].flags = VALID_ALL;
+   PGXP_pushRGBf((float)m1 / 16.0f, (float)m2 / 16.0f,
+         (float)m3 / 16.0f, word);
+   PGXP_WriteCB(&GTE_data_reg[22], 0);
 }
 
 /* One accepted colour at the given peak channel, in 8-bit scale. */

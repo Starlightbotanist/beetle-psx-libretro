@@ -32,6 +32,7 @@ struct interpreter {
 	u32 cycles;
 	bool delay_slot;
 	bool load_delay;
+	bool discard_load;
 	u16 offset;
 };
 
@@ -207,6 +208,9 @@ static u32 int_delay_slot(struct interpreter *inter, u32 pc, bool branch)
 			/* Verify that the next block actually reads the
 			 * destination register of the delay slot opcode. */
 			run_first_op = opcode_reads_register(op_next, op->r.rt);
+			/* A write-only target also cancels the delay-slot load,
+			 * without requiring that target to execute here. */
+			dummy_ld = opcode_writes_register(op_next, op->r.rt);
 		}
 
 		if (branch_in_ds) {
@@ -235,11 +239,6 @@ static u32 int_delay_slot(struct interpreter *inter, u32 pc, bool branch)
 			if (save_rs)
 				old_rs = reg_cache[op->r.rs];
 
-			/* If both the first opcode of the next block and the
-			 * delay slot opcode write to the same register, the
-			 * value written by the delay slot opcode is
-			 * discarded. */
-			dummy_ld = opcode_writes_register(op_next, op->r.rt);
 		}
 
 		if (!run_first_op) {
@@ -280,6 +279,7 @@ static u32 int_delay_slot(struct interpreter *inter, u32 pc, bool branch)
 	inter2.cycles = inter->cycles;
 	inter2.offset = inter->offset + 1;
 
+	inter2.discard_load = dummy_ld;
 	if (dummy_ld)
 		new_rt = reg_cache[op->r.rt];
 
@@ -514,10 +514,15 @@ static u32 int_cfc(struct interpreter *inter)
 	struct lightrec_state *state = inter->state;
 	const struct opcode *op = inter->op;
 	u32 val;
+	bool discard = inter->discard_load || op_flag_load_discard(op->flags);
 
+	if (discard && state->ops.load_delay)
+		state->ops.load_delay(state, op->r.rt, 0, LIGHTREC_LOAD_SAVE);
 	val = lightrec_mfc(state, op->c);
+	if (discard && state->ops.load_delay)
+		state->ops.load_delay(state, op->r.rt, val, LIGHTREC_LOAD_DISCARD);
 
-	if (likely(op->r.rt))
+	if (!discard && likely(op->r.rt))
 		state->regs.gpr[op->r.rt] = val;
 
 	return jump_next(inter);
@@ -634,15 +639,21 @@ static u32 int_io(struct interpreter *inter, bool is_load)
 	struct opcode_i *op = &inter->op->i;
 	u32 *reg_cache = inter->state->regs.gpr;
 	u32 val, *flags = NULL;
+	bool discard = inter->discard_load || op_flag_load_discard(inter->op->flags);
 
 	if (!inter->load_delay && inter->block)
 		flags = &inter->op->flags;
+
+	if (is_load && discard && inter->state->ops.load_delay)
+		inter->state->ops.load_delay(inter->state, op->rt, 0, LIGHTREC_LOAD_SAVE);
 
 	val = lightrec_rw(inter->state, inter->op->c,
 			  reg_cache[op->rs], reg_cache[op->rt],
 			  flags, inter->block, inter->offset);
 
-	if (is_load && op->rt)
+	if (is_load && discard && inter->state->ops.load_delay)
+		inter->state->ops.load_delay(inter->state, op->rt, val, LIGHTREC_LOAD_DISCARD);
+	if (is_load && !discard && op->rt)
 		reg_cache[op->rt] = val;
 
 	return jump_next(inter);
@@ -889,8 +900,9 @@ static u32 int_special_ADD(struct interpreter *inter)
 	if (likely(op->rd)) {
 		reg_cache[op->rd] = rs + rt;
 
-		if (op_flag_pgxp_addu_identity(inter->op->flags) &&
-		    inter->state->ops.pgxp_addu_identity)
+		if (inter->state->ops.pgxp_addu_identity &&
+		    (op_flag_pgxp_addu_identity(inter->op->flags) ||
+		     opcode_is_addu_identity(inter->op->c)))
 			(*inter->state->ops.pgxp_addu_identity)(
 					inter->state, inter->op->opcode,
 					reg_cache[op->rd]);
@@ -1320,6 +1332,8 @@ u32 lightrec_handle_load_delay(struct lightrec_state *state,
 		/* Branch was evaluated, we can write the load opcode's target
 		 * register now. */
 		state->regs.gpr[reg] = state->temp_reg;
+		if (state->ops.load_delay)
+			state->ops.load_delay(state, reg, state->temp_reg, LIGHTREC_LOAD_COMMIT);
 
 		/* Handle JALR / regimm opcodes setting $ra (or any other
 		 * register in the case of JALR) */
@@ -1336,8 +1350,13 @@ u32 lightrec_handle_load_delay(struct lightrec_state *state,
 		lightrec_int_op(&inter);
 		pc += 4;
 
-		if (!opcode_writes_register(c, reg))
+		if (!opcode_writes_register(c, reg)) {
 			state->regs.gpr[reg] = state->temp_reg;
+			if (state->ops.load_delay)
+				state->ops.load_delay(state, reg, state->temp_reg, LIGHTREC_LOAD_COMMIT);
+		} else if (state->ops.load_delay) {
+			state->ops.load_delay(state, reg, 0, LIGHTREC_LOAD_CANCEL);
+		}
 	}
 
 	state->current_cycle += inter.cycles;

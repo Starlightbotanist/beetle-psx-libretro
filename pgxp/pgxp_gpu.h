@@ -47,10 +47,12 @@ extern "C" {
 	PGXP_value*	PGXP_ReadFIFO(uint32_t pos);
 	void		PGXP_WriteCB(PGXP_value* pV, uint32_t pos);
 	PGXP_value*	PGXP_ReadCB(uint32_t pos);
+	void	PGXP_InitGPU(void);
 
 	void	PGXP_CacheVertex(int16_t sx, int16_t sy, const PGXP_value* _pVertex);
 
 	void	PGXP_FreeVertexCache(void);
+	void	PGXP_InvalidateVertexCache(void);
 
 	/* Vertex cache instrumentation, same shape as PGXP_GetColorStats.
 	 * Indices:

@@ -155,6 +155,8 @@ static void lightrec_swl(struct lightrec_state *state,
 
 	old_data = ops->lw(state, opcode, host, addr);
 
+	if (state->ops.unaligned_access)
+		state->ops.unaligned_access(state, opcode, addr | shift, data);
 	data = (data >> ((3 - shift) * 8)) | (old_data & mask);
 
 	ops->sw(state, opcode, host, addr, data);
@@ -174,6 +176,8 @@ static void lightrec_swr(struct lightrec_state *state,
 
 	old_data = ops->lw(state, opcode, host, addr);
 
+	if (state->ops.unaligned_access)
+		state->ops.unaligned_access(state, opcode, addr | shift, data);
 	data = (data << (shift * 8)) | (old_data & mask);
 
 	ops->sw(state, opcode, host, addr, data);
@@ -202,7 +206,10 @@ static u32 lightrec_lwl(struct lightrec_state *state,
 
 	old_data = ops->lw(state, opcode, host, addr);
 
-	return (data & mask) | (old_data << (24 - shift * 8));
+	data = (data & mask) | (old_data << (24 - shift * 8));
+	if (state->ops.unaligned_access)
+		state->ops.unaligned_access(state, opcode, addr | shift, data);
+	return data;
 }
 
 static u32 lightrec_lwr(struct lightrec_state *state,
@@ -219,7 +226,10 @@ static u32 lightrec_lwr(struct lightrec_state *state,
 
 	old_data = ops->lw(state, opcode, host, addr);
 
-	return (data & mask) | (old_data >> (shift * 8));
+	data = (data & mask) | (old_data >> (shift * 8));
+	if (state->ops.unaligned_access)
+		state->ops.unaligned_access(state, opcode, addr | shift, data);
+	return data;
 }
 
 static void lightrec_lwc2(struct lightrec_state *state, union code op,
@@ -424,26 +434,30 @@ static void lightrec_rw_helper(struct lightrec_state *state,
 			       union code op, u32 *flags,
 			       struct block *block, u16 offset)
 {
-	u32 ret = lightrec_rw(state, op, state->regs.gpr[op.i.rs],
-			      state->regs.gpr[op.i.rt], flags, block, offset);
+	bool temporary = OPT_HANDLE_LOAD_DELAYS &&
+		state->load_target != LIGHTREC_LOAD_GPR;
+	u32 ret;
+
+	if (temporary && state->ops.load_delay)
+		state->ops.load_delay(state, op.i.rt, 0, LIGHTREC_LOAD_SAVE);
+	ret = lightrec_rw(state, op, state->regs.gpr[op.i.rs],
+			  state->regs.gpr[op.i.rt], flags, block, offset);
 
 	switch (op.i.op) {
-	case OP_LB:
-	case OP_LBU:
-	case OP_LH:
-	case OP_LHU:
-	case OP_LWL:
-	case OP_LWR:
-	case OP_LW:
-	case OP_META_LWU:
-		if (OPT_HANDLE_LOAD_DELAYS && unlikely(!state->in_delay_slot_n)) {
-			state->temp_reg = ret;
-			state->in_delay_slot_n = 0xff;
+	case OP_LB: case OP_LBU: case OP_LH: case OP_LHU:
+	case OP_LWL: case OP_LWR: case OP_LW: case OP_META_LWU:
+		if (temporary) {
+			if (state->load_target == LIGHTREC_LOAD_TEMP)
+				state->temp_reg = ret;
+			if (state->ops.load_delay)
+				state->ops.load_delay(state, op.i.rt, ret,
+					state->load_target == LIGHTREC_LOAD_TEMP ?
+					LIGHTREC_LOAD_DEFER : LIGHTREC_LOAD_DISCARD);
+			state->load_target = LIGHTREC_LOAD_GPR;
 		} else if (op.i.rt) {
 			state->regs.gpr[op.i.rt] = ret;
 		}
-
-		fallthrough;
+		break;
 	default:
 		break;
 	}
@@ -484,9 +498,9 @@ static void lightrec_handle_spgp_slow(struct lightrec_state *state)
 	case OP_LWR:
 	case OP_LW:
 	case OP_META_LWU:
-		if (OPT_HANDLE_LOAD_DELAYS && !state->in_delay_slot_n) {
+		if (OPT_HANDLE_LOAD_DELAYS && state->load_target == LIGHTREC_LOAD_TEMP) {
 			state->temp_reg = val;
-			state->in_delay_slot_n = 0xff;
+			state->load_target = LIGHTREC_LOAD_GPR;
 		} else if (c.i.rt) {
 			state->regs.gpr[c.i.rt] = val;
 		}
@@ -625,12 +639,26 @@ u32 lightrec_mfc(struct lightrec_state *state, union code op)
 
 static void lightrec_mfc_cb(struct lightrec_state *state, union code op)
 {
-	u32 rt = lightrec_mfc(state, op);
+	bool temporary = op.i.op != OP_SWC2 && OPT_HANDLE_LOAD_DELAYS &&
+		state->load_target != LIGHTREC_LOAD_GPR;
+	u32 rt;
 
-	if (op.i.op == OP_SWC2)
+	if (temporary && state->ops.load_delay)
+		state->ops.load_delay(state, op.r.rt, 0, LIGHTREC_LOAD_SAVE);
+	rt = lightrec_mfc(state, op);
+	if (temporary) {
+		if (state->ops.load_delay)
+			state->ops.load_delay(state, op.r.rt, rt,
+				state->load_target == LIGHTREC_LOAD_TEMP ?
+				LIGHTREC_LOAD_DEFER : LIGHTREC_LOAD_DISCARD);
+		if (state->load_target == LIGHTREC_LOAD_TEMP)
+			state->temp_reg = rt;
+		state->load_target = LIGHTREC_LOAD_GPR;
+	} else if (op.i.op == OP_SWC2) {
 		state->temp_reg = rt;
-	else if (op.r.rt)
+	} else if (op.r.rt) {
 		state->regs.gpr[op.r.rt] = rt;
+	}
 }
 
 static void lightrec_mtc0(struct lightrec_state *state, u8 reg, u32 data)
@@ -1429,7 +1457,15 @@ static u32 lightrec_check_load_delay(struct lightrec_state *state, u32 pc, u8 re
 	first_op = lightrec_read_opcode(state, pc);
 
 	if (likely(!opcode_reads_register(first_op, reg))) {
-		state->regs.gpr[reg] = state->temp_reg;
+		/* A write-only consumer can cancel the pending load too. In
+		 * particular, a second load must retain the old register value
+		 * for its own delay slot. */
+		bool commit = !opcode_writes_register(first_op, reg);
+		if (commit)
+			state->regs.gpr[reg] = state->temp_reg;
+		if (state->ops.load_delay)
+			state->ops.load_delay(state, reg, state->temp_reg,
+				commit ? LIGHTREC_LOAD_COMMIT : LIGHTREC_LOAD_CANCEL);
 	} else {
 		block = lightrec_get_block(state, pc);
 		if (unlikely(!block)) {
@@ -2512,7 +2548,7 @@ struct lightrec_state * lightrec_init(char *argv0,
 
 	state->tlsf = tlsf;
 	state->with_32bit_lut = with_32bit_lut;
-	state->in_delay_slot_n = 0xff;
+	state->load_target = LIGHTREC_LOAD_GPR;
 	state->cycles_per_op = 2;
 	state->cycles_per_op_mem = 0;
 

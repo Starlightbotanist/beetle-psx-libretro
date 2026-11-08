@@ -1286,6 +1286,23 @@ static void call_to_c_wrapper(struct lightrec_cstate *state,
 	lightrec_regcache_mark_live(reg_cache, _jit);
 }
 
+static void rec_set_load_target(struct lightrec_cstate *state,
+		const struct block *block, u16 offset)
+{
+	struct regcache *cache = state->reg_cache;
+	jit_state_t *_jit = block->_jit;
+	u32 flags = block->opcode_list[offset].flags;
+	u8 temporary;
+
+	if (op_flag_load_discard(flags) ||
+	    (op_flag_load_delay(flags) && !state->no_load_delay)) {
+		temporary = lightrec_alloc_reg_temp_with_value(cache, _jit,
+			op_flag_load_discard(flags) ? LIGHTREC_LOAD_UNUSED : LIGHTREC_LOAD_TEMP);
+		jit_stxi_c(lightrec_offset(load_target), LIGHTREC_REG_STATE, temporary);
+		lightrec_free_reg(cache, temporary);
+	}
+}
+
 static void rec_io(struct lightrec_cstate *state,
 		   const struct block *block, u16 offset,
 		   bool load_rt, bool read_rt)
@@ -1295,8 +1312,9 @@ static void rec_io(struct lightrec_cstate *state,
 	union code c = block->opcode_list[offset].c;
 	u32 flags = block->opcode_list[offset].flags;
 	bool is_tagged = LIGHTREC_FLAGS_GET_IO_MODE(flags);
-	bool load_delay = op_flag_load_delay(flags) && !state->no_load_delay;
-	u8 zero, reg = load_delay ? REG_TEMP : c.i.rt;
+	bool load_delay = op_flag_load_discard(flags) ||
+		(op_flag_load_delay(flags) && !state->no_load_delay);
+	u8 reg = load_delay ? REG_TEMP : c.i.rt;
 	u32 lut_entry;
 
 	jit_note(__FILE__, __LINE__);
@@ -1313,13 +1331,7 @@ static void rec_io(struct lightrec_cstate *state,
 		 * of LWL/LWR), so we need to keep it in sync. */
 		lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, false);
 
-		/* Clear state->in_delay_slot_n. This notifies the lightrec_rw
-		 * wrapper that it should write the REG_TEMP register instead of
-		 * the actual output register of the opcode. */
-		zero = lightrec_alloc_reg_in(reg_cache, _jit, 0, 0);
-		jit_stxi_c(lightrec_offset(in_delay_slot_n),
-			   LIGHTREC_REG_STATE, zero);
-		lightrec_free_reg(reg_cache, zero);
+		rec_set_load_target(state, block, offset);
 	}
 
 	if (is_tagged) {
@@ -1954,7 +1966,8 @@ static void rec_load_memory(struct lightrec_cstate *cstate,
 	struct lightrec_state *state = cstate->state;
 	struct regcache *reg_cache = cstate->reg_cache;
 	struct opcode *op = &block->opcode_list[offset];
-	bool load_delay = op_flag_load_delay(op->flags) && !cstate->no_load_delay;
+	bool load_delay = op_flag_load_discard(op->flags) ||
+		(op_flag_load_delay(op->flags) && !cstate->no_load_delay);
 	jit_state_t *_jit = block->_jit;
 	u8 rs, rt, out_reg, addr_reg, flags = REG_EXT;
 	bool no_mask = op_flag_no_mask(op->flags);
@@ -2219,7 +2232,8 @@ static void rec_load_direct(struct lightrec_cstate *cstate,
 	const struct lightrec_state *state = cstate->state;
 	struct regcache *reg_cache = cstate->reg_cache;
 	struct opcode *op = &block->opcode_list[offset];
-	bool load_delay = op_flag_load_delay(op->flags) && !cstate->no_load_delay;
+	bool load_delay = op_flag_load_discard(op->flags) ||
+		(op_flag_load_delay(op->flags) && !cstate->no_load_delay);
 	jit_state_t *_jit = block->_jit;
 	jit_node_t *to_not_ram, *to_not_bios, *to_end, *to_end2;
 	u8 tmp, rs, rt, out_reg, addr_reg, flags = REG_EXT;
@@ -2529,8 +2543,16 @@ static void rec_mfc(struct lightrec_cstate *state, const struct block *block, u1
 
 	jit_note(__FILE__, __LINE__);
 
-	if (c.i.op != OP_SWC2)
-		lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, true);
+	if (c.i.op != OP_SWC2) {
+		if (op_flag_load_discard(block->opcode_list[offset].flags) ||
+		    (op_flag_load_delay(block->opcode_list[offset].flags) && !state->no_load_delay)) {
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, false);
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_TEMP, true);
+			rec_set_load_target(state, block, offset);
+		} else {
+			lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, true);
+		}
+	}
 
 	call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_MFC);
 }
@@ -3453,16 +3475,16 @@ static void rec_pgxp_cpu_track(struct lightrec_cstate *state,
 
 	jit_note(__FILE__, __LINE__);
 
-	/* rs/rt occupy the same bits in the r, i and m encodings, so this
-	 * covers the meta opcodes as well.  A stale field on an op that does
-	 * not read that register only costs a redundant store-back. */
-	lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rs, false);
-	lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rt, false);
-
-	if (c.i.op == OP_SPECIAL) {
+	/* Sync actual operands. Destination fields and unrelated HI/LO values
+	 * are not inputs to this instruction's precision calculation. */
+	if (opcode_reads_register(c, c.r.rs))
+		lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rs, false);
+	if (opcode_reads_register(c, c.r.rt))
+		lightrec_clean_reg_if_loaded(reg_cache, _jit, c.r.rt, false);
+	if (opcode_reads_register(c, REG_HI))
 		lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_HI, false);
+	if (opcode_reads_register(c, REG_LO))
 		lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_LO, false);
-	}
 
 	call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_PGXP_CPU);
 }
