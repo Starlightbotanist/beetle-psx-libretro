@@ -1979,7 +1979,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
               } \
             } \
          } \
-         else if (PGXP_LIT && GPU_ON_EMU_THREAD(gpu) && PGXP_GetColor(cb - baseCB, cb, pgxp_rgb)) \
+         else if (PGXP_LIT && GPU_ON_EMU_THREAD(gpu) && psx_pgxp_color && PGXP_GetColor(cb - baseCB, cb, pgxp_rgb)) \
          { \
             vertices[v].cf[0] = (pgxp_rgb[0] > 0.0f ? pgxp_rgb[0] : 0.0f) / 255.0f; \
             vertices[v].cf[1] = (pgxp_rgb[1] > 0.0f ? pgxp_rgb[1] : 0.0f) / 255.0f; \

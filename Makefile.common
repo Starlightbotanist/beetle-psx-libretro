@@ -327,6 +327,7 @@ endif
    endif
 
 SOURCES_C +=   $(CORE_DIR)/pgxp/pgxp_cpu.c \
+               $(CORE_DIR)/pgxp/pgxp_cpu_dispatch.c \
                $(CORE_DIR)/pgxp/pgxp_gpu.c \
                $(CORE_DIR)/pgxp/pgxp_gte.c \
                $(CORE_DIR)/pgxp/pgxp_main.c \

@@ -47,6 +47,13 @@ extern retro_log_printf_t log_cb;
 PGXP_value FIFO[32];
 PGXP_value CB[16];
 
+void PGXP_InitGPU(void)
+{
+	memset(FIFO, 0, sizeof(FIFO));
+	memset(CB, 0, sizeof(CB));
+	PGXP_InvalidateVertexCache();
+}
+
 void PGXP_WriteFIFO(PGXP_value* pV, uint32_t pos)
 {
 	assert(pos < 32);
@@ -162,6 +169,7 @@ const uint32_t mode_fail = 3;
 #define VERTEX_CACHE_SIZE	(VERTEX_CACHE_DIM * VERTEX_CACHE_DIM)
 
 static PGXP_cache_entry *vertexCache = NULL;
+static int cacheAllocationFailed;
 
 uint32_t cacheMode = 0;
 
@@ -217,9 +225,14 @@ static int VertexCacheEnsureAllocated(void)
 {
 	if (vertexCache)
 		return 1;
+	if (cacheAllocationFailed)
+		return 0;
 	vertexCache = (PGXP_cache_entry*)calloc(VERTEX_CACHE_SIZE, sizeof(PGXP_cache_entry));
 	if (!vertexCache)
+	{
+		cacheAllocationFailed = 1;
 		return 0;
+	}
 
 	/* The buffer is zeroed, so every tag reads as empty and restarting
 	 * the generation counter here cannot resurrect anything. */
@@ -242,6 +255,21 @@ void PGXP_FreeVertexCache(void)
 		vertexCache = NULL;
 	}
 	cacheMode = mode_init;
+	cacheAllocationFailed = 0;
+	/* No allocation retains old tags, so this epoch can safely restart. */
+	cacheGen = 0;
+}
+
+void PGXP_InvalidateVertexCache(void)
+{
+	cacheAllocationFailed = 0;
+	if (cacheGen == 0x7fffffffu)
+		cacheMode = mode_fail;
+	else
+	{
+		cacheGen++;
+		cacheMode = mode_init;
+	}
 }
 
 void PGXP_CacheVertex(int16_t sx, int16_t sy, const PGXP_value* _pVertex)
@@ -287,8 +315,12 @@ void PGXP_CacheVertex(int16_t sx, int16_t sy, const PGXP_value* _pVertex)
 		 * many frames issues no writes in those frames, so no
 		 * generation opens and its entries stay legitimately live.
 		 * Only a fresh transform batch retires the old one. */
-		if (cacheGen < 0x7FFFFFFFu)
-			cacheGen++;
+		if (cacheGen == 0x7fffffffu)
+		{
+			cacheMode = mode_fail;
+			return;
+		}
+		cacheGen++;
 		cacheMode = mode_write;
 	}
 
@@ -338,6 +370,9 @@ void PGXP_CacheVertex(int16_t sx, int16_t sy, const PGXP_value* _pVertex)
 
 static PGXP_cache_entry* PGXP_GetCachedVertex(int16_t sx, int16_t sy)
 {
+	if (!(PGXP_GetModes() & PGXP_VERTEX_CACHE))
+		return NULL;
+
 	if (cacheMode != mode_read)
 	{
 		if (cacheMode == mode_fail)
@@ -444,6 +479,7 @@ static uint32_t color_stats[4]; /* attempts, hits, value miss, quant miss */
  * used no matter how bright it is. Buckets are on the peak channel relative
  * to the 255 ceiling, so bucket 0 is a colour that would clip slightly and
  * bucket 3 is one the GTE computed at more than twice white. */
+#if PGXP_DIAG
 static uint32_t color_over;          /* accepted words with any channel > 255 */
 static uint32_t color_over_bucket[4];/* (1,1.25] (1.25,1.5] (1.5,2] (2,inf) */
 static float    color_peak;          /* largest channel seen, 8-bit scale */
@@ -469,6 +505,7 @@ static void color_note_range(float r, float g, float b)
    else if (ratio <= 2.0f)  color_over_bucket[2]++;
    else                     color_over_bucket[3]++;
 }
+#endif
 
 /* Requantize a shadow channel exactly as gte.c's MAC_to_RGB_FIFO did:
  * MACn >> 4 is an arithmetic shift (floor), then Lm_C saturates to
@@ -498,7 +535,7 @@ int PGXP_GetColor(const uint32_t offset, const uint32_t* addr, float* out_rgb)
 
 	COLOR_STAT(0);
 
-	if (col && ((col->flags & VALID_012) == VALID_012) &&
+	if (col && (col->flags & PGXP_COLOR) &&
 	    (((col->value ^ word) & 0x00FFFFFFu) == 0))
 	{
 		/* Byte 3 is the GP0 command code and is excluded from the value
@@ -519,7 +556,9 @@ int PGXP_GetColor(const uint32_t offset, const uint32_t* addr, float* out_rgb)
 			/* Recorded whether or not the caller wanted the value: the
 			 * measurement slice passes NULL and this is the number it
 			 * exists to collect. */
+#if PGXP_DIAG
 			color_note_range(col->x, col->y, col->z);
+#endif
 			COLOR_STAT(1);
 			ok = 1;
 		}
@@ -560,6 +599,7 @@ int PGXP_GetFog(const uint32_t offset, const uint32_t* addr,
 
 void PGXP_GetColorRangeStats(uint32_t *over, uint32_t buckets[4], float *peak)
 {
+#if PGXP_DIAG
 	if (over)
 		*over = color_over;
 	if (buckets)
@@ -571,6 +611,14 @@ void PGXP_GetColorRangeStats(uint32_t *over, uint32_t buckets[4], float *peak)
 	}
 	if (peak)
 		*peak = color_peak;
+#else
+	if (over)
+		*over = 0;
+	if (buckets)
+		memset(buckets, 0, 4 * sizeof(*buckets));
+	if (peak)
+		*peak = 0.f;
+#endif
 }
 
 void PGXP_GetColorStats(uint32_t stats[4])
@@ -599,19 +647,22 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	int16_t psxX = (int16_t)(psxWord & 0xFFFF);
 	int16_t psxY = (int16_t)(psxWord >> 16);
 
-	if (vert && ((vert->flags & VALID_01) == VALID_01) && (vert->value == psxWord))
+	/* Missing precision must still produce a completely initialized vertex. */
+	pOutput->z = 0.95f;
+	pOutput->w = 1.f;
+	pOutput->valid_w = 0;
+
+	if (vert && ((vert->flags & VALID_01) == VALID_01) && (vert->value == psxWord) &&
+		isfinite(vert->x) && isfinite(vert->y))
 	{
 		/* There is a value here with valid X and Y coordinates */
 		pOutput->x = (vert->x + xOffs);
 		pOutput->y = (vert->y + yOffs);
 		pOutput->z = 0.95f;
-		pOutput->w = vert->z;
-		pOutput->valid_w = 1;
-
-		if ((vert->flags & VALID_2) != VALID_2)
+		if ((vert->flags & VALID_2) == VALID_2 && isfinite(vert->z))
 		{
-			/* This value does not have a valid W coordinate */
-			pOutput->valid_w = 0;
+			pOutput->w = vert->z;
+			pOutput->valid_w = 1;
 		}
 	}
 	else
@@ -621,8 +672,9 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 		 * separate local rather than aliasing `vert`.  A non-NULL
 		 * return is already fully validated - current generation,
 		 * unambiguous - so there is no flag test to repeat here. */
-		PGXP_cache_entry* cache_vert = PGXP_GetCachedVertex(psxX, psxY);
-		if (cache_vert)
+		PGXP_cache_entry* cache_vert = (vert && vert->value == psxWord &&
+			(vert->flags & PGXP_COLOR)) ? NULL : PGXP_GetCachedVertex(psxX, psxY);
+		if (cache_vert && isfinite(cache_vert->x) && isfinite(cache_vert->y))
 		{
 			/* a value is found, it is from the current session and is unambiguous (there was only one value recorded at that position) */
 			pOutput->x = cache_vert->x + xOffs;
@@ -660,10 +712,15 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	 * normal inputs (vert->x + xOffs in -2048..2046 -> * 65536 is
 	 * < 2^28, well within int32) it's fine. */
 	{
-		float x = pOutput->x * (1 << 16);
-		float y = pOutput->y * (1 << 16);
-		int32_t ix = (int32_t)x;
-		int32_t iy = (int32_t)y;
+		double x = (double)pOutput->x * 65536.0;
+		double y = (double)pOutput->y * 65536.0;
+		int32_t ix, iy;
+		if (x < -2147483648.0 || x >= 2147483648.0)
+			x = fmod(x, 134217728.0);
+		if (y < -2147483648.0 || y >= 2147483648.0)
+			y = fmod(y, 134217728.0);
+		ix = (int32_t)x;
+		iy = (int32_t)y;
 		ix &= 0x07FFFFFF; if (ix & 0x04000000) ix |= ~0x07FFFFFF;
 		iy &= 0x07FFFFFF; if (iy & 0x04000000) iy |= ~0x07FFFFFF;
 		pOutput->x = (float)ix / (1 << 16);

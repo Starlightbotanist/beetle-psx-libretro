@@ -41,6 +41,7 @@
 #include "../pgxp/pgxp_cpu.h"
 #include "../pgxp/pgxp_gte.h"
 #include "../pgxp/pgxp_main.h"
+#include "../../pgxp/pgxp_mem.h"
 int pgxpMode;
 
 #ifdef HAVE_LIGHTREC
@@ -123,13 +124,16 @@ static uint32_t          cpu_BIU;
 static bool              cpu_Halted;
 /* Timestamp at the interpreter's last event check (see CPU_LastEventCheckTS). */
 static int32_t           cpu_last_check_ts;
+#ifdef HAVE_LIGHTREC
+/* Event catch-up follows the engine actually executing, including the native
+ * pipeline drain before a restored state can enter Lightrec. */
+static bool              cpu_interpreter_active = true;
+#endif
 static CPU_CP0           cpu_CP0;
 #ifdef HAVE_LIGHTREC
-/* cache_buf shadows the first 64KB of MainRAM while the cache-isolated
- * (CP0 SR bit 16) bit is set, so reads return from the cache snapshot
- * and writes are confined.  Only the lightrec dispatcher honours this
- * MIPS-quirk - the interpreter doesn't model cache isolation - so the
- * shadow only exists when HAVE_LIGHTREC is on. */
+/* Lightrec retains the first64KB of MainRAM here while CP0 SR bit16 is set,
+ * then restores it when isolation ends. PGXP retains the matching metadata.
+ * The native interpreter instead directs isolated writes to cache/scratch. */
 static char              cpu_cache_buf[64 * 1024];
 #endif
 
@@ -199,7 +203,7 @@ static const uint8_t cpu_MULT_Tab24[24] =
 
 /* Forward decls for methods called before they're defined. */
 static uint32_t CPU_Exception(uint32_t code, uint32_t PC, const uint32_t NP, const uint32_t instr);
-static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in);
+static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in, bool *pipeline_ready);
 #ifdef HAVE_LIGHTREC
 static int     lightrec_plugin_init(PS_CPU *self);
 static int32_t lightrec_plugin_execute(PS_CPU *self, int32_t timestamp);
@@ -215,6 +219,9 @@ PS_CPU *CPU_New(void)
    uint64_t a;
 
    memset(self, 0, sizeof(*self));
+#ifdef HAVE_LIGHTREC
+   cpu_interpreter_active = true;
+#endif
 
    addr_mask[0] = 0xFFFFFFFF;
    addr_mask[1] = 0xFFFFFFFF;
@@ -333,6 +340,10 @@ void CPU_Power(PS_CPU *self)
    unsigned i;
 
    (void)self;
+   cpu_last_check_ts = 0;
+#ifdef HAVE_LIGHTREC
+   cpu_interpreter_active = true;
+#endif
 
 
    memset(GPR, 0, 32 * sizeof(uint32_t));
@@ -626,6 +637,16 @@ static INLINE void WriteMemory_IsC_misc(uint32_t address, uint32_t value)
    }
 }
 
+static INLINE uint32_t PGXP_StoreAddress(uint32_t address)
+{
+   if(MDFN_LIKELY(!(CP0.SR & 0x10000)))
+      return address;
+   if((BIU & 0x081) == 0x080)
+      return 0x1F800000 | (address & 0x3FF);
+   /* Instruction-cache writes do not change a tracked data-memory owner. */
+   return UINT32_MAX;
+}
+
 static INLINE void WriteMemory_u8(int32_t *timestamp, uint32_t address, uint32_t value)
 {
    if (MDFN_LIKELY(!(CP0.SR & 0x10000)))
@@ -872,7 +893,7 @@ static uint32_t NO_INLINE CPU_Exception(uint32_t code, uint32_t PC, const uint32
 #define GPR_RES(n) { unsigned tn = (n); ReadAbsorb[tn] = 0; }
 #define GPR_DEPRES_END ReadAbsorb[0] = back; }
 
-static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
+static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in, bool *pipeline_ready)
 {
    int32_t timestamp = timestamp_in;
 #if defined(HAVE_LIGHTREC) && defined(LIGHTREC_DEBUG)
@@ -882,6 +903,11 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
    uint32_t new_PC;
    uint32_t LDWhich;
    uint32_t LDValue;
+   int32_t saved_deadline = 0, slice_deadline = 0;
+
+#ifdef HAVE_LIGHTREC
+   cpu_interpreter_active = true;
+#endif
 
    gte_ts_done += timestamp;
    muldiv_ts_done += timestamp;
@@ -894,6 +920,15 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
  do
  {
+  /* The event list remains authoritative. Shorter CPU slices let the native
+   * pipeline reach a handoff boundary without adding an instruction-path test. */
+  if (pipeline_ready)
+  {
+   saved_deadline = next_event_ts;
+   if (timestamp < next_event_ts && timestamp + 1 < next_event_ts)
+    next_event_ts = timestamp + 1;
+   slice_deadline = next_event_ts;
+  }
   while(MDFN_LIKELY(timestamp < next_event_ts))
   {
    uint32_t instr;
@@ -933,7 +968,11 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
    else
     timestamp++;
 
-   #define DO_LDS() { s_cpu.GPR_full[LDWhich] = LDValue; ReadAbsorb[LDWhich] = LDAbsorb; ReadFudge = LDWhich; ReadAbsorbWhich |= LDWhich & 0x1F; LDWhich = 0x22; }
+   #define DO_LDS_GPR(written) { \
+      if (LDWhich < 32 && (PGXP_GetModes() & (PGXP_MODE_MEMORY | PGXP_MODE_GTE))) \
+         PGXP_CPU_CommitLoad(LDWhich, LDValue, written); \
+      s_cpu.GPR_full[LDWhich] = LDValue; ReadAbsorb[LDWhich] = LDAbsorb; ReadFudge = LDWhich; ReadAbsorbWhich |= LDWhich & 0x1F; LDWhich = 0x22; }
+   #define DO_LDS() DO_LDS_GPR(0)
    #define BEGIN_OPF(name) op_##name: {
 
 #if HAVE_COMPUTED_GOTO && PSX_DISPATCH_REPLICATE
@@ -1112,10 +1151,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	result = GPR[rs] + GPR[rt];
 	ep = ((~(GPR[rs] ^ GPR[rt])) & (GPR[rs] ^ result)) & 0x80000000;
 
-	if (PGXP_GetModes() & PGXP_MODE_CPU)
+	if (!ep && (PGXP_GetModes() & PGXP_MODE_CPU))
 		PGXP_CPU_ADD(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(ep ? 0 : rd);
 
 	if(MDFN_UNLIKELY(ep))
 	{
@@ -1142,10 +1181,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
         result = GPR[rs] + immediate;
 	ep = ((~(GPR[rs] ^ immediate)) & (GPR[rs] ^ result)) & 0x80000000;
 
-	if (PGXP_GetModes() & PGXP_MODE_CPU)
+	if (!ep && (PGXP_GetModes() & PGXP_MODE_CPU))
 		PGXP_CPU_ADDI(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(ep ? 0 : rt);
 
         if(MDFN_UNLIKELY(ep))
 	{
@@ -1173,7 +1212,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ADDIU(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rt);
 
 	GPR[rt] = result;
 
@@ -1199,7 +1238,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	else if ((PGXP_GetModes() & PGXP_MODE_MEMORY) && rt == 0)
 		PGXP_CPU_ADDU_Identity(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -1223,7 +1262,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_AND(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -1246,7 +1285,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ANDI(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rt);
 
 	GPR[rt] = result;
 
@@ -1530,11 +1569,14 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 		LDValue = GTE_ReadDR(rd);
 
                 if (PGXP_GetModes() & PGXP_MODE_GTE)
-                   PGXP_GTE_MFC2(instr, LDValue, LDValue);
+                   PGXP_GTE_ReadDelayed(instr, LDValue);
 
 		break;
 
 	 case 0x04:		// MTC2	- Move to Coprocessor
+                if (PGXP_GetModes() & PGXP_MODE_GTE)
+                   PGXP_GTE_MTC2(instr, val, val);
+
 		DO_LDS();
 
 	        if(timestamp < gte_ts_done)
@@ -1542,8 +1584,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 		GTE_WriteDR(rd, val);
 
-                if (PGXP_GetModes() & PGXP_MODE_GTE)
-                   PGXP_GTE_MTC2(instr, val, val);
+
 
 		break;
 
@@ -1565,11 +1606,14 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 		LDValue = GTE_ReadCR(rd);
 
                 if (PGXP_GetModes() & PGXP_MODE_GTE)
-                   PGXP_GTE_CFC2(instr, LDValue, LDValue);
+                   PGXP_GTE_ReadDelayed(instr, LDValue);
 
 		break;
 
 	 case 0x06:		// CTC2
+                if (PGXP_GetModes() & PGXP_MODE_GTE)
+                   PGXP_GTE_CTC2(instr, val, val);
+
 		DO_LDS();
 
  	        if(timestamp < gte_ts_done)
@@ -1577,8 +1621,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 		GTE_WriteCR(rd, val);
 
-                if (PGXP_GetModes() & PGXP_MODE_GTE)
-                   PGXP_GTE_CTC2(instr, val, val);
+
 
 		break;
 
@@ -1724,7 +1767,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 /* PGXP's value goes with the word: the GPU reads it from the
 	  * port as the word is written */
 	 if (PGXP_GetModes() & PGXP_MODE_GTE)
-            PGXP_GTE_SWC2(instr, GTE_ReadDR(rt), address);
+            PGXP_GTE_SWC2(instr, GTE_ReadDR(rt), PGXP_StoreAddress(address));
 
 	 WriteMemory_u32(&timestamp, address, GTE_ReadDR(rt), false);
 	}
@@ -1964,10 +2007,11 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	HI = GPR[rs];
 
-	DO_LDS();
+
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_MTHI(instr, HI, GPR[rs]);
+	DO_LDS();
 
     END_OPF;
 
@@ -2006,13 +2050,14 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	result = (int64_t)(int32_t)GPR[rs] * (int32_t)GPR[rt];
 	muldiv_ts_done = timestamp + MULT_Tab24[MDFN_lzcount32((GPR[rs] ^ ((int32_t)GPR[rs] >> 31)) | 0x400)];
-	DO_LDS();
+
 
 	LO = result;
 	HI = result >> 32;
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_MULT(instr, HI, LO, GPR[rs], GPR[rt]);
+	DO_LDS();
 
     END_OPF;
 
@@ -2031,13 +2076,14 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	result = (uint64_t)GPR[rs] * GPR[rt];
 	muldiv_ts_done = timestamp + MULT_Tab24[MDFN_lzcount32(GPR[rs] | 0x400)];
-	DO_LDS();
+
 
 	LO = result;
 	HI = result >> 32;
 
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_MULTU(instr, HI, LO, GPR[rs], GPR[rt]);
+	DO_LDS();
 
     END_OPF;
 
@@ -2060,7 +2106,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_NOR(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2084,7 +2130,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_OR(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2108,7 +2154,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_ORI(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rt);
 
 	GPR[rt] = result;
 
@@ -2132,7 +2178,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLL(instr, result, GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2157,7 +2203,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLLV(instr, result, GPR[rt], GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2181,7 +2227,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLT(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2205,7 +2251,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLTI(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rt);
 
 	GPR[rt] = result;
 
@@ -2229,7 +2275,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLTIU(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rt);
 
 	GPR[rt] = result;
 
@@ -2254,7 +2300,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SLTU(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2278,7 +2324,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SRA(instr, result, GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2303,7 +2349,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SRAV(instr, result, GPR[rt], GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2327,7 +2373,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SRL(instr, result, GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2351,7 +2397,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SRLV(instr, result, GPR[rt], GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2375,10 +2421,10 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	result = GPR[rs] - GPR[rt];
 	ep = (((GPR[rs] ^ GPR[rt])) & (GPR[rs] ^ result)) & 0x80000000;
 
-	if (PGXP_GetModes() & PGXP_MODE_CPU)
+	if (!ep && (PGXP_GetModes() & PGXP_MODE_CPU))
 		PGXP_CPU_SUB(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(ep ? 0 : rd);
 
 	if(MDFN_UNLIKELY(ep))
 	{
@@ -2408,7 +2454,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_SUBU(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2443,7 +2489,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_XOR(instr, result, GPR[rs], GPR[rt]);
 
-	DO_LDS();
+	DO_LDS_GPR(rd);
 
 	GPR[rd] = result;
 
@@ -2466,7 +2512,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	if (PGXP_GetModes() & PGXP_MODE_CPU)
 		PGXP_CPU_XORI(instr, result, GPR[rs]);
 
-	DO_LDS();
+	DO_LDS_GPR(rt);
 
 	GPR[rt] = result;
     END_OPF;
@@ -2497,7 +2543,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	LDValue = (int32_t)(int8_t)ReadMemory_u8(&timestamp, address);
 
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_LB(instr, LDValue, address);
+		PGXP_CPU_LoadDelayed(instr, LDValue, address);
     END_OPF;
 
     //
@@ -2522,7 +2568,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	LDValue = ReadMemory_u8(&timestamp, address);
 
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_LBU(instr, LDValue, address);
+		PGXP_CPU_LoadDelayed(instr, LDValue, address);
     END_OPF;
 
     //
@@ -2555,8 +2601,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 LDWhich = rt;
          LDValue = (int32_t)(int16_t)ReadMemory_u16(&timestamp, address);
 	}
-	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_LH(instr, LDValue, address);
+	if (!(address & 1) && (PGXP_GetModes() & PGXP_MODE_MEMORY))
+		PGXP_CPU_LoadDelayed(instr, LDValue, address);
     END_OPF;
 
     //
@@ -2590,8 +2636,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
          LDValue = ReadMemory_u16(&timestamp, address);
 	}
 
-	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_LHU(instr, LDValue, address);
+	if (!(address & 1) && (PGXP_GetModes() & PGXP_MODE_MEMORY))
+		PGXP_CPU_LoadDelayed(instr, LDValue, address);
     END_OPF;
 
 
@@ -2626,8 +2672,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
          LDValue = ReadMemory_u32(&timestamp, address, false, false);
 	}
 
-	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_LW(instr, LDValue, address);
+	if (!(address & 3) && (PGXP_GetModes() & PGXP_MODE_MEMORY))
+		PGXP_CPU_LoadDelayed(instr, LDValue, address);
     END_OPF;
 
     //
@@ -2644,10 +2690,9 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	address = GPR[rs] + immediate;
 
-	WriteMemory_u8(&timestamp, address, GPR[rt]);
-
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_SB(instr, GPR[rt], address);
+		PGXP_CPU_SB(instr, GPR[rt], PGXP_StoreAddress(address));
+	WriteMemory_u8(&timestamp, address, GPR[rt]);
 
 	DO_LDS();
     END_OPF;
@@ -2672,10 +2717,11 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 new_PC = CPU_Exception(EXCEPTION_ADES, PC, new_PC, instr);
 	}
 	else
+	{
+	 if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_SH(instr, GPR[rt], PGXP_StoreAddress(address));
 	 WriteMemory_u16(&timestamp, address, GPR[rt]);
-
-	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_SH(instr, GPR[rt], address);
+	}
 
 	DO_LDS();
     END_OPF;
@@ -2704,7 +2750,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 /* PGXP's value goes with the word: the GPU reads it from the
 	  * port as the word is written */
 	 if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_SW(instr, GPR[rt], address);
+		PGXP_CPU_SW(instr, GPR[rt], PGXP_StoreAddress(address));
 
 	 WriteMemory_u32(&timestamp, address, GPR[rt], false);
 	}
@@ -2757,7 +2803,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	}
 
         if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-	   PGXP_CPU_LWL(instr, LDValue, address);
+	   PGXP_CPU_LoadDelayed(instr, LDValue, address);
 
     END_OPF;
 
@@ -2775,6 +2821,9 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         address = GPR[rs] + immediate;
 
+	/* GPU ports copy their metadata while accepting the native word. */
+	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+	   PGXP_CPU_SWL(instr, GPR[rt], PGXP_StoreAddress(address));
 	switch(address & 0x3)
 	{
 	 case 0: WriteMemory_u8(&timestamp, address & ~3, GPR[rt] >> 24);
@@ -2789,9 +2838,6 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 case 3: WriteMemory_u32(&timestamp, address & ~3, GPR[rt] >> 0, false);
 		 break;
 	}
-        if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-	   PGXP_CPU_SWL(instr, GPR[rt], address);
-
 	DO_LDS();
 
     END_OPF;
@@ -2839,7 +2885,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	}
 
         if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-	   PGXP_CPU_LWR(instr, LDValue, address);
+	   PGXP_CPU_LoadDelayed(instr, LDValue, address);
 
     END_OPF;
 
@@ -2857,6 +2903,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         address = GPR[rs] + immediate;
 
+	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
+		PGXP_CPU_SWR(instr, GPR[rt], PGXP_StoreAddress(address));
 	switch(address & 0x3)
 	{
 	 case 0: WriteMemory_u32(&timestamp, address, GPR[rt], false);
@@ -2871,10 +2919,6 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 case 3: WriteMemory_u8(&timestamp, address, GPR[rt]);
 		 break;
 	}
-
-        if (PGXP_GetModes() & PGXP_MODE_MEMORY)
-		PGXP_CPU_SWR(instr, GPR[rt], address);
-
 
 	DO_LDS();
 
@@ -2912,7 +2956,20 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
   if (timestamp >= 0 && PC != oldpc)
      print_for_big_ass_debugger(timestamp, PC);
 #endif
- } while(MDFN_LIKELY(PSX_EventHandler(timestamp)));
+  /* Preserve a deadline changed by an instruction or an event writer. If
+   * only our slice limit remains, restore the scheduler's original deadline
+   * before draining the real event queue. */
+  if (pipeline_ready && next_event_ts == slice_deadline)
+   next_event_ts = saved_deadline;
+  if (!PSX_EventHandler(timestamp))
+   break;
+  if (pipeline_ready && (LDWhich == 0 || LDWhich >= 32) && !BDBT &&
+      new_PC == PC + 4 && gte_ts_done <= timestamp && muldiv_ts_done <= timestamp)
+  {
+   *pipeline_ready = true;
+   break;
+  }
+ } while(1);
 
  if(gte_ts_done > 0)
   gte_ts_done -= timestamp;
@@ -2951,7 +3008,7 @@ int32_t CPU_Run(PS_CPU *self, int32_t timestamp_in)
           * lightrec_plugin_init), and an option toggle while the interpreter
           * has been the backend since boot would dereference NULL here (#968). */
          if (lightrec_state)
-            GTE_SwitchRegisters(false,lightrec_regs->cp2d);
+            GTE_SwitchRegisters(false, lightrec_regs->cp2d);
       }
       else
          lightrec_plugin_init(self);
@@ -2965,9 +3022,23 @@ int32_t CPU_Run(PS_CPU *self, int32_t timestamp_in)
       next_interpreter--;
 
    if (psx_dynarec != DYNAREC_DISABLED)
+   {
+      /* Lightrec has no serialized native branch/load pipeline. Do not lose
+       * that work on restore or an engine switch, or publish a delayed load
+       * before its consumer has read the old register. */
+      if ((BACKED_LDWhich > 0 && BACKED_LDWhich < 32) || BDBT ||
+          BACKED_new_PC != BACKED_PC + 4)
+      {
+         bool pipeline_ready = false;
+         timestamp_in = CPU_RunReal(self, timestamp_in, &pipeline_ready);
+         if (!pipeline_ready)
+            return timestamp_in;
+      }
+      cpu_interpreter_active = false;
       return lightrec_plugin_execute(self, timestamp_in);
+   }
 #endif
-   return CPU_RunReal(self, timestamp_in);
+   return CPU_RunReal(self, timestamp_in, NULL);
 }
 
 #undef BEGIN_OPF
@@ -3088,6 +3159,20 @@ static void print_for_big_ass_debugger(int32_t timestamp, uint32_t PC)
 }
 #endif /* LIGHTREC_DEBUG */
 
+static void pgxp_load_delay(struct lightrec_state *state, uint32_t reg,
+		uint32_t value, enum lightrec_load_action action)
+{
+	(void)state;
+	switch (action)
+	{
+	case LIGHTREC_LOAD_SAVE: PGXP_CPU_SaveLoad(reg); break;
+	case LIGHTREC_LOAD_DEFER: PGXP_CPU_DeferLoad(reg, 0); break;
+	case LIGHTREC_LOAD_DISCARD: PGXP_CPU_DeferLoad(reg, 1); break;
+	case LIGHTREC_LOAD_COMMIT: PGXP_CPU_FinishLoad(reg, value, 1); break;
+	case LIGHTREC_LOAD_CANCEL: PGXP_CPU_FinishLoad(reg, value, 0); break;
+	}
+}
+
 static void pgxp_cop2_notify(struct lightrec_state *state, uint32_t op, uint32_t data)
 {
 	if((op >> 26) == OP_CP2) {
@@ -3187,9 +3272,8 @@ static void pgxp_hw_write_byte(struct lightrec_state *state,
 {
 	int32_t timestamp = lightrec_current_cycle_count(state);
 
-	PSX_MemWrite8(timestamp, mem, val);
-
 	PGXP_CPU_SB(opcode, val, mem);
+	PSX_MemWrite8(timestamp, mem, val);
 
 	reset_target_cycle_count(state, timestamp);
 }
@@ -3219,9 +3303,8 @@ static void pgxp_hw_write_half(struct lightrec_state *state,
 {
 	int32_t timestamp = lightrec_current_cycle_count(state);
 
-	PSX_MemWrite16(timestamp, mem, val);
-
 	PGXP_CPU_SH(opcode, val, mem);
+	PSX_MemWrite16(timestamp, mem, val);
 
 	reset_target_cycle_count(state, timestamp);
 }
@@ -3242,14 +3325,8 @@ static void pgxp_nonhw_write_word(struct lightrec_state *state,
 	*(uint32_t *)host = HTOLE32(val);
 
 	switch (opcode >> 26){
-		case 0x2A:
-			PGXP_CPU_SWL(opcode, val, mem + (opcode & 0x3));
-			break;
 		case 0x2B:
 			PGXP_CPU_SW(opcode, val, mem);
-			break;
-		case 0x2E:
-			PGXP_CPU_SWR(opcode, val, mem + (opcode & 0x3));
 			break;
 		case 0x3A:
 			PGXP_GTE_SWC2(opcode, val, mem);
@@ -3267,7 +3344,15 @@ static void pgxp_nonhw_write_word_unsigned(struct lightrec_state *state,
 {
 	*(uint32_t *)host = HTOLE32(val);
 
-	PGXP_CPU_SW(opcode, val, mem);
+	if (mem & 3)
+	{
+		/* A fused SWL/SWR spans two owners. Neither receives a whole
+		 * source word; preserve the source register and retire both. */
+		PGXP_InvalidateMem(mem);
+		PGXP_InvalidateMem(mem + 3);
+	}
+	else
+		PGXP_CPU_SW(opcode, val, mem);
 
 	/* Unaligned store: may span two words. Match
 	 * lightrec_default_swu(): check both words and invalidate the
@@ -3286,14 +3371,8 @@ static void pgxp_hw_write_word(struct lightrec_state *state,
 	/* PGXP's value goes with the word: the GPU reads it from the
 	 * port as the word is written */
 	switch (opcode >> 26){
-		case OP_SWL:
-			PGXP_CPU_SWL(opcode, val, mem + (opcode & 0x3));
-			break;
 		case OP_SW:
 			PGXP_CPU_SW(opcode, val, mem);
-			break;
-		case OP_SWR:
-			PGXP_CPU_SWR(opcode, val, mem + (opcode & 0x3));
 			break;
 		case OP_SWC2:
 			PGXP_GTE_SWC2(opcode, val, mem);
@@ -3424,16 +3503,8 @@ static uint32_t pgxp_nonhw_read_word(struct lightrec_state *state,
 	uint32_t val = LE32TOH(*(uint32_t *)host);
 
 	switch (opcode >> 26){
-		case OP_LWL:
-			//TODO: OR with masked register
-			PGXP_CPU_LWL(opcode, val << (24-(opcode & 0x3)*8), mem + (opcode & 0x3));
-			break;
 		case OP_LW:
 			PGXP_CPU_LW(opcode, val, mem);
-			break;
-		case OP_LWR:
-			//TODO: OR with masked register
-			PGXP_CPU_LWR(opcode, val >> ((opcode & 0x3)*8), mem + (opcode & 0x3));
 			break;
 		case OP_LWC2:
 			PGXP_GTE_LWC2(opcode, val, mem);
@@ -3450,7 +3521,8 @@ static uint32_t pgxp_nonhw_read_word_unsigned(struct lightrec_state *state,
 {
 	uint32_t val = LE32TOH(*(uint32_t *)host);
 
-	PGXP_CPU_LW(opcode, val, mem);
+	/* A fused LWL/LWR is a whole-word identity only when aligned. */
+	PGXP_CPU_LWR(opcode, val, mem);
 
 	return val;
 }
@@ -3463,16 +3535,8 @@ static uint32_t pgxp_hw_read_word(struct lightrec_state *state,
 
 	switch (opcode >> 26)
 	{
-		case OP_LWL:
-			//TODO: OR with masked register
-			PGXP_CPU_LWL(opcode, val << (24-(opcode & 0x3)*8), mem + (opcode & 0x3));
-			break;
 		case OP_LW:
 			PGXP_CPU_LW(opcode, val, mem);
-			break;
-		case OP_LWR:
-			//TODO: OR with masked register
-			PGXP_CPU_LWR(opcode, val >> ((opcode & 0x3)*8), mem + (opcode & 0x3));
 			break;
 		case OP_LWC2:
 			PGXP_GTE_LWC2(opcode, val, mem);
@@ -3619,8 +3683,10 @@ static void enable_ram(struct lightrec_state *state, _Bool enable)
 {
 	if (enable) {
 		memcpy(MainRAM->data8, cache_buf, sizeof(cache_buf));
+		PGXP_CacheIsolation(0);
 	} else {
 		memcpy(cache_buf, MainRAM->data8, sizeof(cache_buf));
+		PGXP_CacheIsolation(1);
 	}
 }
 
@@ -3629,7 +3695,22 @@ static struct lightrec_ops ops = {
 	.enable_ram = enable_ram,
 };
 
+static void pgxp_unaligned_access(struct lightrec_state *state,
+		uint32_t opcode, uint32_t address, uint32_t value)
+{
+	switch (opcode >> 26)
+	{
+	case OP_LWL: PGXP_CPU_LWL(opcode, value, address); break;
+	case OP_LWR: PGXP_CPU_LWR(opcode, value, address); break;
+	case OP_SWL: PGXP_CPU_SWL(opcode, value, address); break;
+	case OP_SWR: PGXP_CPU_SWR(opcode, value, address); break;
+	default: break;
+	}
+}
+
 static struct lightrec_ops pgxp_ops = {
+	.load_delay = pgxp_load_delay,
+	.unaligned_access = pgxp_unaligned_access,
 	.cop2_notify = pgxp_cop2_notify,
 	.cop2_op = cop2_op,
 	.enable_ram = enable_ram,
@@ -3647,8 +3728,7 @@ static int lightrec_plugin_init(PS_CPU *self)
 
    if (lightrec_state)
    {
-      GTE_SwitchRegisters(false,lightrec_regs->cp2d);
-      lightrec_destroy(lightrec_state);
+      lightrec_plugin_shutdown();
    }
    else
    {
@@ -3737,7 +3817,7 @@ static int lightrec_plugin_init(PS_CPU *self)
    lightrec_set_mem_cycle_penalty(lightrec_state,
                                   (psx_dynarec_op_cycles == 1) ? 1 : 0);
 
-   GTE_SwitchRegisters(true,lightrec_regs->cp2d);
+   GTE_SwitchRegisters(true, lightrec_regs->cp2d);
 
    return 0;
 }
@@ -3866,6 +3946,7 @@ static void lightrec_plugin_shutdown(void)
    lightrec_destroy(lightrec_state);
    lightrec_state = NULL;
    lightrec_regs  = NULL;
+   cpu_interpreter_active = true;
 }
 
 #endif
@@ -3878,7 +3959,7 @@ static void lightrec_plugin_shutdown(void)
 int32_t CPU_LastEventCheckTS(void)
 {
 #ifdef HAVE_LIGHTREC
-   if (psx_dynarec != DYNAREC_DISABLED && lightrec_state)
+   if (!cpu_interpreter_active && lightrec_state)
       return (int32_t)lightrec_last_check_cycle_count(lightrec_state);
 #endif
    return cpu_last_check_ts;

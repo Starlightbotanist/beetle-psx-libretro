@@ -33,6 +33,8 @@
 #include "mdec.h"
 #include "gpu.h"
 #include "dma.h"
+#include "../../pgxp/pgxp_main.h"
+#include "../../pgxp/pgxp_mem.h"
 
 /* Notes:
 
@@ -368,8 +370,9 @@ static INLINE void ChRW(const unsigned ch, const uint32_t CRModeCache, const uin
 
 static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
 {
+   uint32_t inv_first = 0, inv_count = 0;
 #ifdef HAVE_LIGHTREC
-   uint32_t inv_min = 0, inv_max = 0, inv_count = 0;
+   uint32_t inv_min = 0, inv_max = 0;
 #endif
    /* Mask out the bits that the DMA controller will modify during the course of operation. */
    uint32_t CRModeCache = DMACH[ch].ChanControl &~(0x11 << 24);
@@ -535,6 +538,12 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
             {
                uint32_t waddr = (DMACH[ch].CurAddr + (voffs << 2)) & 0x1FFFFC;
                MASMEM_WriteU32(MainRAM, waddr, vtmp);
+               if(!inv_count)
+                  inv_first = waddr;
+               /* MDEC output scatters words within a macroblock. Retire only
+                * each actual destination; contiguous channels are batched. */
+               if(ch == CH_MDEC_OUT && PGXP_enabled())
+                  PGXP_InvalidateRAMWord(waddr);
 #ifdef HAVE_LIGHTREC
                if(!inv_count)
                {
@@ -548,8 +557,8 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                   if(waddr > inv_max)
                      inv_max = waddr;
                }
-               inv_count++;
 #endif
+               inv_count++;
             }
          }
 
@@ -614,6 +623,9 @@ SkipPayloadStuff: ;
       if(DMACH[ch].ClockCounter > 0)
          DMACH[ch].ClockCounter = 0;
    }
+
+   if(inv_count && ch != CH_MDEC_OUT && PGXP_enabled())
+      PGXP_InvalidateRAM(inv_first, inv_count, (CRModeCache & 0x2) != 0);
 
 #ifdef HAVE_LIGHTREC
    /* Invalidate the whole written range in one call once the transfer

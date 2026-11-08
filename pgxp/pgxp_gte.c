@@ -49,6 +49,10 @@ PGXP_value GTE_ctrl_reg_mem[32];
 PGXP_value* GTE_data_reg = GTE_data_reg_mem;
 PGXP_value* GTE_ctrl_reg = GTE_ctrl_reg_mem;
 
+/* UINT32_MAX means no fog association. Never recycle an identity while
+ * CPU, RAM or command-buffer shadows from the same timeline can survive. */
+static uint32_t pgxp_rgb_count;
+
 void PGXP_InitGTE()
 {
 	PGXP_GTE_InvalidateFogRing();
@@ -144,10 +148,8 @@ void PGXP_pushSXYZ2s(int64_t _x, int64_t _y, int64_t _z, uint32_t v)
  * them here is all that is needed for a display-list color word stored via
  * `swc2 $22` to arrive at the GPU-side command buffer with its precise
  * payload attached. */
-/* Depth-cue sidecar ring; see pgxp_gte.h. 4096 entries is over two
- * seconds of colour pushes at the GTE's realistic rate, and the exact
- * count compare on lookup makes aliasing a refusal, never a wrong
- * answer. */
+/* Depth-cue sidecar ring; see pgxp_gte.h. A recycled slot must decline
+ * an older count. The count itself must not wrap and alias a live owner. */
 #define PGXP_FOG_RING_SIZE 4096u
 
 typedef struct
@@ -179,12 +181,8 @@ void PGXP_GTE_SetFogContext(float pre_r, float pre_g, float pre_b,
 
 void PGXP_GTE_InvalidateFogRing(void)
 {
-	/* t < 0 is the no-cue encoding; count 0 with t < 0 can never satisfy a
-	 * lookup, so this refuses every stale association in one pass. Called on
-	 * init and on savestate load, where the push counter restarts while the
-	 * counts stored in RAM shadows survive -- without this, a recycled slot
-	 * whose new count collides with a pre-load shadow's count would hand a
-	 * validated colour someone else's fog. */
+	/* Ring-only invalidation must not recycle counts: other shadow owners
+	 * can survive it. t < 0 refuses every retired ring entry. */
 	unsigned i;
 	for (i = 0; i < PGXP_FOG_RING_SIZE; i++)
 	{
@@ -194,11 +192,17 @@ void PGXP_GTE_InvalidateFogRing(void)
 	pgxp_fog_pending_set = 0;
 }
 
+void PGXP_GTE_ResetColorCount(void)
+{
+	/* PGXP_Init calls this only after retiring every shadow owner. */
+	pgxp_rgb_count = 0;
+}
+
 int PGXP_GTE_GetFogByCount(uint32_t count, float out_pre[3],
 		float out_fc[3], float *out_t)
 {
 	const pgxp_fog_entry *e = &pgxp_fog_ring[count % PGXP_FOG_RING_SIZE];
-	if (e->count != count || e->t < 0.0f)
+	if (count == UINT32_MAX || e->count != count || e->t < 0.0f)
 		return 0;
 	out_pre[0] = e->pre[0]; out_pre[1] = e->pre[1]; out_pre[2] = e->pre[2];
 	out_fc[0]  = e->fc[0];  out_fc[1]  = e->fc[1];  out_fc[2]  = e->fc[2];
@@ -208,17 +212,16 @@ int PGXP_GTE_GetFogByCount(uint32_t count, float out_pre[3],
 
 void PGXP_pushRGBf(float _r, float _g, float _b, uint32_t _v)
 {
-	static uint32_t uCount = 0;
-	pgxp_fog_entry *slot = &pgxp_fog_ring[uCount % PGXP_FOG_RING_SIZE];
-
-	if (pgxp_fog_pending_set)
+	if (pgxp_rgb_count != UINT32_MAX)
 	{
-		*slot = pgxp_fog_pending;
-		pgxp_fog_pending_set = 0;
+		pgxp_fog_entry *slot = &pgxp_fog_ring[pgxp_rgb_count % PGXP_FOG_RING_SIZE];
+		if (pgxp_fog_pending_set)
+			*slot = pgxp_fog_pending;
+		else
+			slot->t = -1.0f;
+		slot->count = pgxp_rgb_count;
 	}
-	else
-		slot->t = -1.0f;
-	slot->count = uCount;
+	pgxp_fog_pending_set = 0;
 
 	GTE_data_reg[20] = GTE_data_reg[21];
 	GTE_data_reg[21] = GTE_data_reg[22];
@@ -227,8 +230,10 @@ void PGXP_pushRGBf(float _r, float _g, float _b, uint32_t _v)
 	GTE_data_reg[22].y      = _g;
 	GTE_data_reg[22].z      = _b;
 	GTE_data_reg[22].value  = _v;
-	GTE_data_reg[22].flags  = VALID_ALL;
-	GTE_data_reg[22].count  = uCount++;
+	GTE_data_reg[22].flags  = PGXP_COLOR;
+	GTE_data_reg[22].count  = pgxp_rgb_count;
+	if (pgxp_rgb_count != UINT32_MAX)
+		pgxp_rgb_count++;
 	GTE_data_reg[22].gFlags = 0;
 	GTE_data_reg[22].lFlags = 0;
 	GTE_data_reg[22].hFlags = 0;
@@ -290,6 +295,12 @@ static void PGXP_MTC2_int(PGXP_value value, uint32_t reg)
  * Data transfer tracking
  * ============================================================ */
 
+static PGXP_value *PGXP_ReadDataRegister(uint32_t reg)
+{
+	/* SXYP pushes the FIFO on writes, but reads always alias SXY2. */
+	return &GTE_data_reg[reg == 15 ? 14 : reg];
+}
+
 void MFC2(int reg) {
 	psx_value val;
 	val.d = GTE_data_reg[reg].value;
@@ -327,9 +338,25 @@ void MFC2(int reg) {
 void PGXP_GTE_MFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
 {
 	/* CPU[Rt] = GTE_D[Rd] */
-	Validate(&GTE_data_reg[rd(instr)], rdVal);
-	CPU_reg[rt(instr)] = GTE_data_reg[rd(instr)];
+	PGXP_value *value = PGXP_ReadDataRegister(rd(instr));
+	if (rt(instr) == 0)
+		return;
+
+	Validate(value, rdVal);
+	CPU_reg[rt(instr)] = *value;
 	CPU_reg[rt(instr)].value = rtVal;
+	PGXP_CPU_ValidateColor(&CPU_reg[rt(instr)]);
+}
+
+void PGXP_GTE_ReadDelayed(uint32_t instr, uint32_t value)
+{
+	PGXP_value *source = (rs(instr) == 2) ? &GTE_ctrl_reg[rd(instr)] :
+		PGXP_ReadDataRegister(rd(instr));
+	PGXP_value *dest = PGXP_CPU_PendingLoad(instr);
+	Validate(source, value);
+	*dest = *source;
+	dest->value = value;
+	PGXP_CPU_ValidateColor(dest);
 }
 
 void PGXP_GTE_MTC2(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
@@ -343,9 +370,13 @@ void PGXP_GTE_MTC2(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 void PGXP_GTE_CFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
 {
 	/* CPU[Rt] = GTE_C[Rd] */
+	if (rt(instr) == 0)
+		return;
+
 	Validate(&GTE_ctrl_reg[rd(instr)], rdVal);
 	CPU_reg[rt(instr)] = GTE_ctrl_reg[rd(instr)];
 	CPU_reg[rt(instr)].value = rtVal;
+	PGXP_CPU_ValidateColor(&CPU_reg[rt(instr)]);
 }
 
 void PGXP_GTE_CTC2(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
@@ -370,8 +401,9 @@ void	PGXP_GTE_LWC2(uint32_t instr, uint32_t rtVal, uint32_t addr)
 void	PGXP_GTE_SWC2(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/*  Mem[addr] = GTE_D[Rt] */
-	Validate(&GTE_data_reg[rt(instr)], rtVal);
-	WriteMem(&GTE_data_reg[rt(instr)], addr);
+	PGXP_value *value = PGXP_ReadDataRegister(rt(instr));
+	Validate(value, rtVal);
+	WriteMem(value, addr);
 }
 
 /* --- Transform-range instrumentation; see pgxp_gte.h ----------------

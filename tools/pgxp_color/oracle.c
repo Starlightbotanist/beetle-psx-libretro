@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "../../pgxp/pgxp_gte.h"
 #include "../../pgxp/pgxp_gpu.h"
 #include "../../pgxp/pgxp_types.h"
 #include "../../pgxp/pgxp_value.h"
@@ -52,18 +53,13 @@ static uint32_t gte_pack(int32_t mac1, int32_t mac2, int32_t mac3, uint8_t cd)
         | ((uint32_t)cd << 24);
 }
 
-/* --- Replica of the push in MAC_to_RGB_FIFO ---------------------------- */
+/* --- Actual RGB producer used by MAC_to_RGB_FIFO ---------------------------- */
 static void push_shadow(uint32_t cb_slot, int32_t mac1, int32_t mac2,
                         int32_t mac3, uint32_t packed)
 {
-   PGXP_value v;
-   memset(&v, 0, sizeof(v));
-   v.x     = (float)mac1 / 16.0f;
-   v.y     = (float)mac2 / 16.0f;
-   v.z     = (float)mac3 / 16.0f;
-   v.value = packed;
-   v.flags = VALID_ALL;
-   PGXP_WriteCB(&v, cb_slot);
+   PGXP_pushRGBf((float)mac1 / 16.0f, (float)mac2 / 16.0f,
+         (float)mac3 / 16.0f, packed);
+   PGXP_WriteCB(&GTE_data_reg[22], cb_slot);
 }
 
 static uint64_t checked, accepted, rejected, mismatches;

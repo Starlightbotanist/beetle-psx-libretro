@@ -70,7 +70,7 @@ static u64 opcode_read_mask(union code op)
 		case OP_SPECIAL_MFLO:
 			return BIT(REG_LO);
 		case OP_SPECIAL_SLL:
-			if (!op.r.imm)
+			if (!op.opcode)
 				return 0;
 			fallthrough;
 		case OP_SPECIAL_SRL:
@@ -168,7 +168,7 @@ u64 opcode_write_mask(union code op)
 		case OP_SPECIAL_MTLO:
 			return BIT(REG_LO);
 		case OP_SPECIAL_SLL:
-			if (!op.r.imm)
+			if (!op.opcode)
 				return 0;
 			fallthrough;
 		default:
@@ -235,6 +235,18 @@ bool opcode_writes_register(union code op, u8 reg)
 	return opcode_write_mask(op) & BIT(reg);
 }
 
+/* A cancelled load still performs its access, but does not define its
+ * architectural target register for liveness or constant propagation. */
+static u64 opcode_effective_write_mask(const struct opcode *op)
+{
+	return op_flag_load_discard(op->flags) ? 0 : opcode_write_mask(op->c);
+}
+
+static bool opcode_effectively_writes(const struct opcode *op, u8 reg)
+{
+	return opcode_effective_write_mask(op) & BIT(reg);
+}
+
 static int find_prev_writer(const struct opcode *list, unsigned int offset, u8 reg)
 {
 	union code c;
@@ -246,7 +258,7 @@ static int find_prev_writer(const struct opcode *list, unsigned int offset, u8 r
 	for (i = offset; i > 0; i--) {
 		c = list[i - 1].c;
 
-		if (opcode_writes_register(c, reg)) {
+		if (opcode_effectively_writes(&list[i - 1], reg)) {
 			if (i > 1 && has_delay_slot(list[i - 2].c))
 				break;
 
@@ -279,7 +291,7 @@ static int find_next_reader(const struct opcode *list, unsigned int offset, u8 r
 		if (op_flag_sync(list[i].flags)
 		    || (op_flag_no_ds(list[i].flags) && has_delay_slot(c))
 		    || is_delay_slot(list, i)
-		    || opcode_writes_register(c, reg))
+		    || opcode_effectively_writes(&list[i], reg))
 			break;
 	}
 
@@ -297,7 +309,7 @@ static bool reg_is_dead(const struct opcode *list, unsigned int offset, u8 reg)
 		if (opcode_reads_register(list[i].c, reg))
 			return false;
 
-		if (opcode_writes_register(list[i].c, reg))
+		if (opcode_effectively_writes(&list[i], reg))
 			return true;
 
 		if (is_syscall(list[i].c))
@@ -308,7 +320,7 @@ static bool reg_is_dead(const struct opcode *list, unsigned int offset, u8 reg)
 			    opcode_reads_register(list[i + 1].c, reg))
 				return false;
 
-			return opcode_writes_register(list[i + 1].c, reg);
+			return opcode_effectively_writes(&list[i + 1], reg);
 		}
 	}
 }
@@ -333,7 +345,7 @@ static bool reg_is_written(const struct opcode *list,
 	 * [a, b[ */
 
 	for (; a < b; a++) {
-		if (!is_nop(list[a].c) && opcode_writes_register(list[a].c, reg))
+		if (!is_nop(list[a].c) && opcode_effectively_writes(&list[a], reg))
 			return true;
 	}
 
@@ -650,7 +662,7 @@ lightrec_remove_useless_lui(struct block *block, unsigned int offset,
 	if (reader <= 0)
 		return;
 
-	if (opcode_writes_register(list[reader].c, op->i.rt) ||
+	if (opcode_effectively_writes(&list[reader], op->i.rt) ||
 	    reg_is_dead(list, reader, op->i.rt)) {
 		pr_debug("Removing useless LUI 0x0\n");
 
@@ -702,7 +714,7 @@ static void lightrec_modify_lui(struct block *block, unsigned int offset)
 		    || (!opcode_is_load(c) && opcode_reads_register(c, lui->i.rt)))
 			break;
 
-		if (opcode_writes_register(c, lui->i.rt)) {
+		if (opcode_effectively_writes(&block->opcode_list[i], lui->i.rt)) {
 			if (c.i.op == OP_LWL || c.i.op == OP_LWR) {
 				/* LWL/LWR only partially write their target register;
 				 * therefore the LUI should not write a different value. */
@@ -1432,6 +1444,15 @@ static int lightrec_handle_load_delays(struct lightrec_state *state,
 			continue;
 
 		if (!is_delay_slot(list, i)) {
+			/* A second ordinary load to the same register cancels the
+			 * first writeback, but not its memory access. LWL/LWR merge. */
+			if (i + 1 < block->nb_ops &&
+			    opcode_is_load(list[i + 1].c) &&
+			    list[i + 1].c.i.rt == op->c.i.rt &&
+			    list[i + 1].c.i.op != OP_LWL &&
+			    list[i + 1].c.i.op != OP_LWR &&
+			    list[i + 1].c.i.op != OP_LWC2)
+				op->flags |= LIGHTREC_DISCARD_LOAD;
 			/* Only handle load delays in delay slots.
 			 * PSX games never abused load delay slots otherwise. */
 			continue;
@@ -1478,7 +1499,7 @@ static int lightrec_swap_load_delays(struct lightrec_state *state,
 
 		if (skip_next) {
 			skip_next = false;
-		} else if (!in_ds && opcode_is_load(c) && c.i.op != OP_LWC2) {
+		} else if (!in_ds && opcode_has_load_delay(c)) {
 			next = block->opcode_list[i + 1].c;
 
 			switch (next.i.op) {
@@ -1496,6 +1517,8 @@ static int lightrec_swap_load_delays(struct lightrec_state *state,
 					 "respect load delay\n", i << 2);
 
 				op = block->opcode_list[i];
+				if (opcode_writes_register(next, c.i.rt))
+					op.flags |= LIGHTREC_DISCARD_LOAD;
 				block->opcode_list[i] = block->opcode_list[i + 1];
 				block->opcode_list[i + 1] = op;
 				skip_next = true;
@@ -1698,7 +1721,7 @@ static int lightrec_early_unload(struct lightrec_state *state, struct block *blo
 		}
 
 		mask_r = opcode_read_mask(op->c);
-		mask_w = opcode_write_mask(op->c);
+		mask_w = opcode_effective_write_mask(op);
 
 		if (op_flag_load_delay(op->flags) && opcode_is_load(op->c)) {
 			/* If we have a load opcode in a delay slot, its target
@@ -1764,6 +1787,7 @@ static int lightrec_early_unload(struct lightrec_state *state, struct block *blo
 static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 {
 	struct opcode *list;
+	const struct lightrec_mem_map *map;
 	enum psx_map psx_map;
 	struct constprop_data v[32] = LIGHTREC_CONSTPROP_INITIALIZER;
 	unsigned int i;
@@ -1827,6 +1851,19 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 
 				no_mask = (v[list->i.rs].known & ~v[list->i.rs].value
 					   & 0xe0000000) == 0xe0000000;
+
+				/* Direct accesses must not bypass the owning map's callbacks. */
+				if (psx_map != PSX_MAP_UNKNOWN &&
+				    psx_map != PSX_MAP_HW_REGISTERS) {
+					map = &state->maps[psx_map];
+					while (map->mirror_of)
+						map = map->mirror_of;
+
+					if (map->ops) {
+						list->flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_HW);
+						continue;
+					}
+				}
 
 				switch (psx_map) {
 				case PSX_MAP_KERNEL_USER_RAM:
@@ -1946,7 +1983,7 @@ static u8 get_mfhi_mflo_reg(const struct block *block, u16 offset,
 		/* If any other opcode writes or reads to the register
 		 * we'd use, then we cannot use it anymore. */
 		mask |= opcode_read_mask(op->c);
-		mask |= opcode_write_mask(op->c);
+		mask |= opcode_effective_write_mask(op);
 
 		if (op_flag_sync(op->flags))
 			sync = true;
@@ -2429,9 +2466,7 @@ int lightrec_optimize(struct lightrec_state *state, struct block *block)
 		for (i = 0; i < block->nb_ops; i++) {
 			union code c = block->opcode_list[i].c;
 
-			if (c.i.op == OP_SPECIAL &&
-			    c.r.op == OP_SPECIAL_ADDU && c.r.rt == 0 &&
-			    c.r.rd != 0 && c.r.rd != c.r.rs)
+			if (opcode_is_addu_identity(c))
 				block->opcode_list[i].flags |=
 					LIGHTREC_PGXP_ADDU_IDENTITY;
 		}
