@@ -652,8 +652,13 @@ int PGXP_GetVertex(const uint32_t offset, const uint32_t* addr, OGLVertex* pOutp
 	pOutput->w = 1.f;
 	pOutput->valid_w = 0;
 
+	/* Unprojected CPU arithmetic can accumulate error across whole
+	 * words. Without a transform or depth witness, accept only nearby
+	 * precision so a raster span or glyph keeps its native coverage. */
 	if (vert && ((vert->flags & VALID_01) == VALID_01) && (vert->value == psxWord) &&
-		isfinite(vert->x) && isfinite(vert->y))
+		isfinite(vert->x) && isfinite(vert->y) &&
+		((vert->flags & VALID_2) || vert->count ||
+		 (fabsf(vert->x - psxX) <= 8.f && fabsf(vert->y - psxY) <= 8.f)))
 	{
 		/* There is a value here with valid X and Y coordinates */
 		pOutput->x = (vert->x + xOffs);

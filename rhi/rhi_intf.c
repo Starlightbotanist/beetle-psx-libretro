@@ -490,6 +490,25 @@ void rhi_intf_invalidate_clut_cache(void)
    }
 }
 
+void rhi_intf_begin_pgxp_depth_group(void)
+{
+   switch (rhi_type)
+   {
+      case RHI_OPENGL:
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+         rhi_gl_begin_pgxp_depth_group();
+#endif
+         break;
+      case RHI_VULKAN:
+#if defined(HAVE_VULKAN)
+         rhi_vulkan_begin_pgxp_depth_group();
+#endif
+         break;
+      default:
+         break;
+   }
+}
+
 void rhi_intf_set_draw_offset(int16_t x, int16_t y)
 {
 #ifdef RHI_DUMP

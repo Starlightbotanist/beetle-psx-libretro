@@ -931,8 +931,14 @@ static void PGXP_CPU_ShiftRight(uint32_t instr, uint32_t rdVal,
 		 * Both branches only shift by 1..16, never the word width. */
 		inverse_scale = (1u << (32 - sh)) * (1.0 / 65536.0);
 		x = arithmetic ? ret.y : f16Unsign(ret.y);
-		ret.x = f16Sign(x * inverse_scale);
-		ret.y = (arithmetic && (rtVal & 0x80000000u)) ? -1.f : 0.f;
+		x *= inverse_scale;
+		ret.x = f16Sign(x);
+		/* The old high half is now a scalar. Its sign can differ from
+		 * the native sign after a fractional carry or borrow. */
+		if (arithmetic && (ret.flags & VALID_1))
+			ret.y = x <= -(1.0 / 65536.0) ? -1.f : 0.f;
+		else
+			ret.y = (arithmetic && (rtVal & 0x80000000u)) ? -1.f : 0.f;
 		ret.compFlags[0] = ret.compFlags[1];
 		ret.compFlags[1] = VALID;
 		ret.lFlags = ret.hFlags;
