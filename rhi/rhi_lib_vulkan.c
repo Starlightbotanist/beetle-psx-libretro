@@ -5826,6 +5826,8 @@ typedef struct PGXPDepthGroup
 {
    unsigned opaque_end;
    unsigned textured_end;
+   unsigned semi_opaque_end;
+   unsigned blended_end;
    bool active;
 } PGXPDepthGroup;
 POD_VEC_DECLARE(PGXPDepthGroupVec, PGXPDepthGroup);
@@ -6300,7 +6302,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          bool textured);
    static void renderer_render_opaque_primitives(Renderer *self,
          PrimitiveInfoVec *scissors);
-   static void renderer_render_semi_transparent_primitives(Renderer *self);
+   static void renderer_render_semi_transparent_primitives(Renderer *self, SemiTransparentStateVec *states);
    static void renderer_semi_transparent_set_state(Renderer *self,
          const SemiTransparentState *state);
    /* End the current render pass and transition the reusable scanout image from
@@ -6394,14 +6396,14 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       renderer_set_primitive_color_spec_constants(self, cmd);
    }
 
-   static void renderer_render_semi_transparent_opaque_texture_primitives(Renderer *self){
-      PrimitiveInfoVec *scissors = &self->queue.semi_transparent_opaque_scissor;
+   static void renderer_render_semi_transparent_opaque_texture_primitives(Renderer *self,
+         PrimitiveInfoVec *scissors, bool depth){
       if (PrimitiveInfoVec_empty(scissors))
          return;
 
       commandbuffer_set_opaque_state(cbh_get(&self->cmd));
       commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
-      commandbuffer_set_depth_compare(cbh_get(&self->cmd), self->pgxp_depth.active ?
+      commandbuffer_set_depth_compare(cbh_get(&self->cmd), depth ?
             VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS);
       renderer_set_opaque_primitive_spec_constants(self, TransMode_SemiTransOpaque);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
@@ -10711,16 +10713,11 @@ static void renderer_upscaler_pass(Renderer *self, const psx_upscaler_geometry_t
          VK_ACCESS_SHADER_READ_BIT);
 }
 
-static RHI_NOINLINE void renderer_split_pgxp_depth(Renderer *self,
-      bool active, unsigned count)
+static RHI_NOINLINE void renderer_split_pgxp_depth(Renderer *self, unsigned count)
 {
    PGXPDepthGroupVec *groups = &self->queue.depth_groups;
-   /* Keep projection changes on the fresh-pass fast-clear path. */
-   if (active != self->pgxp_depth.active &&
-       count >= 3 && vkCmdClearAttachments &&
-       self->atlas.renderpass.inside && !self->render_pass_is_feedback &&
-       !self->render_state.mask_test &&
-       self->render_state.semi_transparent == SemiTransparentMode_None &&
+   if (count >= 3 && vkCmdClearAttachments &&
+       self->atlas.renderpass.inside &&
        ClearCandidateVec_empty(&self->queue.clear_candidates) &&
        !BufferVertexVec_empty(&self->queue.vertices) &&
        PGXPDepthGroupVec_size(groups) < 256 &&
@@ -10729,6 +10726,8 @@ static RHI_NOINLINE void renderer_split_pgxp_depth(Renderer *self,
       PGXPDepthGroup *group = &groups->items[groups->count++];
       group->opaque_end = PrimitiveInfoVec_size(&self->queue.opaque_scissor);
       group->textured_end = PrimitiveInfoVec_size(&self->queue.opaque_textured_scissor);
+      group->semi_opaque_end = PrimitiveInfoVec_size(&self->queue.semi_transparent_opaque_scissor);
+      group->blended_end = SemiTransparentStateVec_size(&self->queue.semi_transparent_state);
       group->active = self->pgxp_depth.active;
       self->primitive_index = 0;
       self->pgxp_depth.maximum = 0.f;
@@ -10741,11 +10740,8 @@ static RHI_NOINLINE void renderer_split_pgxp_depth(Renderer *self,
 static void renderer_prepare_pgxp_depth(Renderer *self, const Vertex *vertices,
       unsigned count)
 {
-   /* Feedback uses a separate subpass. Finish earlier groups before
-    * admitting it, including when the depth policy itself stays off. */
-   if (!PGXPDepthGroupVec_empty(&self->queue.depth_groups) &&
-       (count < 3 || self->render_state.mask_test ||
-        self->render_state.semi_transparent != SemiTransparentMode_None))
+   /* Non-polygon draws keep their existing submission boundary. */
+   if (count < 3 && !PGXPDepthGroupVec_empty(&self->queue.depth_groups))
       fbatlas_flush_render_pass(&self->atlas);
 
    if (psx_pgxp_depth_buffer || self->pgxp_depth.active)
@@ -10762,7 +10758,7 @@ static void renderer_prepare_pgxp_depth(Renderer *self, const Vertex *vertices,
             self->render_state.semi_transparent == SemiTransparentMode_None &&
             !self->render_state.mask_test, &maximum);
       if (rhi_pgxp_depth_flush(&self->pgxp_depth, active, maximum))
-         renderer_split_pgxp_depth(self, active, count);
+         renderer_split_pgxp_depth(self, count);
       self->pgxp_depth.active = active;
       if (!active)
          self->pgxp_depth.maximum = 0.f;
@@ -11132,14 +11128,19 @@ static bool renderer_upload_queued_vertices(Renderer *self)
 static RHI_NOINLINE void renderer_render_depth_groups(Renderer *self)
 {
    unsigned opaque_start = 0, textured_start = 0;
+   unsigned semi_opaque_start = 0, blended_start = 0;
    unsigned i, count = PGXPDepthGroupVec_size(&self->queue.depth_groups);
-   bool drawn = false;
+   bool drawn = false, feedback = false;
    for (i = 0; i <= count; i++)
    {
       PrimitiveInfoVec opaque = self->queue.opaque_scissor;
       PrimitiveInfoVec textured = self->queue.opaque_textured_scissor;
+      PrimitiveInfoVec semi_opaque = self->queue.semi_transparent_opaque_scissor;
+      SemiTransparentStateVec blended = self->queue.semi_transparent_state;
       PGXPDepthGroup last;
       const PGXPDepthGroup *group;
+      last.semi_opaque_end = PrimitiveInfoVec_size(&semi_opaque);
+      last.blended_end = SemiTransparentStateVec_size(&blended);
       last.opaque_end = PrimitiveInfoVec_size(&opaque);
       last.textured_end = PrimitiveInfoVec_size(&textured);
       last.active = self->pgxp_depth.active;
@@ -11150,7 +11151,13 @@ static RHI_NOINLINE void renderer_render_depth_groups(Renderer *self)
          opaque.items += opaque_start;
       if (textured_start)
          textured.items += textured_start;
-      if (opaque.count || textured.count)
+      semi_opaque.count = group->semi_opaque_end - semi_opaque_start;
+      blended.count = group->blended_end - blended_start;
+      if (semi_opaque_start)
+         semi_opaque.items += semi_opaque_start;
+      if (blended_start)
+         blended.items += blended_start;
+      if (opaque.count || textured.count || semi_opaque.count || blended.count)
       {
          if (drawn)
          {
@@ -11169,11 +11176,26 @@ static RHI_NOINLINE void renderer_render_depth_groups(Renderer *self)
          }
          renderer_render_opaque_primitives(self, &opaque);
          renderer_render_opaque_texture_primitives(self, &textured, group->active);
+         renderer_render_semi_transparent_opaque_texture_primitives(self, &semi_opaque, group->active);
+         if (blended.count)
+         {
+            if (!feedback)
+            {
+               commandbuffer_next_subpass(cbh_get(&self->cmd));
+               feedback = true;
+            }
+            renderer_render_semi_transparent_primitives(self, &blended);
+         }
          drawn = true;
       }
       opaque_start = group->opaque_end;
       textured_start = group->textured_end;
+      semi_opaque_start = group->semi_opaque_end;
+      blended_start = group->blended_end;
    }
+   /* Queue allocation can leave the declared feedback subpass empty. */
+   if (self->render_pass_is_feedback && !feedback)
+      commandbuffer_next_subpass(cbh_get(&self->cmd));
 }
 
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
@@ -11254,22 +11276,23 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 5, image_get_view(ih_get(&self->palette_cache)), StockSampler_NearestClamp);
 
    { const bool staged = renderer_upload_queued_vertices(self);
-   if (staged)
+   if (staged && !PGXPDepthGroupVec_empty(&self->queue.depth_groups))
+      renderer_render_depth_groups(self);
+   else
    {
-      if (!PGXPDepthGroupVec_empty(&self->queue.depth_groups))
-         renderer_render_depth_groups(self);
-      else
+      if (staged)
       {
          renderer_render_opaque_primitives(self, &self->queue.opaque_scissor);
          renderer_render_opaque_texture_primitives(self,
                &self->queue.opaque_textured_scissor, self->pgxp_depth.active);
+         renderer_render_semi_transparent_opaque_texture_primitives(self,
+               &self->queue.semi_transparent_opaque_scissor, self->pgxp_depth.active);
       }
-      renderer_render_semi_transparent_opaque_texture_primitives(self);
+      if (self->render_pass_is_feedback)
+         commandbuffer_next_subpass(cbh_get(&self->cmd));
+      if (staged)
+         renderer_render_semi_transparent_primitives(self, &self->queue.semi_transparent_state);
    }
-   if (self->render_pass_is_feedback)
-      commandbuffer_next_subpass(cbh_get(&self->cmd));
-   if (staged)
-      renderer_render_semi_transparent_primitives(self);
    }
 
    commandbuffer_end_render_pass(cbh_get(&self->cmd));
@@ -11600,10 +11623,10 @@ static void renderer_emit_sub_ceiling(Renderer *self, const SemiTransparentState
    commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
 }
 
-static void renderer_render_semi_transparent_primitives(Renderer *self){
+static void renderer_render_semi_transparent_primitives(Renderer *self, SemiTransparentStateVec *states){
    SemiTransparentState last_state;
    unsigned to_draw;
-   unsigned prims = SemiTransparentStateVec_size(&self->queue.semi_transparent_state);
+   unsigned prims = SemiTransparentStateVec_size(states);
    if (!prims)
       return;
 
@@ -11631,12 +11654,12 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
       return;
    for (i = 0; i < prims; i++)
    {
-      const unsigned t = SemiTransparentStateVec_at(&self->queue.semi_transparent_state, i)->triangle_index;
+      const unsigned t = SemiTransparentStateVec_at(states, i)->triangle_index;
       for (k = 0; k < 3; k++)
          index[3 * i + k] = t < avail ? 3 * t + k : 0;
    }
 
-   last_state = *SemiTransparentStateVec_at(&self->queue.semi_transparent_state, 0);
+   last_state = *SemiTransparentStateVec_at(states, 0);
 
    renderer_semi_transparent_set_state(self, &last_state);
 
@@ -11646,7 +11669,7 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
       /* Preserve per-primitive boundaries for feedback reads and native-
        * colour draws; later primitives may overlap earlier ones. */
       if (renderer_semi_trans_needs_separate_draw(self, &last_state) ||
-          !semi_transparent_state_eq(&last_state, SemiTransparentStateVec_at(&self->queue.semi_transparent_state, i)))
+          !semi_transparent_state_eq(&last_state, SemiTransparentStateVec_at(states, i)))
       {
          unsigned to_draw = i - last_draw_offset;
          commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
@@ -11671,7 +11694,7 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
             renderer_emit_sub_floor(self, nverts);
          last_draw_offset = i;
 
-         last_state = *SemiTransparentStateVec_at(&self->queue.semi_transparent_state, i);
+         last_state = *SemiTransparentStateVec_at(states, i);
          renderer_semi_transparent_set_state(self, &last_state);
       }
    } }
