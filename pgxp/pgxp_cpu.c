@@ -221,7 +221,7 @@ void PGXP_CPU_ADDI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	/* truncate on overflow/underflow */
 	ret.y += (ret.y >= (float)SHRT_MAX + 1.f) ? -(USHRT_MAX + 1) : (ret.y < SHRT_MIN) ? USHRT_MAX + 1 : 0.f;
 
-	ret.flags &= ~PGXP_COLOR;
+	ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 	CPU_reg[rt(instr)] = ret;
 	CPU_reg[rt(instr)].value = rtVal;
 }
@@ -265,7 +265,7 @@ void PGXP_CPU_ANDI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 
 	ret.flags |= VALID_1;
 
-	ret.flags &= ~PGXP_COLOR;
+	ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 	CPU_reg[rt(instr)] = ret;
 	CPU_reg[rt(instr)].value = rtVal;
 }
@@ -296,6 +296,8 @@ void PGXP_CPU_ORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 	}
 
 	ret.value = rtVal;
+	/* The guest ORs clip flags into the shifted depth. The paired store
+	 * checks the native payload before using it. */
 	if (imm(instr) != 0)
 		ret.flags &= ~PGXP_COLOR;
 	CPU_reg[rt(instr)] = ret;
@@ -328,7 +330,7 @@ void PGXP_CPU_XORI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 
 	ret.value = rtVal;
 	if (imm(instr) != 0)
-		ret.flags &= ~PGXP_COLOR;
+		ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 	CPU_reg[rt(instr)] = ret;
 }
 
@@ -431,7 +433,7 @@ void PGXP_CPU_ADD(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 
 	ret.value = rdVal;
 
-	ret.flags &= ~PGXP_COLOR;
+	ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 	CPU_reg[rd(instr)] = ret;
 }
 
@@ -508,7 +510,7 @@ void PGXP_CPU_SUB(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal
 
 	ret.value = rdVal;
 
-	ret.flags &= ~PGXP_COLOR;
+	ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 	CPU_reg[rd(instr)] = ret;
 }
 
@@ -703,8 +705,8 @@ void PGXP_CPU_MULT(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsVa
 	}
 
 	CPU_Lo = CPU_Hi = CPU_reg[rs(instr)];
-	CPU_Lo.flags &= ~PGXP_COLOR;
-	CPU_Hi.flags &= ~PGXP_COLOR;
+	CPU_Lo.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
+	CPU_Hi.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 
 	CPU_Lo.halfFlags[0] = CPU_Hi.halfFlags[0] = (CPU_reg[rs(instr)].halfFlags[0] & CPU_reg[rt(instr)].halfFlags[0]);
 
@@ -751,8 +753,8 @@ void PGXP_CPU_MULTU(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsV
 	}
 
 	CPU_Lo = CPU_Hi = CPU_reg[rs(instr)];
-	CPU_Lo.flags &= ~PGXP_COLOR;
-	CPU_Hi.flags &= ~PGXP_COLOR;
+	CPU_Lo.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
+	CPU_Hi.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 
 	CPU_Lo.halfFlags[0] = CPU_Hi.halfFlags[0] = (CPU_reg[rs(instr)].halfFlags[0] & CPU_reg[rt(instr)].halfFlags[0]);
 
@@ -799,8 +801,8 @@ void PGXP_CPU_DIV(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsVal
 	}
 
 	CPU_Lo = CPU_Hi = CPU_reg[rs(instr)];
-	CPU_Lo.flags &= ~PGXP_COLOR;
-	CPU_Hi.flags &= ~PGXP_COLOR;
+	CPU_Lo.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
+	CPU_Hi.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 
 	CPU_Lo.halfFlags[0] = CPU_Hi.halfFlags[0] = (CPU_reg[rs(instr)].halfFlags[0] & CPU_reg[rt(instr)].halfFlags[0]);
 
@@ -842,8 +844,8 @@ void PGXP_CPU_DIVU(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsVa
 	}
 
 	CPU_Lo = CPU_Hi = CPU_reg[rs(instr)];
-	CPU_Lo.flags &= ~PGXP_COLOR;
-	CPU_Hi.flags &= ~PGXP_COLOR;
+	CPU_Lo.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
+	CPU_Hi.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 
 	CPU_Lo.halfFlags[0] = CPU_Hi.halfFlags[0] = (CPU_reg[rs(instr)].halfFlags[0] & CPU_reg[rt(instr)].halfFlags[0]);
 
@@ -900,7 +902,7 @@ static void PGXP_CPU_ShiftLeft(uint32_t instr, uint32_t rdVal,
 	}
 	ret.value = rdVal;
 	if (sh != 0)
-		ret.flags &= ~PGXP_COLOR;
+		ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 	CPU_reg[rd(instr)] = ret;
 }
 
@@ -958,7 +960,17 @@ static void PGXP_CPU_ShiftRight(uint32_t instr, uint32_t rdVal,
 	}
 	ret.value = rdVal;
 	if (sh != 0)
-		ret.flags &= ~PGXP_COLOR;
+	{
+		int scaled_depth = (ret.flags & PGXP_DEPTH_SCALAR) &&
+			!arithmetic && sh == 4 && rtVal == ret.gFlags &&
+			rdVal == (rtVal >> 4);
+		ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
+		if (scaled_depth)
+		{
+			ret.flags |= PGXP_DEPTH_SCALED;
+			ret.gFlags = (uint16_t)rdVal;
+		}
+	}
 	CPU_reg[rd(instr)] = ret;
 }
 
@@ -1107,9 +1119,26 @@ void PGXP_CPU_SWL(uint32_t instr, uint32_t rtVal, uint32_t addr)
 
 void PGXP_CPU_SW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
+	PGXP_value *source = &CPU_reg[rt(instr)];
+
 	/* Mem[Rs + Im] = Rt */
-	Validate(&CPU_reg[rt(instr)], rtVal);
-	WriteMem(&CPU_reg[rt(instr)], addr);
+	Validate(source, rtVal);
+	WriteMem(source, addr);
+
+	/* The Spyro sequels publish projected XY and normalized SZ in the
+	 * first two words of a 16-byte scratchpad record. Upper bits of the
+	 * depth word are clip flags. Match both shadows to the same transform
+	 * before applying the guest's scale to the fractional depth. */
+	if ((source->flags & PGXP_DEPTH_SCALED) &&
+	    (addr & 0xfffffc0fu) == 0x1f800004u && op(instr) == 0x2bu &&
+	    (rtVal & 0xffff0fffu) == source->gFlags)
+	{
+		PGXP_value *vertex = ReadMem(addr - 4);
+
+		if ((vertex->flags & (VALID_012 | PGXP_COLOR | PGXP_DEPTH_TAGS)) == VALID_012 &&
+		    vertex->count == source->count && vertex->z == source->z)
+			vertex->z *= 1.0f / 16.0f;
+	}
 }
 
 void PGXP_CPU_SWR(uint32_t instr, uint32_t rtVal, uint32_t addr)

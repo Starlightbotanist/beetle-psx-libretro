@@ -14,6 +14,7 @@
 static unsigned checks;
 static unsigned failures;
 static uint32_t random_state = 0x51f2e793u;
+extern uint32_t pgxp_test_sz3;
 
 static void check(int condition, const char *name)
 {
@@ -79,6 +80,81 @@ static void test_vertex_fallback(void)
    PGXP_GetVertex(0, &word, &vertex, 0, 0);
    check(vertex.x == 12.25f && vertex.y == 34.75f && !vertex.valid_w,
          "XY-only vertex keeps XY and refuses depth");
+}
+
+static void check_stored_vertex(uint32_t addr, float w, const char *name)
+{
+   uint32_t word = 0x0022000cu;
+   OGLVertex vertex;
+   PGXP_WriteCB(ReadMem(addr), 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 12.25f && vertex.y == 34.75f &&
+         vertex.valid_w && vertex.w == w, name);
+}
+
+static void test_stored_depth(void)
+{
+   const uint32_t modes = PGXP_MODE_MEMORY | PGXP_MODE_CPU |
+         PGXP_MODE_GTE | PGXP_TEXTURE_CORRECTION;
+   const uint32_t xy = 0x0022000cu;
+   const uint32_t record = 0x1f800000u;
+   const uint32_t mfc2 = rtype(0, 2, 19, 0);
+   const uint32_t srl4 = rtype(0, 2, 2, 2) | (4u << 6);
+   const uint32_t sw = (0x2bu << 26) | itype(0, 2, 4);
+   const float raw_w = 4097.5f;
+   unsigned i;
+
+   PGXP_SetModes(modes | PGXP_NORMALIZE_STORED_DEPTH);
+   pgxp_test_sz3 = 4097;
+   for (i = 0; i < 6; i++)
+   {
+      PGXP_pushSXYZ2f(12.25f, 34.75f, raw_w, xy);
+      PGXP_GTE_SWC2(itype(0, 14, 0), xy, record);
+      if (i == 1)
+         PGXP_pushSXYZ2f(12.25f, 34.75f, raw_w, xy);
+      if (i == 2)
+      {
+         PGXP_GTE_MFC2(mfc2, 4097, 4097);
+         PGXP_GTE_MTC2(mfc2, 4097, 4097);
+      }
+      PGXP_GTE_ReadDelayed(mfc2, 4097);
+      PGXP_CPU_CommitLoad(2, 4097, 0);
+      if (i == 3)
+      {
+         PGXP_CPU_SW(sw, 4097, record + 4);
+         check_stored_vertex(record, raw_w, "unscaled SZ leaves projected depth intact");
+         continue;
+      }
+      PGXP_CPU_SRL(srl4, 256, 4097);
+      PGXP_CPU_ORI(itype(2, 2, 0xa000), 0xa100, 256);
+      if (i == 4)
+      {
+         PGXP_CPU_SW(sw, 0xa100, record + 20);
+         PGXP_CPU_SH(itype(0, 2, 20), 0xa100, record + 20);
+         PGXP_CPU_LW(itype(0, 2, 20), 0xa100, record + 20);
+         check(!(CPU_reg[2].flags & PGXP_DEPTH_TAGS),
+               "partial SZ overwrite retires scalar ownership");
+      }
+      if (i == 5)
+         PGXP_GTE_SWC2(itype(0, 14, 0), xy, 0x10000);
+      PGXP_CPU_SW(sw, 0xa100, i == 5 ? 0x10004 : record + 4);
+      check_stored_vertex(i == 5 ? 0x10000 : record,
+            i == 0 ? raw_w / 16.0f : raw_w,
+            "renderer uses guest depth scale only for the matching scratchpad projection");
+      if (i == 0)
+      {
+         PGXP_CPU_SW(sw, 0xa100, record + 4);
+         check_stored_vertex(record, raw_w / 16.0f, "paired store applies scale once");
+      }
+   }
+   PGXP_SetModes(modes);
+   check(!(ReadMem(record)->flags & VALID_012), "depth-policy transition retires scratchpad shadow");
+   PGXP_pushSXYZ2f(12.25f, 34.75f, raw_w, xy);
+   PGXP_GTE_SWC2(itype(0, 14, 0), xy, record);
+   PGXP_GTE_MFC2(mfc2, 4097, 4097);
+   PGXP_CPU_SRL(srl4, 256, 4097);
+   PGXP_CPU_SW(sw, 256, record + 4);
+   check_stored_vertex(record, raw_w, "disabled normalization keeps raw depth");
 }
 
 static void test_comparisons(void)
@@ -899,6 +975,7 @@ int main(void)
    PGXP_Init();
    PGXP_SetModes(PGXP_MODE_MEMORY | PGXP_MODE_CPU);
    RUN_TEST(test_vertex_fallback);
+   RUN_TEST(test_stored_depth);
    RUN_TEST(test_comparisons);
    RUN_TEST(test_hilo_moves);
    RUN_TEST(test_fractional_boundaries);

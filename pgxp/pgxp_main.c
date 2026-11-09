@@ -36,7 +36,7 @@ static void apply_modes(uint32_t new_modes)
 {
 	uint32_t old_modes = gMode;
 	uint32_t tracking_modes = PGXP_MODE_MEMORY | PGXP_MODE_CPU | PGXP_MODE_GTE |
-		PGXP_TEXTURE_CORRECTION | PGXP_DEPTH_BUFFER | PGXP_NORMALIZE_DEPTH;
+		PGXP_TEXTURE_CORRECTION | PGXP_DEPTH_BUFFER | PGXP_DEPTH_NORMALIZATION;
 
 	/* Disabled tracking cannot describe intervening native writes. Texture
 	 * correction and normalization also change the meaning of shadow W. */

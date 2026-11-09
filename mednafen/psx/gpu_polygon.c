@@ -1461,7 +1461,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          clut     = gpu->InQuad_clut; \
          invalidW = gpu->InQuad_invalidW || \
             gpu->InQuad_normalized_depth != \
-            !!(PGXP_LIT && (PGXP_GetModes() & PGXP_NORMALIZE_DEPTH)); \
+            !!(PGXP_LIT && (PGXP_GetModes() & PGXP_DEPTH_NORMALIZATION)); \
          sv       = 2; \
       } \
    } \
@@ -1635,7 +1635,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
          gpu->InQuad_clut = clut; \
          gpu->InQuad_invalidW = invalidW; \
          gpu->InQuad_normalized_depth = \
-            !!(PGXP_LIT && (PGXP_GetModes() & PGXP_NORMALIZE_DEPTH)); \
+            !!(PGXP_LIT && (PGXP_GetModes() & PGXP_DEPTH_NORMALIZATION)); \
       } \
    } \
    if (abs(vertices[2].y - vertices[0].y) >= (512 << gpu->upscale_shift) || \
