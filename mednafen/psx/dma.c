@@ -35,6 +35,7 @@
 #include "dma.h"
 #include "../../pgxp/pgxp_main.h"
 #include "../../pgxp/pgxp_mem.h"
+#include "../../rhi/rhi_pgxp_depth.h"
 
 /* Notes:
 
@@ -81,6 +82,8 @@ typedef struct
 } Channel;
 
 static Channel DMACH[7];
+/* Rendering hint derived from the current GPU linked list. */
+static uint8_t pgxp_empty_ordering_links;
 static int32_t lastts;
 
 /* Idle scheduling, see GPU.idle_* in gpu.h: while no channel is started
@@ -178,6 +181,7 @@ void DMA_WakeVirtual(void)
 void DMA_Power(void)
 {
    lastts = 0;
+   pgxp_empty_ordering_links = 0;
    idle_virtual = false;
    idle_write_seen = false;
    idle_streak = 0;
@@ -377,6 +381,11 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
    /* Mask out the bits that the DMA controller will modify during the course of operation. */
    uint32_t CRModeCache = DMACH[ch].ChanControl &~(0x11 << 24);
    uint32_t crmodecache = CRModeCache;
+   const bool track_pgxp_ordering = ch == CH_GPU && (CRModeCache & 1) &&
+         (PGXP_GetModes() & PGXP_DEPTH_BUFFER);
+
+   if (ch == CH_GPU && !track_pgxp_ordering)
+      pgxp_empty_ordering_links = 0;
 
    switch(ch)
    {
@@ -481,6 +490,10 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                }
 
                header = MASMEM_ReadU32(MainRAM, DMACH[ch].CurAddr & 0x1FFFFC);
+               if (track_pgxp_ordering &&
+                   rhi_pgxp_depth_ordering_boundary(&pgxp_empty_ordering_links,
+                         DMACH[ch].CurAddr, header))
+                  GPU_BeginPGXPDepthGroup();
                DMACH[ch].CurAddr = (DMACH[ch].CurAddr + 4) & 0xFFFFFF;
 
                DMACH[ch].WordCounter = header >> 24;
@@ -792,6 +805,9 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
 #endif
             }
 
+            if(ch == CH_GPU)
+               pgxp_empty_ordering_links = 0;
+
             if(ch == 6)
                DMACH[ch].ChanControl = (V & 0x51000000) | 0x2;
             else
@@ -890,6 +906,9 @@ int DMA_StateAction(StateMem *sm, int load, int data_only)
    };
 
    int ret = MDFNSS_StateAction(sm, load, data_only, StateRegs, "DMA");
+
+   if (load && ret)
+      pgxp_empty_ordering_links = 0;
 
    if(load && idle_virtual)
    {

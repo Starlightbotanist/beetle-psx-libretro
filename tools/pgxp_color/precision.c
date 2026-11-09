@@ -10,6 +10,7 @@
 #include "../../pgxp/pgxp_main.h"
 #include "../../pgxp/pgxp_mem.h"
 #include "../../pgxp/pgxp_value.h"
+#include "../../rhi/rhi_pgxp_depth.h"
 
 static unsigned checks;
 static unsigned failures;
@@ -533,6 +534,116 @@ static void test_scalar_shift_wrap(void)
          "stale low precision cannot borrow into the sign extension");
 }
 
+static void test_long_shift_sign(void)
+{
+   unsigned sh;
+   for (sh = 16; sh < 32; sh++)
+   {
+      float fraction = -1.0234375f / (1u << (sh - 16));
+      seed(1, 0, 0.f, -1.0234375f, 8.f);
+      PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (sh << 6), 0, 0);
+      check(fabsf(CPU_reg[3].x - fraction) < 1.f / 65536.f &&
+            CPU_reg[3].y == -1.f && CPU_reg[3].value == 0,
+            "long SRA extends the tracked scalar's negative sign");
+
+      seed(1, 0xffff0000u, 0.f, 0.5f, 8.f);
+      SetValue(&CPU_reg[2], sh);
+      PGXP_CPU_SRAV(rtype(2, 1, 3, 7), 0xffffffffu, 0xffff0000u, sh);
+      check(CPU_reg[3].x == 0.5f / (1u << (sh - 16)) &&
+            CPU_reg[3].y == 0.f && CPU_reg[3].value == 0xffffffffu,
+            "long SRAV extends the tracked scalar's positive sign");
+   }
+
+   seed(1, 0, 0.f, -1.0234375f, 8.f);
+   PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (16u << 6), 0, 0);
+   PGXP_CPU_ADDIU(itype(3, 4, 0xfffe), 0xfffffffeu, 0);
+   PGXP_CPU_SW(itype(0, 4, 0), 0xfffffffeu, 0x10000);
+   check(ReadMem(0x10000)->x == -3.0234375f && ReadMem(0x10000)->y == -1.f,
+         "Doom fixed-point shift and add preserve the signed store");
+
+   seed(1, 0, 0.f, -2.f, 8.f);
+   CPU_reg[1].flags &= ~VALID_1;
+   PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (16u << 6), 0, 0);
+   check(!(CPU_reg[3].flags & VALID_0) && CPU_reg[3].y == 0.f,
+         "invalid high source leaves native sign extension");
+}
+
+static void test_unprojected_vertex_bounds(void)
+{
+   uint32_t word = 0x004600dcu;
+   PGXP_value v = PGXP_value_zero;
+   OGLVertex vertex = {0};
+
+   PGXP_SetModes(PGXP_MODE_MEMORY | PGXP_MODE_CPU);
+   SetValue(&v, word);
+   v.x = 5191.8999f;
+   PGXP_WriteCB(&v, 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 220.f && vertex.y == 70.f && !vertex.valid_w,
+         "Doom raster span rejects displaced unprojected X");
+
+   v.x = 220.375f;
+   v.y = 78.f;
+   PGXP_WriteCB(&v, 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 220.375f && vertex.y == 78.f && !vertex.valid_w,
+         "nearby unprojected precision remains usable");
+   v.y = 78.5f;
+   PGXP_WriteCB(&v, 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 220.f && vertex.y == 70.f && !vertex.valid_w,
+         "unprojected Y outside the limit uses native XY");
+
+   v.count = 1;
+   PGXP_WriteCB(&v, 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 220.375f && vertex.y == 78.5f && !vertex.valid_w,
+         "a transform witness keeps projected XY without W");
+   v.count = 0;
+   v.flags |= VALID_2;
+   v.z = 100.f;
+   PGXP_WriteCB(&v, 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 220.375f && vertex.y == 78.5f && vertex.valid_w && vertex.w == 100.f,
+         "a valid depth witness keeps projected XY and W");
+
+   /* A menu glyph in WipEout 3 has no projected depth or transform. */
+   word = 0x0041004cu;
+   SetValue(&v, word);
+   v.x = 38.5f;
+   PGXP_WriteCB(&v, 0);
+   PGXP_GetVertex(0, &word, &vertex, 0, 0);
+   check(vertex.x == 76.f && vertex.y == 65.f && !vertex.valid_w,
+         "WipEout 3 keeps native placement for a displaced menu glyph");
+}
+
+static void test_depth_ordering_boundary(void)
+{
+   uint8_t empty_links = 0;
+   uint32_t address;
+
+   for (address = 0x18aa54; address > 0x18a9d8; address -= 4)
+      check(!rhi_pgxp_depth_ordering_boundary(&empty_links, address, address - 4),
+            "empty ordering slots do not submit depth groups");
+   check(!rhi_pgxp_depth_ordering_boundary(&empty_links, address, 0x1ba598),
+         "empty bucket redirects to GT2 bridge-face payload");
+   check(rhi_pgxp_depth_ordering_boundary(&empty_links, 0x1ba598, 0x071ba5b8),
+         "GT2 bridge face begins a group after the ordering gap");
+   check(!rhi_pgxp_depth_ordering_boundary(&empty_links, 0x1ba5b8, 0x071ba5d8),
+         "next packet in the same bucket keeps depth testing");
+
+   for (address = 0x2000; address > 0x1fa4; address -= 4)
+      rhi_pgxp_depth_ordering_boundary(&empty_links, address, address - 4);
+   check(!rhi_pgxp_depth_ordering_boundary(&empty_links, address, 0x07100000),
+         "a short gap keeps ordinary depth grouping");
+
+   empty_links = 24;
+   rhi_pgxp_depth_ordering_boundary(&empty_links, 0x1000, 0x2000);
+   rhi_pgxp_depth_ordering_boundary(&empty_links, 0x2000, 0x3000);
+   check(!rhi_pgxp_depth_ordering_boundary(&empty_links, 0x3000, 0x07100000),
+         "a second unrelated jump cannot carry a stale boundary");
+}
+
 static void test_zero_register(void)
 {
    uint32_t word = 0;
@@ -1049,6 +1160,9 @@ int main(void)
    RUN_TEST(test_shifts);
    RUN_TEST(test_shift_sign_extension);
    RUN_TEST(test_scalar_shift_wrap);
+   RUN_TEST(test_long_shift_sign);
+   RUN_TEST(test_unprojected_vertex_bounds);
+   RUN_TEST(test_depth_ordering_boundary);
    RUN_TEST(test_zero_register);
    RUN_TEST(test_numeric_limits);
    RUN_TEST(test_memory_ownership);

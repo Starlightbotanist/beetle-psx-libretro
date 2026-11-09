@@ -175,6 +175,7 @@ int main(void)
    }
    failed |= fractional_projection(0);
    failed |= fractional_projection(PGXP_MODE_CPU);
+   failed |= fractional_projection(PGXP_DEPTH_BUFFER);
    PGXP_Shutdown();
    return failed;
 }
