@@ -1768,6 +1768,14 @@ void GPU_Write(const int32_t timestamp, uint32_t A, uint32_t V)
    }
 }
 
+void GPU_BeginPGXPDepthGroup(void)
+{
+   /* A boundary can reach the renderer directly only after every earlier
+    * GPU command has been decoded, including the second half of a quad. */
+   if (!GPU_BlitterFIFO.in_count && GPU.InCmd == INCMD_NONE)
+      rhi_intf_begin_pgxp_depth_group();
+}
+
 void GPU_WriteDMA(uint32_t V, uint32_t addr)
 {
    GPU.idle_write_seen = true;

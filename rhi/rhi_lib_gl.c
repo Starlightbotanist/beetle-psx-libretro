@@ -1305,6 +1305,7 @@ struct gl_renderer {
     * since we draw semi-transparent primitives out-of-order. */
    int16_t primitive_ordering;
    rhi_pgxp_depth_state pgxp_depth;
+   bool pgxp_depth_boundary;
    /* gl_texture window mask/OR values */
    uint8_t tex_x_mask;
    uint8_t tex_x_or;
@@ -3596,6 +3597,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
       renderer->command_buffer->map_index = 0;
       renderer->primitive_ordering        = 0;
       renderer->pgxp_depth.maximum        = 0.f;
+      renderer->pgxp_depth_boundary        = false;
       gl_primitive_batch_vec_clear(&renderer->batches);
       renderer->vertex_index_pos          = 0;
       gl_draw_buffer_map_no_bind(renderer->command_buffer);
@@ -3899,6 +3901,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
 
    renderer->primitive_ordering = 0;
    renderer->pgxp_depth.maximum = 0.f;
+   renderer->pgxp_depth_boundary = false;
    gl_primitive_batch_vec_clear(&renderer->batches);
    renderer->opaque = false;
    renderer->vertex_index_pos = 0;
@@ -6699,13 +6702,15 @@ static void vertex_preprocessing(
             psx_pgxp_depth_buffer && is_textured &&
             !is_semi_transparent && !mask_test &&
             !(v[0].native_flags & 12), &maximum);
-      if (rhi_pgxp_depth_flush(&renderer->pgxp_depth, active, maximum))
+      if (renderer->pgxp_depth_boundary ||
+          rhi_pgxp_depth_flush(&renderer->pgxp_depth, active, maximum))
       {
          /* Vertices already contain their depth policy. Keep the old group
           * queued and clear its depth before the new batch is drawn. */
          clear_depth = !gl_draw_buffer_is_empty(renderer->command_buffer);
          renderer->primitive_ordering = 0;
          renderer->pgxp_depth.maximum = 0.f;
+         renderer->pgxp_depth_boundary = false;
       }
       renderer->pgxp_depth.active = active;
       if (!active)
@@ -8204,6 +8209,18 @@ void rhi_gl_set_tex_window(uint8_t tww, uint8_t twh, uint8_t twx, uint8_t twy)
    renderer->tex_x_or   = (twx & tww) << 3;
    renderer->tex_y_mask = ~(twh << 3);
    renderer->tex_y_or   = (twy & twh) << 3;
+}
+
+void rhi_gl_begin_pgxp_depth_group(void)
+{
+   gl_renderer *renderer = static_renderer.state_data;
+
+   if (static_renderer.state != GL_STATE_INVALID && renderer &&
+       renderer->pgxp_depth.active &&
+       !gl_draw_buffer_is_empty(renderer->command_buffer))
+      /* The next primitive starts a batch with a depth clear. A full
+       * draw drains the old batch and clears this pending boundary. */
+      renderer->pgxp_depth_boundary = true;
 }
 
 void rhi_gl_invalidate_clut_cache(void)

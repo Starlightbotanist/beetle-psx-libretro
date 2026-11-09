@@ -24122,6 +24122,13 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
 
 /* Draw commands */
 
+void rhi_vulkan_begin_pgxp_depth_group(void)
+{
+   if (renderer && renderer->pgxp_depth.active &&
+       !BufferVertexVec_empty(&renderer->queue.vertices))
+      renderer_split_pgxp_depth(renderer, 3);
+}
+
 void rhi_vulkan_invalidate_clut_cache(void)
 {
    /* Nothing to defer: before the renderer exists no palette has been

@@ -293,6 +293,7 @@ extern "C" {
 #endif
 
 void     GPU_WriteDMA(uint32_t V, uint32_t addr);
+void     GPU_BeginPGXPDepthGroup(void);
 uint32_t GPU_ReadDMA(void);
 bool     GPU_DMACanWrite(void);
 int32_t  GPU_Update(const int32_t sys_timestamp);

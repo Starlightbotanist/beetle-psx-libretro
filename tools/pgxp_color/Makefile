@@ -11,7 +11,7 @@ PGXP_SRC := $(ROOT)/pgxp/pgxp_gpu.c $(ROOT)/pgxp/pgxp_gte.c \
             $(ROOT)/pgxp/pgxp_mem.c \
             $(ROOT)/pgxp/pgxp_main.c $(ROOT)/pgxp/pgxp_value.c
 
-all: oracle transport range precision isolation
+all: oracle transport range precision isolation gte_projection
 
 oracle: oracle.c $(PGXP_SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ oracle.c $(PGXP_SRC) stub_log.c -lm
@@ -28,7 +28,10 @@ precision: precision.c $(PGXP_SRC)
 isolation: isolation.c $(PGXP_SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -DHAVE_LIGHTREC=1 -o $@ isolation.c $(PGXP_SRC) stub_log.c -lm
 
-check: oracle transport range precision isolation
+gte_projection: gte_projection.c $(PGXP_SRC) $(ROOT)/mednafen/psx/gte.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $^ -lm
+
+check: oracle transport range precision isolation gte_projection
 	./oracle
 	@echo
 	./transport
@@ -36,8 +39,9 @@ check: oracle transport range precision isolation
 	./range
 	./precision
 	./isolation
+	./gte_projection
 
 clean:
-	rm -f oracle transport range precision isolation
+	rm -f oracle transport range precision isolation gte_projection
 
 .PHONY: all check clean

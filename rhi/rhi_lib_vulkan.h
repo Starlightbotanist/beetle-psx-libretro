@@ -24,6 +24,7 @@ void rhi_vulkan_set_tex_window(uint8_t tww, uint8_t twh,
                                uint8_t twx, uint8_t twy);
 
 void rhi_vulkan_invalidate_clut_cache(void);
+void rhi_vulkan_begin_pgxp_depth_group(void);
 
 void rhi_vulkan_set_draw_offset(int16_t x, int16_t y);
 
