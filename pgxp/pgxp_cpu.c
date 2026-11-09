@@ -942,21 +942,35 @@ static void PGXP_CPU_ShiftRight(uint32_t instr, uint32_t rdVal,
 	{
 		scale = 1u << sh;
 		inverse_scale = (1u << (16 - sh)) * (1.0 / 65536.0);
-		x = f16Unsign(ret.x) * inverse_scale;
-		x += ((rtVal >> 16) & (scale - 1)) * (double)(1u << (16 - sh));
-		y = arithmetic ? ret.y : f16Unsign(ret.y);
-		ret.x = f16Sign(x);
-		/* Once the upper half contains only sign extension, it no longer
-		 * carries an independent coordinate. Do not retain a fraction there
-		 * that later packed arithmetic would multiply by 65536. */
+		x = ((rtVal >> 16) & (scale - 1)) * (double)(1u << (16 - sh));
 		if (arithmetic && ((rdVal >> 16) == 0 || (rdVal >> 16) == 0xffffu))
 		{
+			/* The upper half is sign extension, so the shifted value is a
+			 * scalar. Unwrap its low half around the native low half to
+			 * preserve fractions that cross zero without a 65536-unit jump. */
+			double low = ret.x;
+			if ((rtVal & 0xffffu) - low > 32768.0)
+				low += 65536.0;
+			x += low * inverse_scale;
 			ret.y = (rtVal & 0x80000000u) ? -1.f : 0.f;
+			if (ret.flags & VALID_0)
+			{
+				/* Keep the high half consistent with the 16.16 low half. */
+				if (x <= -(1.0 / 65536.0))
+					ret.y -= 1.f;
+				else if (x >= 65536.0)
+					ret.y += 1.f;
+			}
 			ret.compFlags[1] = VALID;
 			ret.hFlags = VALID_HALF;
 		}
 		else
+		{
+			x += f16Unsign(ret.x) * inverse_scale;
+			y = arithmetic ? ret.y : f16Unsign(ret.y);
 			ret.y = f16Sign(y * inverse_scale);
+		}
+		ret.x = f16Sign(x);
 	}
 	ret.value = rdVal;
 	if (sh != 0)

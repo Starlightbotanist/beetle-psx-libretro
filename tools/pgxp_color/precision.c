@@ -471,6 +471,68 @@ static void test_shift_sign_extension(void)
          "logical shift retains its unsigned upper-half fraction");
 }
 
+static void test_scalar_shift_wrap(void)
+{
+   static const struct { uint32_t word; float fraction; } cases[] = {
+      {0x00000000u, -0.140625f}, {0x0000ffffu, 1.25f},
+      {0x0003ffffu, 1.25f}, {0xfffc0000u, -0.25f},
+      {0xffffffffu, 1.25f}, {0x00010000u, -0.25f},
+      {0x00008000u, -0.5f}, {0x00007fffu, 1.25f},
+      {0x3fff0000u, -0.75f}, {0x8000ffffu, 1.25f},
+      {0x00000000u, -1.0f / 65536.0f}
+   };
+   unsigned i, sh, variable;
+
+   for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+      for (sh = 1; sh < 16; sh++)
+         for (variable = 0; variable < 2; variable++)
+         {
+            uint32_t word = cases[i].word;
+            uint32_t result = (uint32_t)((int32_t)word >> sh);
+            double expected = ((int32_t)word + (double)cases[i].fraction) / (1u << sh);
+            float x = (int16_t)word + cases[i].fraction;
+            const PGXP_value *stored;
+            double packed;
+
+            if (result >> 16 != 0 && result >> 16 != 0xffffu)
+               continue;
+            if (x >= 32768.f)
+               x -= 65536.f;
+            if (x < -32768.f)
+               x += 65536.f;
+            seed(1, word, x, (int16_t)(word >> 16) + 0.375f, 8.f);
+            if (variable)
+            {
+               SetValue(&CPU_reg[2], sh | 0x20);
+               PGXP_CPU_SRAV(rtype(2, 1, 1, 7), result, word, sh | 0x20);
+            }
+            else
+               PGXP_CPU_SRA(rtype(0, 1, 1, 3) | (sh << 6), result, word);
+            PGXP_CPU_SW(itype(0, 1, 0), result, 0x10000);
+            stored = ReadMem(0x10000);
+            packed = (stored->x < 0.f ? 65536.0 : 0.0) + stored->x + 65536.0 * stored->y;
+            check(stored->value == result && (stored->flags & VALID_012) == VALID_012 &&
+                  fabs(packed - expected) < 0.002,
+                  "short signed shift matches scalar reference after store");
+         }
+
+   /* Caves position update. A negative fraction with native word zero
+    * must survive the shift and add without inventing an upper-half carry. */
+   seed(1, 0, -0.140625f, -1.f, 8.f);
+   PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (2u << 6), 0, 0);
+   seed(2, 7102, 7102.140625f, 0.f, 8.f);
+   PGXP_CPU_ADDU(rtype(2, 3, 4, 0x21), 7102, 7102, 0);
+   PGXP_CPU_SW(itype(0, 4, 0), 7102, 0x10000);
+   check(ReadMem(0x10000)->value == 7102 && ReadMem(0x10000)->y == 0.f &&
+         fabs(ReadMem(0x10000)->x - (7102.140625 - 0.140625 / 4)) < 0.004,
+         "Caves shift, add and store retain position precision");
+
+   seed(1, 1, -0.140625f, -1.f, 8.f);
+   PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (2u << 6), 0, 0);
+   check(CPU_reg[3].y == 0.f && !(CPU_reg[3].flags & VALID_0),
+         "stale low precision cannot borrow into the sign extension");
+}
+
 static void test_zero_register(void)
 {
    uint32_t word = 0;
@@ -986,6 +1048,7 @@ int main(void)
    RUN_TEST(test_gte_alias);
    RUN_TEST(test_shifts);
    RUN_TEST(test_shift_sign_extension);
+   RUN_TEST(test_scalar_shift_wrap);
    RUN_TEST(test_zero_register);
    RUN_TEST(test_numeric_limits);
    RUN_TEST(test_memory_ownership);
