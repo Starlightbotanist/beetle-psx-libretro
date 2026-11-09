@@ -15,7 +15,8 @@ enum psx_compatibility_setting
    PSX_COMPAT_FBWRITE_FIFO_DELAY      = 1u << 4,
    PSX_COMPAT_PGXP_CACHE_ON           = 1u << 5,
    PSX_COMPAT_PGXP_CACHE_OFF          = 1u << 6,
-   PSX_COMPAT_PGXP_NORMALIZE_DEPTH    = 1u << 7
+   PSX_COMPAT_PGXP_NORMALIZE_DEPTH    = 1u << 7,
+   PSX_COMPAT_PGXP_NORMALIZE_STORED_DEPTH = 1u << 13
 };
 
 enum beetle_game_db_controller_flag

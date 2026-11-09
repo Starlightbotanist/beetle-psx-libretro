@@ -84,7 +84,12 @@ extern "C" {
 #define VALID_ALL  (VALID_0 | VALID_1 | VALID_2 | VALID_3)
 /* RGB channels are not packed coordinate halves or a geometry depth. */
 #define PGXP_COLOR (1u << 25)
-#define INV_VALID_ALL  (ALL ^ (VALID_ALL | PGXP_COLOR))
+/* A projected SZ3 scalar, and that same scalar after the guest's SRL 4.
+ * count and z identify its SXY partner. gFlags holds the native depth. */
+#define PGXP_DEPTH_SCALAR (1u << 26)
+#define PGXP_DEPTH_SCALED (1u << 27)
+#define PGXP_DEPTH_TAGS (PGXP_DEPTH_SCALAR | PGXP_DEPTH_SCALED)
+#define INV_VALID_ALL  (ALL ^ (VALID_ALL | PGXP_COLOR | PGXP_DEPTH_TAGS))
 //} PGXP_value_flags;
 
         static const PGXP_value PGXP_value_invalid_address = { 0.f, 0.f, 0.f, {0}, 0, 0, INVALID_ADDRESS, 0, 0 };
@@ -109,7 +114,7 @@ extern "C" {
 	{
 		/* assume pV is not NULL */
 		if ((pV->value & mask) != (psxV & mask))
-			pV->flags &= ALL ^ (validMask | PGXP_COLOR);
+			pV->flags &= ALL ^ (validMask | PGXP_COLOR | PGXP_DEPTH_TAGS);
 	}
 
 	uint32_t		ValueToTolerance(PGXP_value *pV, uint32_t psxV, float tolerance);
