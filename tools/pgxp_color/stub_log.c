@@ -10,3 +10,10 @@ uint32_t GTE_ReadCR(unsigned int which)
 {
    return which == 4 ? 4096 : 0;
 }
+
+uint32_t pgxp_test_sz3;
+
+uint32_t GTE_ReadDR(unsigned int which)
+{
+   return which == 19 ? pgxp_test_sz3 : 0;
+}

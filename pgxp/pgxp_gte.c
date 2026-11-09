@@ -154,6 +154,20 @@ void PGXP_pushSXYZ2f(float _x, float _y, float _z, uint32_t _v)
 	SXY2.flags	= VALID_ALL;
 	SXY2.count	= uCount++;
 
+	if (modes & PGXP_NORMALIZE_STORED_DEPTH)
+	{
+		PGXP_value *depth = &GTE_data_reg[19];
+		uint32_t sz = GTE_ReadDR(19);
+
+		/* SZ3 and SXY2 are produced by the same projection. A later
+		 * guest store can supply the scale of this particular vertex. */
+		SetValue(depth, sz);
+		depth->flags = VALID_01 | PGXP_DEPTH_SCALAR;
+		depth->count = SXY2.count;
+		depth->z = SXY2.z;
+		depth->gFlags = (uint16_t)sz;
+	}
+
 	/* cache value in GPU plugin */
 	temp.word = _v;
 	if(modes & PGXP_VERTEX_CACHE)
@@ -308,6 +322,8 @@ int PGXP_NCLIP_sign(void)
 
 static void PGXP_MTC2_int(PGXP_value value, uint32_t reg)
 {
+	/* An explicit GTE register write is not a new projected SZ value. */
+	value.flags &= ~PGXP_DEPTH_TAGS;
 	switch(reg)
 	{
 		case 15:

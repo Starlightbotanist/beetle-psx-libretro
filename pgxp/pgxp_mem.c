@@ -325,7 +325,7 @@ void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int s
 		*dest = *pMem;
 
 		/* if high word then shift */
-		dest->flags &= ~PGXP_COLOR;
+		dest->flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 		if ((addr % 4) == 2)
 		{
 			dest->x = dest->y;
@@ -395,7 +395,7 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 		}
 
 		dest->value = pVal.d;
-		dest->flags &= ~PGXP_COLOR;
+		dest->flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
 
 		/* overwrite z/w if valid */
 		if (src->compFlags[2] == VALID)

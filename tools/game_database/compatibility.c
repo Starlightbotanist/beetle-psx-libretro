@@ -18,6 +18,9 @@ source_compatibility_entries[] = {
 
 static int failures;
 
+#define SPYRO_DEPTH_SETTINGS \
+   (PSX_COMPAT_PGXP_NORMALIZE_DEPTH | PSX_COMPAT_PGXP_NORMALIZE_STORED_DEPTH)
+
 static void check_database_structure(void)
 {
    const uint32_t known_settings =
@@ -28,7 +31,7 @@ static void check_database_structure(void)
       PSX_COMPAT_FBWRITE_FIFO_DELAY |
       PSX_COMPAT_PGXP_CACHE_ON |
       PSX_COMPAT_PGXP_CACHE_OFF |
-      PSX_COMPAT_PGXP_NORMALIZE_DEPTH |
+      SPYRO_DEPTH_SETTINGS |
       PSX_COMPAT_CD_SPEED_MASK |
       BEETLE_DB_PORT1_SUPPORT_MASK;
    const size_t expected_count = sizeof(source_compatibility_entries) /
@@ -56,7 +59,8 @@ static void check_database_structure(void)
       if (!expected->settings || (expected->settings & ~known_settings) ||
           ((expected->settings & PSX_COMPAT_PGXP_PCT_ON) &&
            (expected->settings & PSX_COMPAT_PGXP_PCT_OFF)) ||
-          ((expected->settings & PSX_COMPAT_PGXP_NORMALIZE_DEPTH) &&
+          ((expected->settings & SPYRO_DEPTH_SETTINGS) == SPYRO_DEPTH_SETTINGS) ||
+          ((expected->settings & SPYRO_DEPTH_SETTINGS) &&
            (expected->settings & PSX_COMPAT_PGXP_PCT_OFF)) ||
           ((expected->settings & PSX_COMPAT_PGXP_CACHE_ON) &&
            (expected->settings & PSX_COMPAT_PGXP_CACHE_OFF)))
@@ -144,15 +148,20 @@ int main(void)
    const uint32_t vertex_cache_settings =
       PSX_COMPAT_PGXP_CACHE_ON |
       PSX_COMPAT_PGXP_CACHE_OFF;
-   const char *normalized_spyro[] = {
-      "SCUS-94228"
+   const struct {
+      const char *serial;
+      uint32_t normalization;
+   } normalized_spyro[] = {
+      { "SCUS-94228", PSX_COMPAT_PGXP_NORMALIZE_DEPTH },
+      { "SCUS-94425", PSX_COMPAT_PGXP_NORMALIZE_STORED_DEPTH },
+      { "SCUS-94467", PSX_COMPAT_PGXP_NORMALIZE_STORED_DEPTH }
    };
    const char *restricted_spyro[] = {
-      "SCES-01438", "SCUS-94425", "SCES-02104", "SCUS-94467", "SCES-02835"
+      "SCES-01438", "SCES-02104", "SCES-02835"
    };
    size_t i;
 
-   if (PSX_COMPAT_PGXP_NORMALIZE_DEPTH &
+   if (SPYRO_DEPTH_SETTINGS &
         (vertex_cache_settings | PSX_COMPAT_CD_SPEED_MASK |
          BEETLE_DB_PORT1_SUPPORT_MASK))
    {
@@ -163,12 +172,12 @@ int main(void)
    for (i = 0; i < sizeof(normalized_spyro) / sizeof(normalized_spyro[0]); i++)
    {
       const struct beetle_game_database_entry *game =
-         beetle_game_database_lookup(normalized_spyro[i]);
-      if (!game || !(game->settings & PSX_COMPAT_PGXP_NORMALIZE_DEPTH) ||
+         beetle_game_database_lookup(normalized_spyro[i].serial);
+      if (!game || (game->settings & SPYRO_DEPTH_SETTINGS) != normalized_spyro[i].normalization ||
           !(game->settings & PSX_COMPAT_PGXP_MEM_CPU) ||
           (game->settings & PSX_COMPAT_PGXP_PCT_OFF))
       {
-         fprintf(stderr, "FAIL Spyro normalization: %s\n", normalized_spyro[i]);
+         fprintf(stderr, "FAIL Spyro normalization: %s\n", normalized_spyro[i].serial);
          failures++;
       }
    }
@@ -178,7 +187,7 @@ int main(void)
       const struct beetle_game_database_entry *game =
          beetle_game_database_lookup(restricted_spyro[i]);
       if (!game || !(game->settings & PSX_COMPAT_PGXP_PCT_OFF) ||
-          (game->settings & PSX_COMPAT_PGXP_NORMALIZE_DEPTH))
+          (game->settings & SPYRO_DEPTH_SETTINGS))
       {
          fprintf(stderr, "FAIL retained Spyro restriction: %s\n", restricted_spyro[i]);
          failures++;

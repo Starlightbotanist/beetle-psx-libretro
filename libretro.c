@@ -325,14 +325,14 @@ unsigned int psx_pgxp_vertex_caching;
 unsigned int psx_pgxp_texture_correction;
 unsigned int psx_pgxp_nclip;
 bool psx_pgxp_depth_buffer;
-static bool psx_pgxp_normalize_depth;
+static uint32_t psx_pgxp_depth_normalization;
 bool psx_pgxp_gl_line_expansion;
 
 static void apply_pgxp_settings(void)
 {
    PGXP_SetModes(psx_pgxp_mode ? psx_pgxp_mode | psx_pgxp_vertex_caching |
          psx_pgxp_texture_correction | psx_pgxp_nclip |
-         (psx_pgxp_normalize_depth ? PGXP_NORMALIZE_DEPTH : 0) |
+         psx_pgxp_depth_normalization |
          (psx_pgxp_depth_buffer && psx_pgxp_texture_correction &&
           rhi_intf_is_type() != RHI_SOFTWARE ?
           PGXP_DEPTH_BUFFER : 0) : PGXP_MODE_NONE);
@@ -347,7 +347,7 @@ static void apply_game_compatibility_settings(void)
    unsigned previous_cd_speedup_max;
    uint32_t supported_controllers = BEETLE_DB_CTRL_NONE;
    bool previous_fbwrite_delay;
-   bool previous_normalize_depth;
+   uint32_t previous_depth_normalization;
    bool controller_changed;
    uint32_t settings = 0;
 
@@ -357,11 +357,11 @@ static void apply_game_compatibility_settings(void)
    previous_nclip = psx_pgxp_nclip;
    previous_cd_speedup_max = cd_speedup_compat_max;
    previous_fbwrite_delay = gpu_fbwrite_fifo_delay;
-   previous_normalize_depth = psx_pgxp_normalize_depth;
+   previous_depth_normalization = psx_pgxp_depth_normalization;
 
    cd_speedup_compat_max = 0;
    gpu_fbwrite_fifo_delay = false;
-   psx_pgxp_normalize_depth = false;
+   psx_pgxp_depth_normalization = 0;
 
    if (compatibility_settings_enabled && compatibility_game)
    {
@@ -388,8 +388,13 @@ static void apply_game_compatibility_settings(void)
             psx_pgxp_texture_correction = PGXP_TEXTURE_CORRECTION;
          if (settings & PSX_COMPAT_PGXP_CULLING_ON)
             psx_pgxp_nclip = PGXP_NCLIP_IMPL;
-         psx_pgxp_normalize_depth = psx_pgxp_texture_correction &&
-               (settings & PSX_COMPAT_PGXP_NORMALIZE_DEPTH);
+         if (psx_pgxp_texture_correction)
+         {
+            if (settings & PSX_COMPAT_PGXP_NORMALIZE_DEPTH)
+               psx_pgxp_depth_normalization = PGXP_NORMALIZE_DEPTH;
+            else if (settings & PSX_COMPAT_PGXP_NORMALIZE_STORED_DEPTH)
+               psx_pgxp_depth_normalization = PGXP_NORMALIZE_STORED_DEPTH;
+         }
       }
 
       supported_controllers =
@@ -408,7 +413,7 @@ static void apply_game_compatibility_settings(void)
        previous_nclip != psx_pgxp_nclip ||
        previous_cd_speedup_max != cd_speedup_compat_max ||
        previous_fbwrite_delay != gpu_fbwrite_fifo_delay ||
-       previous_normalize_depth != psx_pgxp_normalize_depth ||
+       previous_depth_normalization != psx_pgxp_depth_normalization ||
        controller_changed)
       log_cb(RETRO_LOG_INFO,
             "Compatibility settings applied: %s (%s)\n",
