@@ -61,11 +61,7 @@ vec4 sample_vram_atlas(vec2 uvv)
     // int shift = params.z & 3;
     const int shift = SHIFT;
 
-#if defined(UNSCALED)
     ivec2 coord;
-#else
-    vec2 coord;
-#endif
     ivec2 uv = (ivec2(uvv) & vWindow.xy) | vWindow.zw;
     if (shift != 0)
     {
@@ -76,7 +72,7 @@ vec4 sample_vram_atlas(vec2 uvv)
 #if defined(UNSCALED)
         int value = int(texelFetch(uFramebuffer, (vBaseUV + uv) & FB_MASK, 0).x);
 #else
-        uv = ivec2(mod((vBaseUV + uv), FB_SIZE));
+        uv = (vBaseUV + uv) & FB_MASK;
 #if defined(MSAA) && !defined(SINGLE_SAMPLE_TEXTURE)
         int value = int(pack_abgr1555(texelFetch(uFramebufferMS, uv * SCALE, gl_SampleID)));
 #else
@@ -92,21 +88,27 @@ vec4 sample_vram_atlas(vec2 uvv)
             return decode_vram_color(texelFetch(uPalette, ivec2(value, 0), 0).x);
 
         params.x += value;
+#if defined(UNSCALED)
         coord = params.xy;
+#else
+        /* Indexed texels select whole VRAM words. Only direct-colour UVs
+         * carry a subpixel offset in the scaled framebuffer. */
+        coord = (params.xy & FB_MASK) * SCALE;
+#endif
     }
     else
 #if defined(UNSCALED)
         coord = vBaseUV + uv;
 #else
-        coord = vBaseUV + vec2(uv) + fract(uvv);
+        coord = ivec2(mod(vBaseUV + vec2(uv) + fract(uvv), FB_SIZE) * SCALE);
 #endif
 
 #if defined(UNSCALED)
     return decode_vram_color(texelFetch(uFramebuffer, coord & FB_MASK, 0).x);
 #elif defined(MSAA) && !defined(SINGLE_SAMPLE_TEXTURE)
-    return texelFetch(uFramebufferMS, ivec2(mod(coord, FB_SIZE) * SCALE), gl_SampleID);
+    return texelFetch(uFramebufferMS, coord, gl_SampleID);
 #else
-    return texelFetch(uFramebuffer, ivec2(mod(coord, FB_SIZE) * SCALE), 0);
+    return texelFetch(uFramebuffer, coord, 0);
 #endif
 }
 
