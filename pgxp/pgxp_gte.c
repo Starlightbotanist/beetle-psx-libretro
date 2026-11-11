@@ -320,6 +320,30 @@ int PGXP_NCLIP_sign(void)
 	return nclip > 0.1 ? 1 : nclip < -0.1 ? -1 : 0;
 }
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+static void PGXP_WriteDataRegister(const PGXP_value *source, uint32_t reg,
+		uint32_t value)
+{
+	PGXP_value *dest = &GTE_data_reg[reg];
+
+	if (reg == 15)
+	{
+		SXY0 = SXY1;
+		SXY1 = SXY2;
+		SXY2 = *source;
+		SXY2.flags &= ~PGXP_DEPTH_TAGS;
+		*dest = SXY2;
+	}
+	else if (reg != 31)
+	{
+		*dest = *source;
+		dest->flags &= ~PGXP_DEPTH_TAGS;
+	}
+	/* SXYP retains the source's raw value in SXY2. An explicit write
+	 * also updates the tracked word for the read-only LZCR register. */
+	dest->value = value;
+}
+#else
 static void PGXP_MTC2_int(PGXP_value value, uint32_t reg)
 {
 	/* An explicit GTE register write is not a new projected SZ value. */
@@ -340,6 +364,7 @@ static void PGXP_MTC2_int(PGXP_value value, uint32_t reg)
 
 	GTE_data_reg[reg] = value;
 }
+#endif
 
 /* ============================================================
  * Data transfer tracking
@@ -387,6 +412,25 @@ void MFC2(int reg) {
 
 void PGXP_GTE_MFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
 {
+#if defined(__ANDROID__) && defined(__aarch64__)
+	/* CPU[Rt] = GTE_D[Rd] */
+	uint32_t reg = rt(instr);
+	PGXP_value *source, *dest;
+	uint32_t flags;
+
+	if (!reg)
+		return;
+
+	source = PGXP_ReadDataRegister(rd(instr));
+	dest = &CPU_reg[reg];
+	Validate(source, rdVal);
+	flags = source->flags;
+	if ((flags & PGXP_COLOR) && !(PGXP_GetModes() & PGXP_MODE_CPU))
+		flags &= ~PGXP_COLOR;
+	*dest = *source;
+	dest->flags = flags;
+	dest->value = rtVal;
+#else
 	/* CPU[Rt] = GTE_D[Rd] */
 	PGXP_value *value = PGXP_ReadDataRegister(rd(instr));
 	if (rt(instr) == 0)
@@ -396,6 +440,7 @@ void PGXP_GTE_MFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
 	CPU_reg[rt(instr)] = *value;
 	CPU_reg[rt(instr)].value = rtVal;
 	PGXP_CPU_ValidateColor(&CPU_reg[rt(instr)]);
+#endif
 }
 
 void PGXP_GTE_ReadDelayed(uint32_t instr, uint32_t value)
@@ -411,10 +456,18 @@ void PGXP_GTE_ReadDelayed(uint32_t instr, uint32_t value)
 
 void PGXP_GTE_MTC2(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 {
+#if defined(__ANDROID__) && defined(__aarch64__)
+	/* GTE_D[Rd] = CPU[Rt] */
+	PGXP_value *source = &CPU_reg[rt(instr)];
+
+	Validate(source, rtVal);
+	PGXP_WriteDataRegister(source, rd(instr), rdVal);
+#else
 	/* GTE_D[Rd] = CPU[Rt] */
 	Validate(&CPU_reg[rt(instr)], rtVal);
 	PGXP_MTC2_int(CPU_reg[rt(instr)], rd(instr));
 	GTE_data_reg[rd(instr)].value = rdVal;
+#endif
 }
 
 void PGXP_GTE_CFC2(uint32_t instr, uint32_t rtVal, uint32_t rdVal)
@@ -445,7 +498,12 @@ void	PGXP_GTE_LWC2(uint32_t instr, uint32_t rtVal, uint32_t addr)
 	/* GTE_D[Rt] = Mem[addr] */
 	PGXP_value val;
 	ValidateAndCopyMem(&val, addr, rtVal);
+#if defined(__ANDROID__) && defined(__aarch64__)
+	if (rt(instr) != 31)
+		PGXP_WriteDataRegister(&val, rt(instr), val.value);
+#else
 	PGXP_MTC2_int(val, rt(instr));
+#endif
 }
 
 void	PGXP_GTE_SWC2(uint32_t instr, uint32_t rtVal, uint32_t addr)

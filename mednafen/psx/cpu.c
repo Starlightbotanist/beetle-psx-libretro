@@ -3674,10 +3674,37 @@ static void pgxp_unaligned_access(struct lightrec_state *state,
 	}
 }
 
+static const struct lightrec_pgxp_alu_ops pgxp_alu = {
+	.add = PGXP_CPU_ADD,
+	.sub = PGXP_CPU_SUB,
+	.bit_or = PGXP_CPU_OR,
+	.bit_and = PGXP_CPU_AND,
+	.slt = PGXP_CPU_SLT,
+	.lui = PGXP_CPU_LUI,
+	.addi = PGXP_CPU_ADDI,
+	.andi = PGXP_CPU_ANDI,
+	.sll = PGXP_CPU_SLL,
+	.srl = PGXP_CPU_SRL,
+	.sra = PGXP_CPU_SRA,
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	.sllv = PGXP_CPU_SLLV,
+	.srlv = PGXP_CPU_SRLV,
+	.srav = PGXP_CPU_SRAV,
+	.bit_xor = PGXP_CPU_XOR,
+	.bit_nor = PGXP_CPU_NOR,
+	.ori = PGXP_CPU_ORI,
+	.xori = PGXP_CPU_XORI,
+#endif
+};
+
 static struct lightrec_ops pgxp_ops = {
 	.load_delay = pgxp_load_delay,
 	.unaligned_access = pgxp_unaligned_access,
 	.cop2_notify = pgxp_cop2_notify,
+#if defined(__ANDROID__) && defined(__aarch64__)
+	.pgxp_mfc2 = PGXP_GTE_MFC2,
+	.pgxp_mtc2 = PGXP_GTE_MTC2,
+#endif
 	.cop2_op = cop2_op,
 	.enable_ram = enable_ram,
 };
@@ -3744,6 +3771,7 @@ static int lightrec_plugin_init(PS_CPU *self)
        * path after a mode change. */
       pgxp_ops.pgxp_cpu = (PGXP_GetModes() & PGXP_MODE_CPU)
                           ? pgxp_cpu_track : NULL;
+      pgxp_ops.pgxp_alu = pgxp_ops.pgxp_cpu ? &pgxp_alu : NULL;
       pgxp_ops.pgxp_addu_identity =
             (PGXP_GetModes() & PGXP_MODE_MEMORY) &&
             !(PGXP_GetModes() & PGXP_MODE_CPU)

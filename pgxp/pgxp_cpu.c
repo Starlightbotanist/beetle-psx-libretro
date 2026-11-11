@@ -1,5 +1,6 @@
 #include <string.h>
 #include <math.h>
+#include <float.h>
 
 #include "pgxp_cpu.h"
 #include "pgxp_value.h"
@@ -186,6 +187,29 @@ void InvalidStore(uint32_t addr, uint32_t code, uint32_t value)
 	}
 }
 
+#if FLT_RADIX == 2 && FLT_MANT_DIG == 24 && \
+      defined(__FLT_EVAL_METHOD__) && __FLT_EVAL_METHOD__ == 0
+/* At magnitude 2^39, float spacing reaches 65536, so every
+ * finite value outside this range wraps to zero. Nonfinite values
+ * also produce zero in f16Sign. Inside it, the power-of-two scale
+ * is exact and the conversion fits in int64_t. */
+static inline float AddWrapLow(float value)
+{
+	uint32_t u;
+	int32_t s;
+
+	if (!(fabsf(value) < 549755813888.0f))
+		return 0.0f;
+
+	u = (uint32_t)(int64_t)(value * 65536.0f);
+	memcpy(&s, &u, sizeof(s));
+	return (float)s * (1.0f / 65536.0f);
+}
+#else
+/* Keep the original call-site evaluation for excess-precision targets. */
+#define AddWrapLow(value) f16Sign(value)
+#endif
+
 /* ============================================================
  * Arithmetic with immediate value
  * ============================================================ */
@@ -193,18 +217,22 @@ void PGXP_CPU_ADDI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 {
 	/* Rt = Rs + Imm (signed) */
 	psx_value tempImm;
+	PGXP_value *source;
+	PGXP_value *dest;
 	PGXP_value ret;
 	float of;
 
 	if (rt(instr) == 0)
 		return;
 
-	Validate(&CPU_reg[rs(instr)], rsVal);
-	ret = CPU_reg[rs(instr)];
+	source = &CPU_reg[rs(instr)];
+	dest = &CPU_reg[rt(instr)];
+	Validate(source, rsVal);
+	ret = *source;
+	ret.value = rtVal;
 	if (imm(instr) == 0)
 	{
-		CPU_reg[rt(instr)] = ret;
-		CPU_reg[rt(instr)].value = rtVal;
+		*dest = ret;
 		return;
 	}
 	tempImm.d = imm(instr);
@@ -215,15 +243,14 @@ void PGXP_CPU_ADDI(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
 
 	/* carry on over/underflow */
 	of = (ret.x >= (float)USHRT_MAX + 1.f) ? 1.f : (ret.x < 0) ? -1.f : 0.f;
-	ret.x = f16Sign(ret.x);
+	ret.x = AddWrapLow(ret.x);
 	ret.y += tempImm.sw.h + of;
 
 	/* truncate on overflow/underflow */
 	ret.y += (ret.y >= (float)SHRT_MAX + 1.f) ? -(USHRT_MAX + 1) : (ret.y < SHRT_MIN) ? USHRT_MAX + 1 : 0.f;
 
 	ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
-	CPU_reg[rt(instr)] = ret;
-	CPU_reg[rt(instr)].value = rtVal;
+	*dest = ret;
 }
 
 void PGXP_CPU_ADDIU(uint32_t instr, uint32_t rtVal, uint32_t rsVal)
@@ -380,61 +407,76 @@ void PGXP_CPU_LUI(uint32_t instr, uint32_t rtVal)
 void PGXP_CPU_ADD(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
 {
 	/* Rd = Rs + Rt (signed) */
+	unsigned left_reg = rs(instr);
+	unsigned right_reg = rt(instr);
+	PGXP_value *left;
+	PGXP_value *right;
+	PGXP_value *dest;
 	PGXP_value ret;
+	int left_valid;
+	int right_valid;
 	float of;
 
 	if (rd(instr) == 0)
 		return;
 
-	Validate(&CPU_reg[rs(instr)], rsVal);
-	Validate(&CPU_reg[rt(instr)], rtVal);
+	left = &CPU_reg[left_reg];
+	right = &CPU_reg[right_reg];
+	dest = &CPU_reg[rd(instr)];
+	Validate(left, rsVal);
+	Validate(right, rtVal);
 
 	/* Addition with the architectural zero register is an exact identity.
 	 * Preserve the complete other operand shadow instead of blending. */
-	if (rt(instr) == 0)
+	if (!right_reg)
 	{
-		CPU_reg[rd(instr)] = CPU_reg[rs(instr)];
-		CPU_reg[rd(instr)].value = rdVal;
+		*dest = *left;
+		dest->value = rdVal;
 		return;
 	}
-	if (rs(instr) == 0)
+	if (!left_reg)
 	{
-		CPU_reg[rd(instr)] = CPU_reg[rt(instr)];
-		CPU_reg[rd(instr)].value = rdVal;
+		*dest = *right;
+		dest->value = rdVal;
 		return;
 	}
 
-	/* iCB: Only require one valid input */
-	if (((CPU_reg[rt(instr)].flags & VALID_01) != VALID_01) != ((CPU_reg[rs(instr)].flags & VALID_01) != VALID_01))
+	left_valid = (left->flags & VALID_01) == VALID_01;
+	right_valid = (right->flags & VALID_01) == VALID_01;
+	if (left_valid != right_valid)
 	{
-		MakeValid(&CPU_reg[rs(instr)], rsVal);
-		MakeValid(&CPU_reg[rt(instr)], rtVal);
+		/* Only the invalid operand can change. Aliased sources
+		 * always have the same validity after both validations. */
+		if (left_valid)
+			MakeValidIfNeeded(right, rtVal);
+		else
+			MakeValidIfNeeded(left, rsVal);
 	}
 
-	ret = CPU_reg[rs(instr)];
+	ret = *left;
 
 	ret.x = f16Unsign(ret.x);
-	ret.x += f16Unsign(CPU_reg[rt(instr)].x);
+	ret.x += f16Unsign(right->x);
 
 	/* carry on over/underflow */
 	of = (ret.x >= (float)USHRT_MAX + 1.f) ? 1.f : (ret.x < 0) ? -1.f : 0.f;
-	ret.x = f16Sign(ret.x);
-	ret.y += CPU_reg[rt(instr)].y + of;
+	ret.x = AddWrapLow(ret.x);
+	ret.y += right->y + of;
 
 	/* truncate on overflow/underflow */
 	ret.y += (ret.y >= (float)SHRT_MAX + 1.f) ? -(USHRT_MAX + 1) : (ret.y < SHRT_MIN) ? USHRT_MAX + 1 : 0.f;
 
 	/* TODO: decide which "z/w" component to use */
 
-	ret.halfFlags[0] &= CPU_reg[rt(instr)].halfFlags[0];
-	ret.gFlags |= CPU_reg[rt(instr)].gFlags;
-	ret.lFlags |= CPU_reg[rt(instr)].lFlags;
-	ret.hFlags |= CPU_reg[rt(instr)].hFlags;
+	ret.halfFlags[0] &= right->halfFlags[0];
+	ret.gFlags |= right->gFlags;
+	ret.lFlags |= right->lFlags;
+	ret.hFlags |= right->hFlags;
 
 	ret.value = rdVal;
 
 	ret.flags &= ~(PGXP_COLOR | PGXP_DEPTH_TAGS);
-	CPU_reg[rd(instr)] = ret;
+	*dest = ret;
 }
 
 void PGXP_CPU_ADDU(uint32_t instr, uint32_t rdVal, uint32_t rsVal, uint32_t rtVal)
@@ -1077,6 +1119,7 @@ void PGXP_CPU_LWL(uint32_t instr, uint32_t rtVal, uint32_t addr)
 		LoadPartialWord(&CPU_reg[rt(instr)], rtVal, addr, (addr & 3) == 3);
 }
 
+#if !defined(__ANDROID__) || !defined(__aarch64__)
 void PGXP_CPU_LW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {
 	/* Rt = Mem[Rs + Im] */
@@ -1086,6 +1129,7 @@ void PGXP_CPU_LW(uint32_t instr, uint32_t rtVal, uint32_t addr)
 	ValidateAndCopyMem(&CPU_reg[rt(instr)], addr, rtVal);
 	PGXP_CPU_ValidateColor(&CPU_reg[rt(instr)]);
 }
+#endif
 
 void PGXP_CPU_LWR(uint32_t instr, uint32_t rtVal, uint32_t addr)
 {

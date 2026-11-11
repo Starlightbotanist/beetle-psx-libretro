@@ -150,6 +150,27 @@ enum c_wrappers {
 	C_WRAPPER_CP2_GTE,
 	C_WRAPPER_PGXP_CPU,
 	C_WRAPPER_PGXP_ADDU_IDENTITY,
+	C_WRAPPER_PGXP_ADD,
+	C_WRAPPER_PGXP_SUB,
+	C_WRAPPER_PGXP_OR,
+	C_WRAPPER_PGXP_ADDI,
+	C_WRAPPER_PGXP_ANDI,
+	C_WRAPPER_PGXP_SLL,
+	C_WRAPPER_PGXP_SRL,
+	C_WRAPPER_PGXP_SRA,
+	C_WRAPPER_PGXP_MOV,
+	C_WRAPPER_PGXP_AND,
+	C_WRAPPER_PGXP_SLT,
+	C_WRAPPER_PGXP_SLTU,
+	C_WRAPPER_PGXP_LUI,
+#if defined(__ANDROID__) && defined(__aarch64__)
+	C_WRAPPER_LW,
+	C_WRAPPER_SW,
+#endif
+#if defined(__ANDROID__) && defined(__aarch64__)
+	C_WRAPPER_PGXP_MFC2,
+	C_WRAPPER_PGXP_MTC2,
+#endif
 	C_WRAPPERS_COUNT,
 };
 
@@ -224,6 +245,9 @@ struct lightrec_state {
 	u32 last_map_idx;
 	void *c_wrapper;
 	struct block *dispatcher, *c_wrapper_block;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct block *pgxp_live_wrapper;
+#endif
 	void *c_wrappers[C_WRAPPERS_COUNT];
 	struct blockcache *block_cache;
 	struct recompiler *rec;

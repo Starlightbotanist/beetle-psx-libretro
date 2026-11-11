@@ -675,8 +675,25 @@ static int32_t DMA_UpdateInt(const int32_t timestamp, bool from_event)
    GPU_UpdatePassive(timestamp);
    MDEC_Run(clocks);
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+   for (i = 0; i < 7; i++)
+   {
+      Channel *channel = &DMACH[i];
+      /* GPU polling also manages the GPU wake and PGXP ordering state. */
+      if (i != CH_GPU && !(channel->ChanControl & (1U << 24)) &&
+          !channel->WordCounter)
+      {
+         channel->ClockCounter += clocks;
+         if (channel->ClockCounter > 0)
+            channel->ClockCounter = 0;
+      }
+      else
+         RunChannel(timestamp, clocks, i);
+   }
+#else
    for (i = 0; i < 7; i++)
       RunChannel(timestamp, clocks, i);
+#endif
 
    DMACycleCounter -= clocks;
    while(DMACycleCounter <= 0)

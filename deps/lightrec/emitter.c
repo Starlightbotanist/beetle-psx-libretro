@@ -572,6 +572,108 @@ static void rec_alu_special(struct lightrec_cstate *state, const struct block *b
 	lightrec_free_reg(reg_cache, rd);
 }
 
+
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+/* The original operands use x2 and x3. These argument registers are
+ * outside the Lightrec register cache, so an aliased destination
+ * cannot overwrite a captured source word.
+ */
+#define LIVE_ARG2 _R2
+#define LIVE_ARG3 _R3
+
+
+static int pgxp_live_offset(const struct lightrec_state *state,
+			    const struct opcode *op)
+{
+	const struct lightrec_pgxp_alu_ops *alu = state->ops.pgxp_alu;
+
+	if (!state->pgxp_live_wrapper || !state->ops.pgxp_cpu)
+		return -1;
+
+#define ALU_SLOT(name) (alu->name ? (int)offsetof(struct lightrec_pgxp_alu_ops, name) : -1)
+	switch (op->i.op) {
+	case OP_ANDI: return ALU_SLOT(andi);
+	case OP_ORI:  return op->flags & LIGHTREC_MOVI ? -1 : ALU_SLOT(ori);
+	case OP_XORI: return ALU_SLOT(xori);
+	case OP_SPECIAL:
+		switch (op->r.op) {
+		case OP_SPECIAL_SLL:  return ALU_SLOT(sll);
+		case OP_SPECIAL_SRL:  return ALU_SLOT(srl);
+		case OP_SPECIAL_SRA:  return ALU_SLOT(sra);
+		case OP_SPECIAL_SLLV: return ALU_SLOT(sllv);
+		case OP_SPECIAL_SRLV: return ALU_SLOT(srlv);
+		case OP_SPECIAL_SRAV: return ALU_SLOT(srav);
+		case OP_SPECIAL_AND:  return ALU_SLOT(bit_and);
+		case OP_SPECIAL_OR:   return ALU_SLOT(bit_or);
+		case OP_SPECIAL_XOR:  return ALU_SLOT(bit_xor);
+		case OP_SPECIAL_NOR:  return ALU_SLOT(bit_nor);
+		}
+		break;
+	}
+#undef ALU_SLOT
+	return -1;
+}
+
+struct pgxp_live_call {
+	int offset;
+	s8 operand, other;
+};
+
+static struct pgxp_live_call pgxp_live_operands(struct lightrec_cstate *state,
+		const struct block *block, u16 offset, u8 dest, u8 operand, s8 other)
+{
+	jit_state_t *_jit = block->_jit;
+	struct pgxp_live_call args;
+
+	args.offset = pgxp_live_offset(state->state, &block->opcode_list[offset]);
+	args.operand = operand;
+	args.other = other;
+	if (args.offset < 0)
+		return args;
+
+	/* The register cache may deliberately reuse a dying source as the
+	 * destination. Capture its pre-instruction word before emitting the
+	 * native operation. The ABI argument registers are outside the cache. */
+	if (operand == dest) {
+		jit_movr(LIVE_ARG2, operand);
+		args.operand = LIVE_ARG2;
+	}
+	if (other == dest) {
+		if (other == operand)
+			args.other = args.operand;
+		else {
+			jit_movr(LIVE_ARG3, other);
+			args.other = LIVE_ARG3;
+		}
+	}
+	return args;
+}
+
+static void pgxp_live_result(struct lightrec_cstate *state,
+		const struct block *block, u16 offset, u8 dest,
+		const struct pgxp_live_call *args)
+{
+	struct regcache *cache = state->reg_cache;
+	jit_state_t *_jit = block->_jit;
+
+	if (args->offset < 0)
+		return;
+
+	jit_prepare();
+	jit_pushargi(block->opcode_list[offset].opcode);
+	jit_pushargr(dest);
+	jit_pushargr(args->operand);
+	if (args->other >= 0)
+		jit_pushargr(args->other);
+	else
+		jit_pushargi(0);
+	jit_pushargi(args->offset);
+	lightrec_regcache_mark_live(cache, _jit);
+	jit_finishi(state->state->pgxp_live_wrapper->function);
+	lightrec_regcache_mark_live(cache, _jit);
+}
+#endif
+
 static void rec_alu_shiftv(struct lightrec_cstate *state, const struct block *block,
 			   u16 offset, jit_code_t code)
 {
@@ -579,6 +681,9 @@ static void rec_alu_shiftv(struct lightrec_cstate *state, const struct block *bl
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
 	u8 rd, rt, rs, temp, flags = 0;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct pgxp_live_call pgxp;
+#endif
 
 	jit_note(__FILE__, __LINE__);
 
@@ -591,6 +696,9 @@ static void rec_alu_shiftv(struct lightrec_cstate *state, const struct block *bl
 	rec_alloc_rs_rd(reg_cache, _jit, &block->opcode_list[offset],
 			c.r.rt, c.r.rd, flags, flags, &rt, &rd);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp = pgxp_live_operands(state, block, offset, rd, rt, rs);
+#endif
 	if (rt != rd) {
 		jit_andi(rd, rs, 0x1f);
 		jit_new_node_www(code, rd, rt, rd);
@@ -601,6 +709,9 @@ static void rec_alu_shiftv(struct lightrec_cstate *state, const struct block *bl
 		lightrec_free_reg(reg_cache, temp);
 	}
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp_live_result(state, block, offset, rd, &pgxp);
+#endif
 	lightrec_free_reg(reg_cache, rs);
 	lightrec_free_reg(reg_cache, rt);
 	lightrec_free_reg(reg_cache, rd);
@@ -671,6 +782,9 @@ static void rec_ANDI(struct lightrec_cstate *state,
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
 	u8 rs, rt;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct pgxp_live_call pgxp;
+#endif
 
 	_jit_name(block->_jit, __func__);
 	jit_note(__FILE__, __LINE__);
@@ -678,6 +792,9 @@ static void rec_ANDI(struct lightrec_cstate *state,
 	rec_alloc_rs_rd(reg_cache, _jit, &block->opcode_list[offset],
 			c.i.rs, c.i.rt, 0, REG_EXT | REG_ZEXT, &rs, &rt);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp = pgxp_live_operands(state, block, offset, rt, rs, -1);
+#endif
 	/* PSX code uses ANDI 0xff / ANDI 0xffff a lot, which are basically
 	 * casts to uint8_t / uint16_t. */
 	if (c.i.imm == 0xff)
@@ -687,6 +804,9 @@ static void rec_ANDI(struct lightrec_cstate *state,
 	else
 		jit_andi(rt, rs, (u32)(u16) c.i.imm);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp_live_result(state, block, offset, rt, &pgxp);
+#endif
 	lightrec_free_reg(reg_cache, rs);
 	lightrec_free_reg(reg_cache, rt);
 }
@@ -698,6 +818,9 @@ static void rec_alu_or_xor(struct lightrec_cstate *state, const struct block *bl
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
 	u8 rs, rt, flags;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct pgxp_live_call pgxp;
+#endif
 
 	jit_note(__FILE__, __LINE__);
 
@@ -707,8 +830,14 @@ static void rec_alu_or_xor(struct lightrec_cstate *state, const struct block *bl
 	flags = lightrec_get_reg_in_flags(reg_cache, rs);
 	lightrec_set_reg_out_flags(reg_cache, rt, flags);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp = pgxp_live_operands(state, block, offset, rt, rs, -1);
+#endif
 	jit_new_node_www(code, rt, rs, (u32)(u16) c.i.imm);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp_live_result(state, block, offset, rt, &pgxp);
+#endif
 	lightrec_free_reg(reg_cache, rs);
 	lightrec_free_reg(reg_cache, rt);
 }
@@ -812,6 +941,9 @@ static void rec_special_AND(struct lightrec_cstate *state,
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
 	u8 rd, rt, rs, flags_rs, flags_rt, flags_rd;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct pgxp_live_call pgxp;
+#endif
 
 	_jit_name(block->_jit, __func__);
 	jit_note(__FILE__, __LINE__);
@@ -834,8 +966,14 @@ static void rec_special_AND(struct lightrec_cstate *state,
 
 	lightrec_set_reg_out_flags(reg_cache, rd, flags_rd);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp = pgxp_live_operands(state, block, offset, rd, rs, rt);
+#endif
 	jit_andr(rd, rs, rt);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp_live_result(state, block, offset, rd, &pgxp);
+#endif
 	lightrec_free_reg(reg_cache, rs);
 	lightrec_free_reg(reg_cache, rt);
 	lightrec_free_reg(reg_cache, rd);
@@ -848,6 +986,9 @@ static void rec_special_or_nor(struct lightrec_cstate *state,
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
 	u8 rd, rt, rs, flags_rs, flags_rt, flags_rd = 0;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct pgxp_live_call pgxp;
+#endif
 
 	jit_note(__FILE__, __LINE__);
 
@@ -869,11 +1010,17 @@ static void rec_special_or_nor(struct lightrec_cstate *state,
 
 	lightrec_set_reg_out_flags(reg_cache, rd, flags_rd);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp = pgxp_live_operands(state, block, offset, rd, rs, rt);
+#endif
 	jit_orr(rd, rs, rt);
 
 	if (nor)
 		jit_comr(rd, rd);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp_live_result(state, block, offset, rd, &pgxp);
+#endif
 	lightrec_free_reg(reg_cache, rs);
 	lightrec_free_reg(reg_cache, rt);
 	lightrec_free_reg(reg_cache, rd);
@@ -900,6 +1047,9 @@ static void rec_special_XOR(struct lightrec_cstate *state,
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
 	u8 rd, rt, rs, flags_rs, flags_rt, flags_rd;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct pgxp_live_call pgxp;
+#endif
 
 	_jit_name(block->_jit, __func__);
 
@@ -920,8 +1070,14 @@ static void rec_special_XOR(struct lightrec_cstate *state,
 
 	lightrec_set_reg_out_flags(reg_cache, rd, flags_rd);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp = pgxp_live_operands(state, block, offset, rd, rs, rt);
+#endif
 	jit_xorr(rd, rs, rt);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp_live_result(state, block, offset, rd, &pgxp);
+#endif
 	lightrec_free_reg(reg_cache, rs);
 	lightrec_free_reg(reg_cache, rt);
 	lightrec_free_reg(reg_cache, rd);
@@ -969,6 +1125,9 @@ static void rec_alu_shift(struct lightrec_cstate *state, const struct block *blo
 	union code c = block->opcode_list[offset].c;
 	jit_state_t *_jit = block->_jit;
 	u8 rd, rt, flags = 0, out_flags = 0;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	struct pgxp_live_call pgxp;
+#endif
 
 	jit_note(__FILE__, __LINE__);
 
@@ -986,8 +1145,14 @@ static void rec_alu_shift(struct lightrec_cstate *state, const struct block *blo
 	rec_alloc_rs_rd(reg_cache, _jit, &block->opcode_list[offset],
 			c.r.rt, c.r.rd, flags, out_flags, &rt, &rd);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp = pgxp_live_operands(state, block, offset, rd, rt, -1);
+#endif
 	jit_new_node_www(code, rd, rt, c.r.imm);
 
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	pgxp_live_result(state, block, offset, rd, &pgxp);
+#endif
 	lightrec_free_reg(reg_cache, rt);
 	lightrec_free_reg(reg_cache, rd);
 }
@@ -1335,7 +1500,20 @@ static void rec_io(struct lightrec_cstate *state,
 	}
 
 	if (is_tagged) {
+#if defined(__ANDROID__) && defined(__aarch64__)
+		/* These wrappers retain the memory-map callbacks, including PGXP. */
+		enum c_wrappers wrapper = C_WRAPPER_RW;
+
+		if (!load_delay && state->state->maps[PSX_MAP_KERNEL_USER_RAM].ops) {
+			if (c.i.op == OP_LW)
+				wrapper = C_WRAPPER_LW;
+			else if (c.i.op == OP_SW)
+				wrapper = C_WRAPPER_SW;
+		}
+		call_to_c_wrapper(state, block, c.opcode, wrapper);
+#else
 		call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_RW);
+#endif
 	} else {
 		lut_entry = lightrec_get_lut_entry(block);
 		call_to_c_wrapper(state, block, (lut_entry << 16) | offset,
@@ -2551,6 +2729,14 @@ static void rec_mfc(struct lightrec_cstate *state, const struct block *block, u1
 			rec_set_load_target(state, block, offset);
 		} else {
 			lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, true);
+#if defined(__ANDROID__) && defined(__aarch64__)
+			if (c.i.op == OP_CP2 && c.r.rs == OP_CP2_BASIC_MFC2 &&
+			    state->state->ops.pgxp_mfc2) {
+				call_to_c_wrapper(state, block, c.opcode,
+						  C_WRAPPER_PGXP_MFC2);
+				return;
+			}
+#endif
 		}
 	}
 
@@ -2564,6 +2750,15 @@ static void rec_mtc(struct lightrec_cstate *state, const struct block *block, u1
 	jit_state_t *_jit = block->_jit;
 
 	jit_note(__FILE__, __LINE__);
+#if defined(__ANDROID__) && defined(__aarch64__)
+	if (c.i.op == OP_CP2 && c.r.rs == OP_CP2_BASIC_MTC2 &&
+	    state->state->ops.pgxp_mtc2) {
+		lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, false);
+		call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_PGXP_MTC2);
+		return;
+	}
+
+#endif
 	lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rs, false);
 	lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, false);
 	lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_TEMP, false);
@@ -3462,6 +3657,48 @@ static void rec_META(struct lightrec_cstate *state,
 		(*f)(state, block, offset);
 }
 
+static enum c_wrappers pgxp_cpu_wrapper(union code c)
+{
+	switch (c.i.op) {
+	case OP_ADDI:
+	case OP_ADDIU:
+		return C_WRAPPER_PGXP_ADDI;
+	case OP_ANDI:
+		return C_WRAPPER_PGXP_ANDI;
+	case OP_LUI:
+		return C_WRAPPER_PGXP_LUI;
+	case OP_META:
+		if (c.m.op == OP_META_MOV)
+			return C_WRAPPER_PGXP_MOV;
+		break;
+	case OP_SPECIAL:
+		switch (c.r.op) {
+		case OP_SPECIAL_ADD:
+		case OP_SPECIAL_ADDU:
+			return C_WRAPPER_PGXP_ADD;
+		case OP_SPECIAL_SUB:
+		case OP_SPECIAL_SUBU:
+			return C_WRAPPER_PGXP_SUB;
+		case OP_SPECIAL_OR:
+			return C_WRAPPER_PGXP_OR;
+		case OP_SPECIAL_AND:
+			return C_WRAPPER_PGXP_AND;
+		case OP_SPECIAL_SLT:
+			return C_WRAPPER_PGXP_SLT;
+		case OP_SPECIAL_SLTU:
+			return C_WRAPPER_PGXP_SLTU;
+		case OP_SPECIAL_SLL:
+			return C_WRAPPER_PGXP_SLL;
+		case OP_SPECIAL_SRL:
+			return C_WRAPPER_PGXP_SRL;
+		case OP_SPECIAL_SRA:
+			return C_WRAPPER_PGXP_SRA;
+		}
+		break;
+	}
+	return C_WRAPPER_PGXP_CPU;
+}
+
 /* Emit the PGXP CPU-tracking call for a non-memory op.  This runs *before*
  * the native op: the tracker reads the source registers from the GPR file
  * and computes the result itself (lightrec_pgxp_cpu_track), so the sources
@@ -3472,6 +3709,7 @@ static void rec_pgxp_cpu_track(struct lightrec_cstate *state,
 	struct regcache *reg_cache = state->reg_cache;
 	jit_state_t *_jit = block->_jit;
 	union code c = block->opcode_list[offset].c;
+	enum c_wrappers wrapper = C_WRAPPER_PGXP_CPU;
 
 	jit_note(__FILE__, __LINE__);
 
@@ -3486,7 +3724,20 @@ static void rec_pgxp_cpu_track(struct lightrec_cstate *state,
 	if (opcode_reads_register(c, REG_LO))
 		lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_LO, false);
 
-	call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_PGXP_CPU);
+	/* The compiled opcode already identifies the PGXP handler. */
+	if (state->state->ops.pgxp_alu) {
+		wrapper = pgxp_cpu_wrapper(c);
+		if (wrapper == C_WRAPPER_PGXP_MOV) {
+			/* Give the existing ADD handler the same ADDU encoding
+			 * the generic tracker would reconstruct for this move. */
+			union code move = { .opcode = 0 };
+			move.r.op = OP_SPECIAL_ADDU;
+			move.r.rs = c.m.rs;
+			move.r.rd = c.m.rd;
+			c = move;
+		}
+	}
+	call_to_c_wrapper(state, block, c.opcode, wrapper);
 }
 
 void lightrec_rec_opcode(struct lightrec_cstate *state,
@@ -3522,7 +3773,11 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 		 * per-register precision metadata the interpreter would.
 		 * Loads and stores are reported by the memory-map ops. */
 		if (state->state->ops.pgxp_cpu &&
-		    lightrec_pgxp_cpu_tracked(op->c))
+		    lightrec_pgxp_cpu_tracked(op->c)
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+		    && pgxp_live_offset(state->state, op) < 0
+#endif
+		    )
 			rec_pgxp_cpu_track(state, block, offset);
 
 		if (!HAS_DEFAULT_ELM && unlikely(!f))

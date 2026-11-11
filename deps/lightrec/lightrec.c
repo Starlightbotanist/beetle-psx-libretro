@@ -532,6 +532,53 @@ static void lightrec_rw_cb(struct lightrec_state *state, u32 arg)
 	lightrec_rw_helper(state, (union code) arg, NULL, NULL, 0);
 }
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+/* Tagged aligned word accesses can resolve the map and perform the access
+ * in one callback. Keep the generic path for delayed or exceptional access. */
+static inline __attribute__((always_inline)) void
+lightrec_rw_word_cb(struct lightrec_state *state, u32 arg, bool store)
+{
+	union code op = { .opcode = arg };
+	const struct lightrec_mem_map_ops *ops;
+	const struct lightrec_mem_map *map;
+	void *host;
+	u32 addr, value;
+
+	if (OPT_HANDLE_LOAD_DELAYS && state->load_target != LIGHTREC_LOAD_GPR)
+		goto slow;
+
+	addr = kunseg(state->regs.gpr[op.i.rs] + (s16) op.i.imm);
+	if (unlikely(addr & 3))
+		goto slow;
+	map = lightrec_get_map(state, &host, addr);
+	if (unlikely(!map))
+		goto slow;
+	ops = map->ops ? map->ops : &lightrec_default_ops;
+
+	if (store)
+		ops->sw(state, arg, host, addr, state->regs.gpr[op.i.rt]);
+	else {
+		value = ops->lw(state, arg, host, addr);
+		if (op.i.rt)
+			state->regs.gpr[op.i.rt] = value;
+	}
+	return;
+
+slow:
+	lightrec_rw_cb(state, arg);
+}
+
+static void lightrec_lw_cb(struct lightrec_state *state, u32 arg)
+{
+	lightrec_rw_word_cb(state, arg, false);
+}
+
+static void lightrec_sw_cb(struct lightrec_state *state, u32 arg)
+{
+	lightrec_rw_word_cb(state, arg, true);
+}
+#endif
+
 static void lightrec_rw_generic_cb(struct lightrec_state *state, u32 arg)
 {
 	struct block *block;
@@ -796,6 +843,25 @@ static void lightrec_mtc_cb(struct lightrec_state *state, u32 arg)
 	}
 
 	lightrec_mtc(state, op, reg, data);
+#if defined(__ANDROID__) && defined(__aarch64__)
+}
+
+static void lightrec_pgxp_mfc2_cb(struct lightrec_state *state, union code op)
+{
+	u32 data = lightrec_mfc2(state, op.r.rd);
+
+	state->ops.pgxp_mfc2(op.opcode, data, data);
+	if (op.r.rt)
+		state->regs.gpr[op.r.rt] = data;
+}
+
+static void lightrec_pgxp_mtc2_cb(struct lightrec_state *state, union code op)
+{
+	u32 data = state->regs.gpr[op.r.rt];
+
+	lightrec_mtc2(state, op.r.rd, data);
+	state->ops.pgxp_mtc2(op.opcode, data, data);
+#endif
 }
 
 void lightrec_rfe(struct lightrec_state *state)
@@ -1049,6 +1115,75 @@ static void lightrec_pgxp_cpu_cb(struct lightrec_state *state, u32 arg)
 
 	lightrec_pgxp_cpu_track(state, (union code) { .opcode = arg });
 }
+
+/* The JIT has synchronized the pre-instruction operands before entering
+ * either route. These wrappers evaluate the same native result as
+ * lightrec_pgxp_cpu_track and call the selected shadow handler directly. */
+#define DEFINE_PGXP_BINARY(name, member, op) \
+static void lightrec_pgxp_##name##_cb(struct lightrec_state *state, u32 instr) \
+{ \
+	union code c = { .opcode = instr }; \
+	u32 rs = state->regs.gpr[c.r.rs]; \
+	u32 rt = state->regs.gpr[c.r.rt]; \
+	state->ops.pgxp_alu->member(instr, rs op rt, rs, rt); \
+}
+
+DEFINE_PGXP_BINARY(add, add, +)
+DEFINE_PGXP_BINARY(sub, sub, -)
+DEFINE_PGXP_BINARY(or, bit_or, |)
+DEFINE_PGXP_BINARY(and, bit_and, &)
+DEFINE_PGXP_BINARY(sltu, slt, <)
+
+#undef DEFINE_PGXP_BINARY
+
+static void lightrec_pgxp_mov_cb(struct lightrec_state *state, u32 instr)
+{
+	union code c = { .opcode = instr };
+	u32 value = state->regs.gpr[c.r.rs];
+	state->ops.pgxp_alu->add(instr, value, value, 0);
+}
+
+static void lightrec_pgxp_slt_cb(struct lightrec_state *state, u32 instr)
+{
+	union code c = { .opcode = instr };
+	u32 rs = state->regs.gpr[c.r.rs];
+	u32 rt = state->regs.gpr[c.r.rt];
+	state->ops.pgxp_alu->slt(instr, (s32)rs < (s32)rt, rs, rt);
+}
+
+static void lightrec_pgxp_lui_cb(struct lightrec_state *state, u32 instr)
+{
+	union code c = { .opcode = instr };
+	state->ops.pgxp_alu->lui(instr, (u32)c.i.imm << 16);
+}
+
+static void lightrec_pgxp_addi_cb(struct lightrec_state *state, u32 instr)
+{
+	union code c = { .opcode = instr };
+	u32 rs = state->regs.gpr[c.i.rs];
+	state->ops.pgxp_alu->addi(instr, rs + (u32)(s32)(s16)c.i.imm, rs);
+}
+
+static void lightrec_pgxp_andi_cb(struct lightrec_state *state, u32 instr)
+{
+	union code c = { .opcode = instr };
+	u32 rs = state->regs.gpr[c.i.rs];
+	state->ops.pgxp_alu->andi(instr, rs & c.i.imm, rs);
+}
+
+#define DEFINE_PGXP_SHIFT(name, expr) \
+static void lightrec_pgxp_##name##_cb(struct lightrec_state *state, u32 instr) \
+{ \
+	union code c = { .opcode = instr }; \
+	u32 rt = state->regs.gpr[c.r.rt]; \
+	state->ops.pgxp_alu->name(instr, expr, rt); \
+}
+
+DEFINE_PGXP_SHIFT(sll, rt << c.r.imm)
+DEFINE_PGXP_SHIFT(srl, rt >> c.r.imm)
+DEFINE_PGXP_SHIFT(sra, (u32)((s32)rt >> c.r.imm))
+
+#undef DEFINE_PGXP_SHIFT
 
 static void lightrec_pgxp_addu_identity_cb(struct lightrec_state *state,
 		u32 arg)
@@ -1328,11 +1463,14 @@ static void * lightrec_emit_code(struct lightrec_state *state,
 	return code;
 }
 
-static struct block * generate_wrapper(struct lightrec_state *state)
+static struct block * generate_wrapper(struct lightrec_state *state, bool live_alu)
 {
 	struct block *block;
 	jit_state_t *_jit;
 	unsigned int i;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	jit_node_t *selector = NULL;
+#endif
 
 	block = lightrec_malloc(state, MEM_FOR_IR, sizeof(*block));
 	if (!block)
@@ -1342,51 +1480,88 @@ static struct block * generate_wrapper(struct lightrec_state *state)
 	if (!_jit)
 		goto err_free_block;
 
-	jit_name("RW wrapper");
+	jit_name(live_alu ? "PGXP live ALU wrapper" : "RW wrapper");
 	jit_note(__FILE__, __LINE__);
 
 	/* Wrapper entry point */
 	jit_prolog();
-	jit_tramp(256);
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	if (live_alu) {
+		for (i = 0; i < 4; ++i)
+			jit_arg();
+		selector = jit_arg();
+	} else
+#endif
+	{
+		jit_tramp(256);
 
-	/* Load pointer to C wrapper */
-	jit_add_state(JIT_R1, JIT_R1);
-	jit_ldxi(JIT_R1, JIT_R1, lightrec_offset(c_wrappers));
+		/* Load pointer to C wrapper. */
+		jit_add_state(JIT_R1, JIT_R1);
+		jit_ldxi(JIT_R1, JIT_R1, lightrec_offset(c_wrappers));
 
-	jit_epilog();
-	jit_prolog();
+		jit_epilog();
+		jit_prolog();
+	}
 
 	/* Save all temporaries on stack */
 	for (i = 0; i < NUM_TEMPS; i++) {
-		if (i + FIRST_TEMP != 1) {
+		if (live_alu || i + FIRST_TEMP != 1) {
 			jit_stxi(lightrec_offset(wrapper_regs[i]),
 				 LIGHTREC_REG_STATE, JIT_R(i + FIRST_TEMP));
 		}
 	}
 
-	jit_getarg(JIT_R2, jit_arg());
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	if (live_alu) {
+		int cycle_slot = jit_allocai(sizeof(jit_word_t));
 
-	jit_prepare();
-	jit_pushargr(LIGHTREC_REG_STATE);
-	jit_pushargr(JIT_R2);
+		/* Shadow arithmetic observes only the supplied operands and
+		 * PGXP state. Preserve the running cycle budget as a register. */
+		jit_stxi(cycle_slot, JIT_FP, LIGHTREC_REG_CYCLE);
+		jit_getarg(JIT_R1, selector);
+		jit_ldxi(JIT_R2, LIGHTREC_REG_STATE, lightrec_offset(ops.pgxp_alu));
+		jit_ldxr(JIT_R1, JIT_R2, JIT_R1);
+		jit_prepare();
+		/* Forward the first four AArch64 arguments. The fifth one
+		 * selects the function pointer in the immutable ALU table.
+		 * JIT_R1 and JIT_R2 are register-cache temporaries outside
+		 * the AArch64 argument registers.
+		 */
+		jit_pushargr(_R0);
+		jit_pushargr(_R1);
+		jit_pushargr(_R2);
+		jit_pushargr(_R3);
 
-	jit_ldxi_ui(JIT_R2, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
 
-	/* state->current_cycle = state->target_cycle - delta; */
-	jit_subr(LIGHTREC_REG_CYCLE, JIT_R2, LIGHTREC_REG_CYCLE);
-	jit_stxi_i(lightrec_offset(current_cycle), LIGHTREC_REG_STATE, LIGHTREC_REG_CYCLE);
+		jit_finishr(JIT_R1);
+		jit_ldxi(LIGHTREC_REG_CYCLE, JIT_FP, cycle_slot);
+	} else
+#endif
+	{
+		jit_getarg(JIT_R2, jit_arg());
 
-	/* Call the wrapper function */
-	jit_finishr(JIT_R1);
+		jit_prepare();
+		jit_pushargr(LIGHTREC_REG_STATE);
+		jit_pushargr(JIT_R2);
 
-	/* delta = state->target_cycle - state->current_cycle */;
-	jit_ldxi_ui(LIGHTREC_REG_CYCLE, LIGHTREC_REG_STATE, lightrec_offset(current_cycle));
-	jit_ldxi_ui(JIT_R1, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
-	jit_subr(LIGHTREC_REG_CYCLE, JIT_R1, LIGHTREC_REG_CYCLE);
+		jit_ldxi_ui(JIT_R2, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
+
+		/* state->current_cycle = state->target_cycle - delta; */
+		jit_subr(LIGHTREC_REG_CYCLE, JIT_R2, LIGHTREC_REG_CYCLE);
+		jit_stxi_i(lightrec_offset(current_cycle), LIGHTREC_REG_STATE, LIGHTREC_REG_CYCLE);
+
+		/* Call the wrapper function */
+		jit_finishr(JIT_R1);
+
+		/* delta = state->target_cycle - state->current_cycle */;
+		jit_ldxi_ui(LIGHTREC_REG_CYCLE, LIGHTREC_REG_STATE, lightrec_offset(current_cycle));
+		jit_ldxi_ui(JIT_R1, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
+		jit_subr(LIGHTREC_REG_CYCLE, JIT_R1, LIGHTREC_REG_CYCLE);
+	}
 
 	/* Restore temporaries from stack */
 	for (i = 0; i < NUM_TEMPS; i++) {
-		if (i + FIRST_TEMP != 1) {
+		if (live_alu || i + FIRST_TEMP != 1) {
 			jit_ldxi(JIT_R(i + FIRST_TEMP), LIGHTREC_REG_STATE,
 				 lightrec_offset(wrapper_regs[i]));
 		}
@@ -1405,7 +1580,8 @@ static struct block * generate_wrapper(struct lightrec_state *state)
 	if (!block->function)
 		goto err_free_jit;
 
-	state->c_wrapper = block->function;
+	if (!live_alu)
+		state->c_wrapper = block->function;
 
 	if (ENABLE_DISASSEMBLER) {
 		pr_debug("Wrapper block:\n");
@@ -2581,17 +2757,42 @@ struct lightrec_state * lightrec_init(char *argv0,
 	if (!state->dispatcher)
 		goto err_free_reaper;
 
-	state->c_wrapper_block = generate_wrapper(state);
+	state->c_wrapper_block = generate_wrapper(state, false);
 	if (!state->c_wrapper_block)
 		goto err_free_dispatcher;
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	if (state->ops.pgxp_cpu && state->ops.pgxp_alu)
+		state->pgxp_live_wrapper = generate_wrapper(state, true);
+#endif
 
 	state->c_wrappers[C_WRAPPER_RW] = lightrec_rw_cb;
+#if defined(__ANDROID__) && defined(__aarch64__)
+	state->c_wrappers[C_WRAPPER_LW] = lightrec_lw_cb;
+	state->c_wrappers[C_WRAPPER_SW] = lightrec_sw_cb;
+#endif
 	state->c_wrappers[C_WRAPPER_RW_GENERIC] = lightrec_rw_generic_cb;
 	state->c_wrappers[C_WRAPPER_MFC] = lightrec_mfc_cb;
 	state->c_wrappers[C_WRAPPER_MTC] = lightrec_mtc_cb;
+#if defined(__ANDROID__) && defined(__aarch64__)
+	state->c_wrappers[C_WRAPPER_PGXP_MFC2] = lightrec_pgxp_mfc2_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_MTC2] = lightrec_pgxp_mtc2_cb;
+#endif
 	state->c_wrappers[C_WRAPPER_CP] = lightrec_cp_cb;
 	state->c_wrappers[C_WRAPPER_CP2_GTE] = lightrec_cp2_gte_cb;
 	state->c_wrappers[C_WRAPPER_PGXP_CPU] = lightrec_pgxp_cpu_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_ADD] = lightrec_pgxp_add_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_SUB] = lightrec_pgxp_sub_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_OR] = lightrec_pgxp_or_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_ADDI] = lightrec_pgxp_addi_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_ANDI] = lightrec_pgxp_andi_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_SLL] = lightrec_pgxp_sll_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_SRL] = lightrec_pgxp_srl_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_SRA] = lightrec_pgxp_sra_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_MOV] = lightrec_pgxp_mov_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_AND] = lightrec_pgxp_and_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_SLT] = lightrec_pgxp_slt_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_SLTU] = lightrec_pgxp_sltu_cb;
+	state->c_wrappers[C_WRAPPER_PGXP_LUI] = lightrec_pgxp_lui_cb;
 	state->c_wrappers[C_WRAPPER_PGXP_ADDU_IDENTITY] =
 		lightrec_pgxp_addu_identity_cb;
 
@@ -2666,6 +2867,10 @@ void lightrec_destroy(struct lightrec_state *state)
 	lightrec_free_block_cache(state->block_cache);
 	lightrec_free_block(state, state->dispatcher);
 	lightrec_free_block(state, state->c_wrapper_block);
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	if (state->pgxp_live_wrapper)
+		lightrec_free_block(state, state->pgxp_live_wrapper);
+#endif
 
 	if (ENABLE_THREADED_COMPILER) {
 		lightrec_reaper_destroy(state->reaper);
@@ -2701,6 +2906,25 @@ void lightrec_invalidate(struct lightrec_state *state, u32 addr, u32 len)
 	default:
 		return;
 	}
+
+#if defined(__ANDROID__) && defined(__aarch64__)
+	/* An aligned write contained in one word cannot overlap a cached
+	 * block on a page with no blocks. Retire the same code-walk bits
+	 * as the empty-page path without walking a range for this store. */
+	if (len && len <= 4) {
+		u32 ram_addr = kaddr & (RAM_SIZE - 1);
+
+		if (!state->nb_blocks_in_page[ram_addr >> CODE_PAGE_SHIFT]) {
+			state->code_walk_map[(ram_addr >> 2) >> 5] = 0;
+			return;
+		}
+		/* The same word bitmap guards compiled stores. A contained
+		 * write with a clear bit cannot touch a tracked instruction. */
+		if (len <= 4 - (addr & 3) &&
+		    !lightrec_store_hits_code(state, ram_addr))
+			return;
+	}
+#endif
 
 	/* Clears the code LUT over the written words and the entry slot of
 	 * every block overlapping the range (blocks can span the range

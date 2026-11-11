@@ -118,6 +118,36 @@ enum lightrec_load_action {
 	LIGHTREC_LOAD_DISCARD,
 };
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+#define LIGHTREC_HAS_LIVE_PGXP_ALU 1
+#else
+#define LIGHTREC_HAS_LIVE_PGXP_ALU 0
+#endif
+
+/* Direct PGXP shadow handlers for common JIT arithmetic. */
+struct lightrec_pgxp_alu_ops {
+	void (*add)(u32 instr, u32 result, u32 rs, u32 rt);
+	void (*sub)(u32 instr, u32 result, u32 rs, u32 rt);
+	void (*bit_or)(u32 instr, u32 result, u32 rs, u32 rt);
+	void (*bit_and)(u32 instr, u32 result, u32 rs, u32 rt);
+	void (*slt)(u32 instr, u32 result, u32 rs, u32 rt);
+	void (*lui)(u32 instr, u32 result);
+	void (*addi)(u32 instr, u32 result, u32 rs);
+	void (*andi)(u32 instr, u32 result, u32 rs);
+	void (*sll)(u32 instr, u32 result, u32 rt);
+	void (*srl)(u32 instr, u32 result, u32 rt);
+	void (*sra)(u32 instr, u32 result, u32 rt);
+#if LIGHTREC_HAS_LIVE_PGXP_ALU
+	void (*sllv)(u32 instr, u32 result, u32 operand, u32 other);
+	void (*srlv)(u32 instr, u32 result, u32 operand, u32 other);
+	void (*srav)(u32 instr, u32 result, u32 operand, u32 other);
+	void (*bit_xor)(u32 instr, u32 result, u32 operand, u32 other);
+	void (*bit_nor)(u32 instr, u32 result, u32 operand, u32 other);
+	void (*ori)(u32 instr, u32 result, u32 operand);
+	void (*xori)(u32 instr, u32 result, u32 operand);
+#endif
+};
+
 struct lightrec_ops {
 	void (*cop2_notify)(struct lightrec_state *state, u32 op, u32 data);
 	void (*cop2_op)(struct lightrec_state *state, u32 op);
@@ -150,6 +180,15 @@ struct lightrec_ops {
 	 * Word callbacks see aligned addresses and cannot reconstruct these. */
 	void (*unaligned_access)(struct lightrec_state *state, u32 opcode,
 				u32 addr, u32 value);
+	/* Optional preselected handlers for the lifetime of this instance.
+	 * Requires pgxp_cpu as the generic fallback. */
+	const struct lightrec_pgxp_alu_ops *pgxp_alu;
+#if defined(__ANDROID__) && defined(__aarch64__)
+	/* Optional JIT counterparts of cop2_notify for ordinary data
+	 * transfers. Both values passed to a handler are the native word. */
+	void (*pgxp_mfc2)(u32 instr, u32 result, u32 source);
+	void (*pgxp_mtc2)(u32 instr, u32 result, u32 source);
+#endif
 };
 
 struct lightrec_registers {

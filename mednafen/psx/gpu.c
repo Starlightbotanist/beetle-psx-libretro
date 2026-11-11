@@ -310,6 +310,13 @@ static INLINE void InvalidateCache(PS_GPU *gpu)
 static void texel_put(uint32_t x, uint32_t y, uint16_t v)
 {
    uint32_t dy, dx;
+#if defined(_WIN32) && defined(__x86_64__)
+   if (GPU.upscale_shift == 0)
+   {
+      vram_put(&GPU, x, y, v);
+      return;
+   }
+#endif
    x <<= GPU.upscale_shift;
    y <<= GPU.upscale_shift;
 

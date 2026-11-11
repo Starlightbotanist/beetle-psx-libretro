@@ -253,12 +253,17 @@ void PGXP_InvalidateMem(uint32_t addr)
 		PGXP_MemInitialized[paddr >> 5] &= ~((uint32_t)1 << (paddr & 31));
 }
 
-void ValidateAndCopyMem(PGXP_value* dest, uint32_t addr, uint32_t value)
+#if defined(__ANDROID__) && defined(__aarch64__)
+__attribute__((always_inline))
+#endif
+static inline void CopyMemWord(PGXP_value* dest, uint32_t addr,
+		uint32_t value, int cpu_load)
 {
 	uint32_t paddr = PGXP_ConvertAddress(addr);
 	if (paddr < InvalidAddress)
 	{
 		PGXP_value* pMem;
+		int has_color;
 
 		if (!MemBitTest(paddr))
 		{
@@ -271,12 +276,31 @@ void ValidateAndCopyMem(PGXP_value* dest, uint32_t addr, uint32_t value)
 
 		pMem = PtrFromPacked(paddr);
 		Validate(pMem, value);
+		has_color = cpu_load && (pMem->flags & PGXP_COLOR);
 		*dest = *pMem;
+		if (has_color)
+			PGXP_CPU_ValidateColor(dest);
 		return;
 	}
 
 	*dest = PGXP_value_invalid_address;
 }
+
+void ValidateAndCopyMem(PGXP_value* dest, uint32_t addr, uint32_t value)
+{
+	CopyMemWord(dest, addr, value, 0);
+}
+
+#if defined(__ANDROID__) && defined(__aarch64__)
+/* Keep the CPU load with its copy so the register and memory owners can
+ * be resolved once. Color filtering applies only to the register copy. */
+void PGXP_CPU_LW(uint32_t instr, uint32_t value, uint32_t addr)
+{
+	uint32_t reg = (instr >> 16) & 31;
+	if (reg)
+		CopyMemWord(&CPU_reg[reg], addr, value, 1);
+}
+#endif
 
 void ValidateAndCopyMem16(PGXP_value* dest, uint32_t addr, uint32_t value, int sign)
 {
