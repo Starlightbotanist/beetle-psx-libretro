@@ -6316,7 +6316,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static TTGpuBackend vk_tt_make_backend(Renderer *self);
    static void renderer_dispatch(Renderer *self,
          PrimitiveInfoVec *scissors,
-         bool textured);
+         bool textured, bool projected);
    static void renderer_render_opaque_primitives(Renderer *self,
          PrimitiveInfoVec *scissors);
    static void renderer_render_semi_transparent_primitives(Renderer *self, SemiTransparentStateVec *states);
@@ -6430,7 +6430,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
 
-      renderer_dispatch(self, scissors, true);
+      renderer_dispatch(self, scissors, true, depth);
    }
 
    static void renderer_render_opaque_texture_primitives(Renderer *self,
@@ -6450,7 +6450,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
 
-      renderer_dispatch(self, scissors, true);
+      renderer_dispatch(self, scissors, true, depth);
    }
 
 
@@ -11528,7 +11528,7 @@ static bool renderer_primitive_info_sort_gt(const PrimitiveInfo *a,
       return hd_handle_gt(&a->hd_texture_index, &b->hd_texture_index);
    if (a->scissor_index != b->scissor_index)
       return a->scissor_index > b->scissor_index;
-   return a->triangle_index > b->triangle_index;
+   return false;
 }
 
 /* qsort comparator: descending order, matching primitive_info_sort_gt. */
@@ -11539,12 +11539,27 @@ static int renderer_primitive_info_qsort_cmp(const void *pa, const void *pb){
       return -1;
    if (renderer_primitive_info_sort_gt(b, a))
       return 1;
-   return 0;
+   return (a->triangle_index < b->triangle_index) -
+      (a->triangle_index > b->triangle_index);
+}
+
+/* Within an identical draw-state batch, preserve the GP0 order of projected
+ * triangles so LESS_OR_EQUAL lets the later fragment win an equal-depth tie. */
+static int renderer_projected_info_qsort_cmp(const void *pa, const void *pb)
+{
+   const PrimitiveInfo *a = (const PrimitiveInfo *)pa;
+   const PrimitiveInfo *b = (const PrimitiveInfo *)pb;
+   if (renderer_primitive_info_sort_gt(a, b))
+      return -1;
+   if (renderer_primitive_info_sort_gt(b, a))
+      return 1;
+   return (a->triangle_index > b->triangle_index) -
+      (a->triangle_index < b->triangle_index);
 }
 
 static void renderer_dispatch(Renderer *self,
       PrimitiveInfoVec *scissors,
-      bool textured){
+      bool textured, bool projected){
    const PrimitiveInfo *pi;
    unsigned to_draw;
    uint32_t *index;
@@ -11559,7 +11574,8 @@ static void renderer_dispatch(Renderer *self,
 
    if (!size)
       return;
-   qsort(PrimitiveInfoVec_data(scissors), size, sizeof(PrimitiveInfo), renderer_primitive_info_qsort_cmp);
+   qsort(PrimitiveInfoVec_data(scissors), size, sizeof(PrimitiveInfo),
+         projected ? renderer_projected_info_qsort_cmp : renderer_primitive_info_qsort_cmp);
 
    /* The queue's triangles, in the order sorted, as indices into the
     * render pass's vertices. NULL when the device is out of host-visible
@@ -11647,7 +11663,7 @@ static void renderer_render_opaque_primitives(Renderer *self,
    renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
    commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
 
-   renderer_dispatch(self, scissors, false);
+   renderer_dispatch(self, scissors, false, false);
 }
 
 static void renderer_hd_texture_uniforms(Renderer *self,
