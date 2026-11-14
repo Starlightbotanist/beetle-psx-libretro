@@ -5235,6 +5235,7 @@ static const DeviceFeatures *device_get_device_features(Device *self) { return &
        * blocks covered by queued primitives separately so empty gaps do not
        * become rendered texture content when the pass is submitted. */
       uint32_t pending_fragment_write[FBATLAS_BLOCK_WORDS];
+      uint32_t pending_scaled_texture_read[FBATLAS_BLOCK_WORDS];
       Renderer *listener;
 
       /* Retained CLUT selection (see fbatlas_palette_preserve). valid: a
@@ -5396,6 +5397,7 @@ static StatusFlags *fbatlas_info(FBAtlas *self,
          a->fb_info[i] = STATUS_FB_PREFER;
       memset(a->pending_fragment_write, 0,
             sizeof(a->pending_fragment_write));
+      memset(a->pending_scaled_texture_read, 0, sizeof(a->pending_scaled_texture_read));
       a->listener = NULL;
       a->palette_cache_x = 0;
       a->palette_cache_y = 0;
@@ -22206,6 +22208,12 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       fbatlas_read_domain(self, domain, Stage_FragmentTexture, &shifted);
       if (palette && read_palette)
          fbatlas_read_domain(self, domain, Stage_FragmentTexture, &palette_rect);
+      if (domain == Domain_Scaled)
+      {
+         fbatlas_mark_blocks(self->pending_scaled_texture_read, &shifted);
+         if (palette && read_palette)
+            fbatlas_mark_blocks(self->pending_scaled_texture_read, &palette_rect);
+      }
       }
    }
 
@@ -22484,6 +22492,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       /* Clear out the "shadow" stage. */
       { unsigned _i; for (_i = 0; _i < NUM_BLOCKS_X * NUM_BLOCKS_Y; _i++)
          self->fb_info[_i] &= ~STATUS_TEXTURE_READ; }
+      memset(self->pending_scaled_texture_read, 0, sizeof(self->pending_scaled_texture_read));
 
       self->renderpass.inside = false;
       { const TTRect *rect = &self->renderpass.rect;
@@ -22516,7 +22525,9 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       fbatlas_flush_render_pass_with_depth(self, false);
    }
 
-   /* Whether a draw in the open render pass sampled any block of @rect. */
+   /* Growing the render area writes the scaled color attachment. Native
+    * texture reads use a separate image. Their dependencies are handled by
+    * the normal domain writes and resolves when that image is updated. */
    static bool fbatlas_sampled_in_render_pass(FBAtlas *self, const TTRect *rect)
    {
       unsigned xbegin = rect->x / BLOCK_WIDTH;
@@ -22527,7 +22538,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
       for (y = ybegin; y <= yend; y++)
          for (x = xbegin; x <= xend; x++)
-            if ((*fbatlas_info(self, x, y)) & STATUS_TEXTURE_READ)
+            if (fbatlas_block_test(self->pending_scaled_texture_read, x, y))
                return true;
       return false;
    }
@@ -22716,9 +22727,11 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          { const TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
             self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
 
+         /* Sampling pending framebuffer writes also ends a Vulkan pass.
+          * The queued geometry and this draw can still share a depth group. */
          if (fbatlas_inside_render_pass(self, &shifted) ||
              (reads_palette && !palette_retained && fbatlas_inside_render_pass(self, &palette_rect)))
-            fbatlas_flush_render_pass(self);
+            fbatlas_flush_render_pass_with_depth(self, true);
 
          /* A retained palette is not read from VRAM, so it takes no atlas
           * hazards; the window still does. */
@@ -22770,6 +22783,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       self->renderpass.inside = false;
       memset(self->pending_fragment_write, 0,
             sizeof(self->pending_fragment_write));
+      memset(self->pending_scaled_texture_read, 0, sizeof(self->pending_scaled_texture_read));
       renderer_reset_queue(self->listener);
    }
 
