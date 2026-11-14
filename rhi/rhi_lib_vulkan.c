@@ -6167,6 +6167,9 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          OpaqueQueue queue;
          unsigned primitive_index;
          rhi_pgxp_depth_state pgxp_depth;
+         ImageHandle pgxp_depth_attachment;
+         TTRect pgxp_depth_valid_rect;
+         bool pgxp_depth_storage_failed;
          bool render_pass_is_feedback;
          float last_uv_scale_x, last_uv_scale_y;
 
@@ -10732,8 +10735,15 @@ static RHI_NOINLINE void renderer_split_pgxp_depth(Renderer *self, unsigned coun
       self->primitive_index = 0;
       self->pgxp_depth.maximum = 0.f;
    }
-   else
-      fbatlas_flush_render_pass(&self->atlas);
+    else
+    {
+       fbatlas_flush_render_pass(&self->atlas);
+       if (self->pgxp_depth_valid_rect.width)
+       {
+          self->pgxp_depth_valid_rect.width = 0;
+          self->pgxp_depth.maximum = 0.f;
+       }
+    }
 }
 
 
@@ -11198,9 +11208,120 @@ static RHI_NOINLINE void renderer_render_depth_groups(Renderer *self)
       commandbuffer_next_subpass(cbh_get(&self->cmd));
 }
 
-static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
+static VkRect2D renderer_scaled_rect(const Renderer *self, const TTRect *rect)
+{
+   const unsigned scale = self->scaling;
+   VkRect2D scaled = {
+      { (int)(rect->x * scale), (int)(rect->y * scale) },
+      { rect->width * scale, rect->height * scale }
+   };
+   return scaled;
+}
+
+static void renderer_clear_new_depth(Renderer *self, const TTRect *area,
+      const TTRect *valid)
+{
+   const TTRect overlap = rect_scissor(area, valid);
+   TTRect strips[4];
+   unsigned i, count = 0;
+   VkClearRect rects[4];
+   VkClearAttachment attachment = {0};
+
+   if (!overlap.width || !overlap.height)
+      strips[count++] = *area;
+   else
+   {
+      const unsigned right = overlap.x + overlap.width;
+      const unsigned bottom = overlap.y + overlap.height;
+      const unsigned area_right = area->x + area->width;
+      const unsigned area_bottom = area->y + area->height;
+      if (area->y < overlap.y)
+      {
+         TTRect top = { area->x, area->y, area->width, overlap.y - area->y };
+         strips[count++] = top;
+      }
+      if (bottom < area_bottom)
+      {
+         TTRect lower = { area->x, bottom, area->width, area_bottom - bottom };
+         strips[count++] = lower;
+      }
+      if (area->x < overlap.x)
+      {
+         TTRect left = { area->x, overlap.y, overlap.x - area->x, overlap.height };
+         strips[count++] = left;
+      }
+      if (right < area_right)
+      {
+         TTRect tail = { right, overlap.y, area_right - right, overlap.height };
+         strips[count++] = tail;
+      }
+   }
+
+   if (!count)
+      return;
+   for (i = 0; i < count; i++)
+   {
+      rects[i].rect = renderer_scaled_rect(self, &strips[i]);
+      rects[i].baseArrayLayer = 0;
+      rects[i].layerCount = 1;
+   }
+   attachment.aspectMask = format_to_aspect_mask(device_get_default_depth_format(self->device));
+   attachment.clearValue.depthStencil.depth = 1.f;
+   vkCmdClearAttachments(commandbuffer_get_command_buffer(cbh_get(&self->cmd)),
+         1, &attachment, count, rects);
+}
+
+static void renderer_sync_saved_depth(Renderer *self)
+{
+   const VkPipelineStageFlags tests =
+         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+   const VkAccessFlags access =
+         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+   commandbuffer_image_barrier(cbh_get(&self->cmd), ih_get(&self->pgxp_depth_attachment),
+         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, tests, access, tests, access);
+}
+
+static bool renderer_ensure_saved_depth(Renderer *self)
+{
+   if (!vkCmdClearAttachments || self->pgxp_depth_storage_failed)
+      return false;
+   if (ih_is_valid(&self->pgxp_depth_attachment))
+      return true;
+   {
+      ImageCreateInfo info = image_create_info_render_target(FB_WIDTH * self->scaling,
+            FB_HEIGHT * self->scaling, device_get_default_depth_format(self->device));
+      info.samples = (VkSampleCountFlagBits)self->msaa;
+      info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+      info.initial_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+      ih_move(&self->pgxp_depth_attachment, device_create_image(self->device, &info, NULL));
+   }
+   if (!ih_is_valid(&self->pgxp_depth_attachment))
+   {
+      LOGE("Vulkan: could not allocate depth storage for PGXP feedback splits.\n");
+      self->pgxp_depth_storage_failed = true;
+      return false;
+   }
+   return true;
+}
+
+static void renderer_flush_render_pass(Renderer *self, const TTRect *rect, bool feedback_split)
 {
    RenderPassInfo_Subpass subpasses[2];
+   const PGXPDepthGroupVec *groups = &self->queue.depth_groups;
+   const unsigned group_count = PGXPDepthGroupVec_size(groups);
+   const unsigned first_textured =
+         group_count ? groups->items[group_count - 1].textured_end : 0;
+   const float depth_maximum = self->pgxp_depth.maximum;
+   const ClearCandidate *clear_candidate = renderer_find_clear_candidate(self, rect);
+   const bool load_depth = self->pgxp_depth_valid_rect.width && !clear_candidate &&
+         (group_count ? groups->items[0].active : self->pgxp_depth.active);
+   bool store_depth = feedback_split && self->pgxp_depth.active &&
+         first_textured < PrimitiveInfoVec_size(&self->queue.opaque_textured_scissor);
+   TTRect depth_rect = *rect;
+   TTRect valid_depth = self->pgxp_depth_valid_rect;
+   bool staged;
+
    renderer_ensure_command_buffer(self);
    renderer_snapshot_scaled_texture_reads(self);
 
@@ -11213,12 +11334,48 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
       info.color_attachments[0] = iv_get(imageview_vec_front(&self->scaled_views));
 
    info.clear_depth_stencil.depth = 1.0f; info.clear_depth_stencil.stencil = 0;
-   info.depth_stencil =
-      device_get_transient_attachment(self->device, FB_WIDTH * self->scaling, FB_HEIGHT * self->scaling,
-                                       device_get_default_depth_format(self->device), 0, self->msaa, 1);
    info.num_color_attachments = 1;
    info.store_attachments = 1 << 0;
    info.op_flags = RENDER_PASS_OP_CLEAR_DEPTH_STENCIL_BIT;
+   store_depth = store_depth && renderer_ensure_saved_depth(self);
+   if (load_depth || store_depth)
+   {
+      info.depth_stencil = image_get_view(ih_get(&self->pgxp_depth_attachment));
+      renderer_sync_saved_depth(self);
+      if (load_depth)
+         info.op_flags = RENDER_PASS_OP_LOAD_DEPTH_STENCIL_BIT;
+      if (store_depth)
+         info.op_flags |= RENDER_PASS_OP_STORE_DEPTH_STENCIL_BIT;
+
+      if (load_depth && store_depth && !group_count)
+      {
+         const TTRect overlap = rect_scissor(rect, &valid_depth);
+         rect_extend_bounding_box(&depth_rect, &valid_depth);
+         if (depth_rect.width * depth_rect.height >
+               rect->width * rect->height + valid_depth.width * valid_depth.height -
+               overlap.width * overlap.height)
+         {
+            RenderPassInfo depth_info;
+            /* A non-rectangular union leaves holes outside the color pass.
+             * Initialize those in a depth-only pass so the color render area
+             * and its atlas dependencies are unchanged. */
+            render_pass_info_defaults(&depth_info);
+            depth_info.depth_stencil = info.depth_stencil;
+            depth_info.op_flags = RENDER_PASS_OP_LOAD_DEPTH_STENCIL_BIT |
+                  RENDER_PASS_OP_STORE_DEPTH_STENCIL_BIT;
+            depth_info.render_area = renderer_scaled_rect(self, &depth_rect);
+            commandbuffer_begin_render_pass(cbh_get(&self->cmd), &depth_info, VK_SUBPASS_CONTENTS_INLINE);
+            renderer_clear_new_depth(self, &depth_rect, &valid_depth);
+            commandbuffer_end_render_pass(cbh_get(&self->cmd));
+            renderer_sync_saved_depth(self);
+            valid_depth = depth_rect;
+         }
+      }
+   }
+   else
+      info.depth_stencil =
+         device_get_transient_attachment(self->device, FB_WIDTH * self->scaling, FB_HEIGHT * self->scaling,
+                                          device_get_default_depth_format(self->device), 0, self->msaa, 1);
 
    render_pass_info_subpass_defaults(subpasses);
    subpasses[0].num_color_attachments = 1;
@@ -11226,8 +11383,6 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    subpasses[1] = subpasses[0];
    info.num_subpasses = self->render_pass_is_feedback ? 2 : 1;
    info.subpasses = subpasses;
-
-   { const ClearCandidate *clear_candidate = renderer_find_clear_candidate(self, rect);
 
    if (self->render_pass_is_feedback)
    {
@@ -11248,8 +11403,7 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    }
 
 
-   info.render_area.offset.x = (int)(rect->x * self->scaling); info.render_area.offset.y = (int)(rect->y * self->scaling);
-   info.render_area.extent.width = rect->width * self->scaling; info.render_area.extent.height = rect->height * self->scaling;
+   info.render_area = renderer_scaled_rect(self, rect);
 
    /* The primitives in this pass may sample the scaled framebuffer as a texture
     * (scaled_read: a primitive that textures from previously-rendered content),
@@ -11273,9 +11427,11 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    commandbuffer_begin_render_pass(cbh_get(&self->cmd), &info, VK_SUBPASS_CONTENTS_INLINE);
    commandbuffer_set_scissor(cbh_get(&self->cmd), &info.render_area);
    self->queue.default_scissor = info.render_area;
+   if (load_depth && !rect_contains(&valid_depth, rect))
+      renderer_clear_new_depth(self, rect, &valid_depth);
    commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 5, image_get_view(ih_get(&self->palette_cache)), StockSampler_NearestClamp);
 
-   { const bool staged = renderer_upload_queued_vertices(self);
+   staged = renderer_upload_queued_vertices(self);
    if (staged && !PGXPDepthGroupVec_empty(&self->queue.depth_groups))
       renderer_render_depth_groups(self);
    else
@@ -11293,8 +11449,6 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
       if (staged)
          renderer_render_semi_transparent_primitives(self, &self->queue.semi_transparent_state);
    }
-   }
-
    commandbuffer_end_render_pass(cbh_get(&self->cmd));
 
    /* Render passes are implicitly synchronized. */
@@ -11306,6 +11460,10 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT);
 
    renderer_reset_queue(self);
+   if (staged && store_depth)
+   {
+      self->pgxp_depth_valid_rect = depth_rect;
+      self->pgxp_depth.maximum = depth_maximum;
    }
    }
 }
@@ -12357,6 +12515,7 @@ static void renderer_fini(Renderer *self)
     * teardown, which a plain struct no longer provides). */
    ih_reset(&self->scaled_framebuffer);
    ih_reset(&self->scaled_framebuffer_msaa);
+   ih_reset(&self->pgxp_depth_attachment);
    ih_reset(&self->scaled_read_snapshot);
    ih_reset(&self->bias_framebuffer);
    ih_reset(&self->framebuffer);
@@ -12433,6 +12592,7 @@ static void renderer_reset_scissor_queue(Renderer *self)
 
 static void renderer_reset_queue(Renderer *self)
 {
+   self->pgxp_depth_valid_rect.width = 0;
    self->pgxp_depth.maximum = 0.f;
    BufferVertexVec_clear(&self->queue.vertices);
    PrimitiveInfoVec_clear(&self->queue.opaque_scissor);
@@ -22316,7 +22476,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       }
    }
 
-   static void fbatlas_flush_render_pass(FBAtlas *self)
+   static void fbatlas_flush_render_pass_with_depth(FBAtlas *self, bool feedback_split)
    {
       if (!self->renderpass.inside)
          return;
@@ -22328,10 +22488,17 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       self->renderpass.inside = false;
       { const TTRect *rect = &self->renderpass.rect;
       if (rect->width == 0 || rect->height == 0)
+      {
+         if (self->listener->pgxp_depth_valid_rect.width)
+         {
+            self->listener->pgxp_depth_valid_rect.width = 0;
+            self->listener->pgxp_depth.maximum = 0.f;
+         }
          return;
+      }
 
       fbatlas_write_domain(self, Domain_Scaled, Stage_Fragment, rect);
-      renderer_flush_render_pass(self->listener, rect);
+      renderer_flush_render_pass(self->listener, rect, feedback_split);
 
       { unsigned i; for (i = 0; i < FBATLAS_BLOCK_WORDS; i++)
       {
@@ -22342,6 +22509,11 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          self->pending_fragment_write[i] = 0;
       } }
       }
+   }
+
+   static void fbatlas_flush_render_pass(FBAtlas *self)
+   {
+      fbatlas_flush_render_pass_with_depth(self, false);
    }
 
    /* Whether a draw in the open render pass sampled any block of @rect. */
@@ -22391,7 +22563,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          if (     !(!scissor && rect_eq(&scissored_rect, &grown))
                && fbatlas_sampled_in_render_pass(self, &grown))
          {
-            fbatlas_flush_render_pass(self);
+            fbatlas_flush_render_pass_with_depth(self, true);
             self->renderpass.rect = scissored_rect;
             fbatlas_sync_domain(self, Domain_Scaled, &self->renderpass.rect);
             fbatlas_write_domain(self, Domain_Scaled, Stage_Fragment, &self->renderpass.rect);
@@ -24017,6 +24189,12 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
          && !show_vram
          && psx_video_cable == RHI_CABLE_NONE)
    {
+       if (renderer->pgxp_depth_valid_rect.width)
+       {
+          fbatlas_flush_render_pass(&renderer->atlas);
+          renderer->pgxp_depth_valid_rect.width = 0;
+          renderer->pgxp_depth.maximum = 0.f;
+       }
       renderer_flush(renderer);
       video_refresh_cb(NULL, prev_frame_width, prev_frame_height, 0);
 
@@ -24172,7 +24350,8 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
 void rhi_vulkan_begin_pgxp_depth_group(void)
 {
    if (renderer && renderer->pgxp_depth.active &&
-       !BufferVertexVec_empty(&renderer->queue.vertices))
+       (!BufferVertexVec_empty(&renderer->queue.vertices) ||
+        renderer->pgxp_depth_valid_rect.width))
       renderer_split_pgxp_depth(renderer, 3);
 }
 
