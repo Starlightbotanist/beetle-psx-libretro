@@ -826,6 +826,29 @@ void PGXP_CPU_MULTU(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsV
 	CPU_Hi.value = hiVal;
 }
 
+/* DIV interprets its inputs as scalar words. After a short right shift,
+ * the low half already contains the bits that crossed from the high half.
+ * Its fractional shadow can refine the native scalar, but the independent
+ * high-half fraction must not be counted at the 65536-unit place. */
+static double PGXP_DivOperand(const PGXP_value *value, uint32_t word,
+      double native)
+{
+   double delta;
+
+   if (!(value->flags & VALID_0))
+      return native;
+
+   delta = value->x - (double)(int16_t)word;
+   /* Unwrap the signed low shadow around the native word's low half.
+    * This preserves fractional carries and borrows at a half boundary. */
+   if (delta > 32768.0)
+      delta -= 65536.0;
+   else if (delta < -32768.0)
+      delta += 65536.0;
+
+   return native + delta;
+}
+
 void PGXP_CPU_DIV(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsVal, uint32_t rtVal)
 {
 	/* Lo = Rs / Rt (signed)
@@ -848,8 +871,8 @@ void PGXP_CPU_DIV(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsVal
 
 	CPU_Lo.halfFlags[0] = CPU_Hi.halfFlags[0] = (CPU_reg[rs(instr)].halfFlags[0] & CPU_reg[rt(instr)].halfFlags[0]);
 
-	vs = f16Unsign(CPU_reg[rs(instr)].x) + (CPU_reg[rs(instr)].y) * (double)(1 << 16);
-	vt = f16Unsign(CPU_reg[rt(instr)].x) + (CPU_reg[rt(instr)].y) * (double)(1 << 16);
+	vs = PGXP_DivOperand(&CPU_reg[rs(instr)], rsVal, (int32_t)rsVal);
+	vt = PGXP_DivOperand(&CPU_reg[rt(instr)], rtVal, (int32_t)rtVal);
 	if (rtVal == 0 || vt == 0.0 || !isfinite(vs) || !isfinite(vt))
 	{
 		SetValue(&CPU_Lo, loVal);
@@ -891,8 +914,8 @@ void PGXP_CPU_DIVU(uint32_t instr, uint32_t hiVal, uint32_t loVal, uint32_t rsVa
 
 	CPU_Lo.halfFlags[0] = CPU_Hi.halfFlags[0] = (CPU_reg[rs(instr)].halfFlags[0] & CPU_reg[rt(instr)].halfFlags[0]);
 
-	vs = f16Unsign(CPU_reg[rs(instr)].x) + f16Unsign(CPU_reg[rs(instr)].y) * (double)(1 << 16);
-	vt = f16Unsign(CPU_reg[rt(instr)].x) + f16Unsign(CPU_reg[rt(instr)].y) * (double)(1 << 16);
+	vs = PGXP_DivOperand(&CPU_reg[rs(instr)], rsVal, rsVal);
+	vt = PGXP_DivOperand(&CPU_reg[rt(instr)], rtVal, rtVal);
 	if (rtVal == 0 || vt == 0.0 || !isfinite(vs) || !isfinite(vt))
 	{
 		SetValue(&CPU_Lo, loVal);
