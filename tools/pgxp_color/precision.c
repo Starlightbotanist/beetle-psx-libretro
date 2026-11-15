@@ -534,6 +534,44 @@ static void test_scalar_shift_wrap(void)
          "stale low precision cannot borrow into the sign extension");
 }
 
+static void test_scalar_divide_after_shift(void)
+{
+   uint32_t numerator = 0xfff727f0u; /* -579600 */
+   uint32_t shifted = 0xfffee4feu; /* -72450 */
+   uint32_t denominator = 331;
+   int32_t quotient = (int32_t)shifted / (int32_t)denominator;
+   int32_t remainder = (int32_t)shifted % (int32_t)denominator;
+
+   /* The Atlas uses a short arithmetic shift followed by signed division. */
+   seed(1, numerator, 10224.f, -9.f, 8.f);
+   PGXP_CPU_SRA(rtype(0, 1, 3, 3) | (3u << 6), shifted, numerator);
+   check(CPU_reg[3].y == -1.125f, "Atlas shift retains its upper-half shadow");
+   seed(2, denominator, 330.6875f, 0.25f, 8.f);
+   PGXP_CPU_DIV(rtype(3, 2, 0, 0x1a), remainder, quotient, shifted, denominator);
+   PGXP_CPU_MFLO(rtype(0, 0, 4, 0x12), quotient, quotient);
+   check(CPU_reg[4].value == (uint32_t)quotient &&
+         fabs(CPU_reg[4].x - (-72450.0 / 330.6875)) < 0.001,
+         "scalar divide uses shifted bits only once and keeps the divisor fraction");
+
+   numerator = 0x00024000u;
+   denominator = 1024;
+   quotient = numerator / denominator;
+   remainder = numerator % denominator;
+   seed(1, numerator, 16384.25f, 2.25f, 8.f);
+   seed(2, denominator, 1024.25f, 0.25f, 8.f);
+   PGXP_CPU_DIVU(rtype(1, 2, 0, 0x1b), remainder, quotient, numerator, denominator);
+   PGXP_CPU_MFLO(rtype(0, 0, 4, 0x12), quotient, quotient);
+   check(fabs(CPU_reg[4].x - (147456.25 / 1024.25)) < 0.001,
+         "unsigned scalar divide ignores independent upper-half fractions");
+
+   seed(1, 0x00010000u, -0.25f, 0.f, 8.f);
+   SetValue(&CPU_reg[2], 256);
+   PGXP_CPU_DIV(rtype(1, 2, 0, 0x1a), 0, 256, 0x00010000u, 256);
+   PGXP_CPU_MFLO(rtype(0, 0, 4, 0x12), 256, 256);
+   check(fabs(CPU_reg[4].x - (65535.75 / 256)) < 0.001,
+         "scalar divide preserves a fractional borrow across a halfword");
+}
+
 static void test_long_shift_sign(void)
 {
    unsigned sh;
@@ -1159,6 +1197,7 @@ int main(void)
    RUN_TEST(test_gte_alias);
    RUN_TEST(test_shifts);
    RUN_TEST(test_shift_sign_extension);
+   RUN_TEST(test_scalar_divide_after_shift);
    RUN_TEST(test_scalar_shift_wrap);
    RUN_TEST(test_long_shift_sign);
    RUN_TEST(test_unprojected_vertex_bounds);
