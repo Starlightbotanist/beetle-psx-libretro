@@ -4558,7 +4558,7 @@ static void fallback_log(enum retro_log_level level, const char *fmt, ...)
    va_end(va);
 }
 
-static enum retro_savestate_phase (RETRO_CALLCONV *prediction_phase)(void);
+static bool prediction_registered;
 static void RETRO_CALLCONV prediction_release(const void *data, size_t size);
 static bool RETRO_CALLCONV prediction_usable(void);
 static void prediction_clear(void);
@@ -4566,12 +4566,12 @@ static void prediction_trim_idle(void);
 
 void retro_init(void)
 {
-   VCD_Init();
-
    struct retro_log_callback log;
    uint64_t serialization_quirks = RETRO_SERIALIZATION_QUIRK_CORE_VARIABLE_SIZE;
    unsigned dci_version          = 0;
    const char *dir               = NULL;
+
+   VCD_Init();
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log))
       log_cb = log.log;
@@ -4581,12 +4581,14 @@ void retro_init(void)
    {
       struct retro_savestate_lifetime lifetime = {
          RETRO_SAVESTATE_LIFETIME_VERSION, sizeof(lifetime),
-         prediction_release, prediction_usable, NULL
+         prediction_release, prediction_usable
       };
-      prediction_phase = NULL;
       prediction_live_usable = true;
-      if (environ_cb(RETRO_ENVIRONMENT_SET_SAVESTATE_LIFETIME, &lifetime))
-         prediction_phase = lifetime.get_phase;
+      prediction_registered = environ_cb(RETRO_ENVIRONMENT_GET_SAVESTATE_PHASE, NULL) &&
+            environ_cb(RETRO_ENVIRONMENT_SET_SAVESTATE_LIFETIME, &lifetime);
+      if (prediction_registered)
+         log_cb(RETRO_LOG_INFO, "Managed GPU snapshots registered (savestate lifetime v%u).\n",
+               RETRO_SAVESTATE_LIFETIME_VERSION);
    }
 
 #ifdef NEED_DEINTERLACER
@@ -7648,6 +7650,17 @@ static void *memory_checkpoint_create(void)
    return state;
 }
 
+static enum retro_savestate_phase prediction_phase(void)
+{
+   enum retro_savestate_phase phase = RETRO_SAVESTATE_PHASE_NORMAL;
+   if (prediction_registered &&
+       environ_cb(RETRO_ENVIRONMENT_GET_SAVESTATE_PHASE, &phase) &&
+       (phase == RETRO_SAVESTATE_PHASE_CANONICAL ||
+        phase == RETRO_SAVESTATE_PHASE_SPECULATIVE))
+      return phase;
+   return RETRO_SAVESTATE_PHASE_NORMAL;
+}
+
 static void memory_checkpoint_release(void *checkpoint)
 {
    MemoryCheckpoint **link = &memory_checkpoints;
@@ -7659,7 +7672,7 @@ static void memory_checkpoint_release(void *checkpoint)
       return;
    *link = state->next;
    keep_staging = memory_checkpoints ||
-      (prediction_phase && prediction_phase() != RETRO_SAVESTATE_PHASE_NORMAL);
+      prediction_phase() != RETRO_SAVESTATE_PHASE_NORMAL;
    if (keep_staging && state->gpu && state->data)
    {
       uint8_t *scratch = memory_staging.data;
@@ -7691,7 +7704,7 @@ static void memory_checkpoint_release(void *checkpoint)
 static void prediction_trim_idle(void)
 {
    if (!memory_checkpoints && (memory_staging.gpu || memory_staging.data || memory_cpu_spare) &&
-       (!prediction_phase || prediction_phase() == RETRO_SAVESTATE_PHASE_NORMAL))
+       prediction_phase() == RETRO_SAVESTATE_PHASE_NORMAL)
    {
       memory_checkpoint_discard(&memory_staging);
       free(memory_cpu_spare);
@@ -7829,7 +7842,7 @@ static bool memory_checkpoint_load(const void *checkpoint)
 static bool prediction_context(void)
 {
    enum retro_savestate_context context = RETRO_SAVESTATE_CONTEXT_NORMAL;
-   return prediction_phase &&
+   return prediction_registered &&
       environ_cb(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context) &&
       context == RETRO_SAVESTATE_CONTEXT_RUNAHEAD_MANAGED;
 }
@@ -7888,7 +7901,7 @@ static bool prediction_save(void *data, size_t size)
 
 bool retro_is_speculative(void)
 {
-   return prediction_phase ? prediction_phase() == RETRO_SAVESTATE_PHASE_SPECULATIVE : false;
+   return prediction_phase() == RETRO_SAVESTATE_PHASE_SPECULATIVE;
 }
 
 size_t retro_serialize_size(void)
@@ -7938,12 +7951,7 @@ bool retro_serialize(void *data, size_t size)
    if (!data || size == 0 || !prediction_live_usable)
       return false;
    if (prediction_context())
-   {
-      ret = prediction_save(data, size);
-      if (!ret && retro_is_speculative())
-         retro_mark_memory_restore_failed();
-      return ret;
-   }
+      return prediction_save(data, size);
 
    /* Same defensive check as retro_unserialize - StateAction touches
     * every subsystem and segfaults if any of them are NULL. */

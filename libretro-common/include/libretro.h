@@ -2480,11 +2480,22 @@ enum retro_mod
 #define RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT (72 | RETRO_ENVIRONMENT_EXPERIMENTAL)
 
 /**
- * Register before loading content to opt into same-instance state lifetime.
+ * Queries the prediction phase on the core thread, independently of lifetime
+ * registration.
  *
- * @param[in,out] data <tt>struct retro_savestate_lifetime *</tt>.
- * On success, the frontend sets \c get_phase and keeps the callbacks until
- * core deinitialization.
+ * @param[out] data <tt>enum retro_savestate_phase *</tt>,
+ * or \c NULL to probe support.
+ * @returns true if the query is supported.
+ * @see retro_savestate_phase
+ */
+#define RETRO_ENVIRONMENT_GET_SAVESTATE_PHASE (106 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+
+/**
+ * Registers same-instance savestate lifetime callbacks from retro_set_environment
+ * or retro_init, on the core thread.
+ *
+ * @param[in] data <tt>const struct retro_savestate_lifetime *</tt>.
+ * The frontend copies the callbacks and keeps them until core deinitialization.
  * @returns true if the frontend accepts the registration.
  * @see RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT
  */
@@ -7296,21 +7307,30 @@ enum retro_savestate_context
    RETRO_SAVESTATE_CONTEXT_UNKNOWN                = INT_MAX
 };
 
-/** Execution phase of a registered core. */
+/**
+ * Frontend prediction phase. GET_AUDIO_VIDEO_ENABLE separately controls output.
+ */
 enum retro_savestate_phase
 {
+   /** Outside frontend Run-Ahead and Preemptive Frames execution. */
    RETRO_SAVESTATE_PHASE_NORMAL,
+   /** Execution that advances retained state. */
    RETRO_SAVESTATE_PHASE_CANONICAL,
+   /** Replay or discardable execution. */
    RETRO_SAVESTATE_PHASE_SPECULATIVE,
    RETRO_SAVESTATE_PHASE_UNKNOWN = INT_MAX
 };
 
-#define RETRO_SAVESTATE_LIFETIME_VERSION 1
+#define RETRO_SAVESTATE_LIFETIME_VERSION 3
 
 /**
  * Optional lifetime callbacks for existing serialization calls.
  * Core callbacks run on the core execution thread. Release has the core's
  * hardware context when available.
+ * Managed saves must survive byte-for-byte copies to a different address.
+ * The core must initialize all bytes read by load or release; unused bytes
+ * are unspecified. A refused save or load must leave live state unchanged,
+ * or report an unsafe state through is_usable.
  */
 struct retro_savestate_lifetime
 {
@@ -7327,18 +7347,10 @@ struct retro_savestate_lifetime
    void (RETRO_CALLCONV *release)(const void *data, size_t size);
 
    /**
-    * Reports whether emulation and memory access are safe. If a failed save
-    * or load leaves live state changed or unsafe, return false until a new
-    * content session or complete recovery.
+    * Return false if emulation or memory access becomes unsafe. Execution
+    * and memory consumers stop until core deinitialization.
     */
    bool (RETRO_CALLCONV *is_usable)(void);
-
-   /**
-    * Frontend callback. Canonical advances retained state. Speculative
-    * covers replay or discardable execution. Normal is ordinary execution.
-    * GET_AUDIO_VIDEO_ENABLE separately controls video output.
-    */
-   enum retro_savestate_phase (RETRO_CALLCONV *get_phase)(void);
 };
 
 /** @} */
