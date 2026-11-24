@@ -98,6 +98,24 @@ extern "C" {
 	void	SetValue(PGXP_value *pV, uint32_t psxV);
 	void	MakeValid(PGXP_value *pV, uint32_t psxV);
 
+	static inline void MakeValidIfNeeded(PGXP_value *pV, uint32_t psxV)
+	{
+		psx_value psx;
+		psx.d = psxV;
+		/* A geometry calculation must not reinterpret or destroy a live RGB
+		 * source. Its coordinate validity stays clear, forcing native fallback. */
+		if (pV->flags & PGXP_COLOR)
+			return;
+		if (VALID_01 != (pV->flags & VALID_01))
+		{
+			pV->x = psx.sw.l;
+			pV->y = psx.sw.h;
+			pV->z = 0.f;
+			pV->flags |= VALID_01;
+			pV->value = psx.d;
+		}
+	}
+
 	/* Hot-path validators - inline at every call site (43+
 	 * Validate() and MaskValidate() invocations in pgxp_cpu.c
 	 * alone, one or two per PGXP-tagged CPU instruction).

@@ -18,20 +18,7 @@ void SetValue(PGXP_value *pV, uint32_t psxV)
 
 void MakeValid(PGXP_value *pV, uint32_t psxV)
 {
-	psx_value psx;
-	psx.d = psxV;
-	/* A geometry calculation must not reinterpret or destroy a live RGB
-	 * source. Its coordinate validity stays clear, forcing native fallback. */
-	if (pV->flags & PGXP_COLOR)
-		return;
-	if (VALID_01 != (pV->flags & VALID_01))
-	{
-		pV->x = psx.sw.l;
-		pV->y = psx.sw.h;
-		pV->z = 0.f;
-		pV->flags |= VALID_01;
-		pV->value = psx.d;
-	}
+	MakeValidIfNeeded(pV, psxV);
 }
 
 /* Validate and MaskValidate are now static inline in pgxp_value.h
