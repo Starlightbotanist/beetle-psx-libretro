@@ -381,9 +381,6 @@ const int dither_pattern[16] =
 
 vec4 sample_texel(vec2 coords) {
 		
-   // Number of texel per VRAM 16bit "pixel" for the current depth
-   uint pix_per_hw = 1U << frag_depth_shift;
-   
    //coords += vec2(0.001, 0.001);
    
    // Texture pages are limited to 256x256 pixels
@@ -409,7 +406,7 @@ STRINGIZE(
    tex_y = (tex_y & frag_texture_window[2]) | frag_texture_window[3];
 
    // Adjust x coordinate based on the texel color depth.
-   uint tex_x_pix = tex_x / pix_per_hw;
+   uint tex_x_pix = tex_x >> frag_depth_shift;
 
    tex_x_pix += frag_texture_page.x;
    tex_y += frag_texture_page.y;
@@ -436,10 +433,6 @@ STRINGIZE(
    if (frag_depth_shift > 0U) {
       // 8 and 4bpp textures are paletted so we need to lookup the
       // real color in the CLUT
-
-      // 8 and 4bpp textures contain several texels per 16bit VRAM
-      // "pixel"
-      float tex_x_float = coords.x / float(pix_per_hw);
 
       uint icolor = rebuild_psx_color(texel);
 
