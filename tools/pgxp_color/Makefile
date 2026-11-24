@@ -41,7 +41,6 @@ check: oracle transport range precision isolation gte_projection
 	./gte_projection
 	./precision
 	./isolation
-	./gte_projection
 
 clean:
 	rm -f oracle transport range precision isolation gte_projection
