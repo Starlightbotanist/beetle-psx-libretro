@@ -2402,10 +2402,13 @@ static const char *CalcDiscSCEx_BySYSTEMCNF(CDIF *c, unsigned *rr,
 
          bootpos++;
          while (*bootpos == ' ' || *bootpos == '\t') bootpos++;
-         if (strncasecmp(bootpos, "cdrom:\\", 7) != 0)
+         if (strncasecmp(bootpos, "cdrom:", 6) != 0)
             return NULL;
 
-         bootpos += 7;
+         bootpos += 6;
+         /* Some discs, including Tomb Raider II, omit the root separator. */
+         if (*bootpos == '\\')
+            bootpos++;
 
          if (serial)
             beetle_game_database_normalize_serial(bootpos,
