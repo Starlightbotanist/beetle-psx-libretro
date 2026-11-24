@@ -423,6 +423,105 @@ static int case_load(void)
    return fail;
 }
 
+/* Keep the tagged section well formed while hiding the fields whose
+ * restoration fallback must use the current GTE register values. */
+static bool omit_restore_tags(uint8_t *state, size_t size)
+{
+   static const char *tags[] = {"OTZ", "Z_FIFO", "LZCS", "LZCR", "Reg23"};
+   size_t end, offset = 32;
+
+   if (size < offset || memcmp(state, "MDFNSVST", 8))
+      return false;
+   end = ram32(state, 20);
+   if (end > size || end < offset)
+      return false;
+   while (end - offset >= 36)
+   {
+      size_t len = ram32(state, offset + 32);
+      bool gte = !memcmp(state + offset, "GTE", sizeof("GTE"));
+      unsigned found = 0;
+      offset += 36;
+      if (len > end - offset)
+         return false;
+      if (gte)
+      {
+         end = offset + len;
+         while (end - offset >= 5)
+         {
+            unsigned i;
+            size_t name_len = state[offset++];
+            size_t bytes;
+            if (name_len > end - offset - 4)
+               return false;
+            bytes = ram32(state, offset + name_len);
+            for (i = 0; i < sizeof(tags) / sizeof(tags[0]); i++)
+               if (name_len == strlen(tags[i]) &&
+                   !memcmp(state + offset, tags[i], name_len))
+               {
+                  /* A field name the loader does not recognize. */
+                  state[offset] = '?';
+                  found |= 1u << i;
+               }
+            offset += name_len + 4;
+            if (bytes > end - offset)
+               return false;
+            offset += bytes;
+         }
+         return offset == end && found == (1u << (sizeof(tags) / sizeof(tags[0]))) - 1u;
+      }
+      offset += len;
+   }
+   return false;
+}
+
+static int case_missing(void)
+{
+   uint8_t *state;
+   size_t size, i;
+   int fail = 0;
+
+   run_frames(SAVE_FRAME);
+   if (check_regs(ram, READBACK, 0, "at save"))
+      return 1;
+   size = c.serialize_size();
+   state = (uint8_t *)malloc(size);
+   if (!state || !c.serialize(state, size) || !omit_restore_tags(state, size))
+   {
+      free(state);
+      fprintf(stderr, "[gte_state] could not prepare a state with omitted GTE tags\n");
+      return 2;
+   }
+   run_frames(END_FRAME - SAVE_FRAME);
+   if (check_regs(ram, READBACK, 1, "before load"))
+   {
+      free(state);
+      return 1;
+   }
+   if (!c.unserialize(state, size))
+   {
+      free(state);
+      fprintf(stderr, "[gte_state] missing-field load was refused\n");
+      return 2;
+   }
+   free(state);
+   run_frames(1);
+   for (i = 0; i < N_REGS; i++)
+   {
+      unsigned r = regs[i].index;
+      unsigned from_live = r == 7 || (r >= 16 && r <= 19) ||
+                           r == 23 || r == 30 || r == 31;
+      uint32_t got = ram32(ram, READBACK + i * 4);
+      uint32_t expected = regs[i].read[from_live];
+      if (got != expected)
+      {
+         fprintf(stderr, "[gte_state] missing tags: %s = 0x%08lX, want 0x%08lX\n",
+               regs[i].name, (unsigned long)got, (unsigned long)expected);
+         fail = 1;
+      }
+   }
+   return fail;
+}
+
 static int case_reset(void)
 {
    run_frames(SAVE_FRAME);
@@ -480,7 +579,7 @@ int main(int argc, char **argv)
 
    if (argc < 3)
    {
-      fprintf(stderr, "usage: %s <core> <load|reset|toggle|reload> [cpu_dynarec mode]\n", argv[0]);
+      fprintf(stderr, "usage: %s <core> <load|missing|reset|toggle|reload> [cpu_dynarec mode]\n", argv[0]);
       return 2;
    }
    name = argv[2];
@@ -503,6 +602,8 @@ int main(int argc, char **argv)
 
    if (!strcmp(name, "load"))
       ret = case_load();
+   else if (!strcmp(name, "missing"))
+      ret = case_missing();
    else if (!strcmp(name, "reset"))
       ret = case_reset();
    else if (!strcmp(name, "toggle"))

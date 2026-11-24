@@ -262,15 +262,15 @@ int GTE_StateAction(StateMem *sm, int load, int data_only)
     * side never reads the pads, so this changes no behaviour. */
    int16_t Vectors[3][4] = {{0}};
    int32_t MAC[4];
-   uint16_t _OTZ;
+   uint16_t _OTZ = OTZ;
    gtergb RGB;
    int16_t IR[4];
    gtexy XY_FIFO[4];
-   uint16_t Z_FIFO[4];
+   uint16_t Z_FIFO[4] = {Z_FIFO(0), Z_FIFO(1), Z_FIFO(2), Z_FIFO(3)};
    gtergb RGB_FIFO[3];
-   uint32_t _LZCS;
-   uint32_t _LZCR;
-   uint32_t _Reg23;
+   uint32_t _LZCS = LZCS;
+   uint32_t _LZCR = LZCR;
+   uint32_t _Reg23 = Reg23;
 
    if(!load)
    {

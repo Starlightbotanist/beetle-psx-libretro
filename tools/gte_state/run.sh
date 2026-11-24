@@ -39,7 +39,7 @@ trap 'rm -rf "$WORK"' EXIT
 HOST="$(pwd)/$HOST"
 
 fail=0
-for case in load reset reload; do
+for case in load missing reset reload; do
    for mode in disabled execute run_interpreter; do
       (cd "$WORK" && "$HOST" "$CORE" "$case" "$mode") || fail=1
    done
