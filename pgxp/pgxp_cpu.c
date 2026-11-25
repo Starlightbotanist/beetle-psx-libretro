@@ -5,6 +5,7 @@
 #include "pgxp_cpu.h"
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
+#include "pgxp_state.h"
 
 
 #include "limits.h"
@@ -1294,3 +1295,25 @@ void PGXP_CP0_CTC0(uint32_t instr, uint32_t rdVal, uint32_t rtVal)
 
 void PGXP_CP0_RFE(uint32_t instr)
 {}
+
+size_t PGXP_CPUStateSize(void)
+{
+	return sizeof(CPU_reg_mem) +
+		sizeof(CP0_reg_mem) +
+		sizeof(pending_load) +
+		sizeof(pending_load_reg) +
+		sizeof(saved_load) +
+		sizeof(deferred_load) +
+		sizeof(deferred_load_mask);
+}
+
+void PGXP_CPUState(uint8_t *data, bool load)
+{
+	pgxp_state_copy(&data, &CPU_reg_mem, sizeof(CPU_reg_mem), load);
+	pgxp_state_copy(&data, &CP0_reg_mem, sizeof(CP0_reg_mem), load);
+	pgxp_state_copy(&data, &pending_load, sizeof(pending_load), load);
+	pgxp_state_copy(&data, &pending_load_reg, sizeof(pending_load_reg), load);
+	pgxp_state_copy(&data, &saved_load, sizeof(saved_load), load);
+	pgxp_state_copy(&data, &deferred_load, sizeof(deferred_load), load);
+	pgxp_state_copy(&data, &deferred_load_mask, sizeof(deferred_load_mask), load);
+}

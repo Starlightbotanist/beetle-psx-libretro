@@ -1,6 +1,8 @@
+#include <stdlib.h>
 #include <string.h>
 
 #include "pgxp_mem.h"
+#include "pgxp_state.h"
 #include "pgxp_main.h"
 #include "pgxp_cpu.h"
 #include "pgxp_gte.h"
@@ -96,7 +98,7 @@ static inline void MemBitSet(uint32_t paddr)
 
 /* Resolve an already-converted (packed) address to its entry.
  * Caller guarantees paddr < InvalidAddress. */
-static inline PGXP_value* PtrFromPacked(uint32_t paddr)
+static inline PGXP_value* MemSlot(uint32_t paddr)
 {
 	PGXP_value *value;
 	if (paddr < ScratchOffset)
@@ -105,6 +107,12 @@ static inline PGXP_value* PtrFromPacked(uint32_t paddr)
 		value = &ScratchMem[paddr - ScratchOffset];
 	else
 		value = &RegisterMem[paddr - RegisterOffset];
+	return value;
+}
+
+static inline PGXP_value* PtrFromPacked(uint32_t paddr)
+{
+	PGXP_value *value = MemSlot(paddr);
 	if (!MemBitTest(paddr))
 	{
 		memset(value, 0, sizeof(*value));
@@ -432,4 +440,128 @@ void WriteMem16(PGXP_value* src, uint32_t addr)
 		/*dest->valid = dest->valid && src->valid; */
 		dest->gFlags |= src->gFlags;				/* inherit flags from both values (?) */
 	}
+}
+
+/* Page copies belong to retained states. Comparing with the previous save
+ * deduplicates unchanged pages without adding work to CPU or DMA accesses.
+ * The saved bitmap remains authoritative for words inside a copied page. */
+#define PGXP_STATE_PAGE_WORDS 128
+#define PGXP_STATE_PAGE_BITS (PGXP_STATE_PAGE_WORDS / 32)
+#define PGXP_STATE_PAGES (PGXP_MEM_TOTAL / PGXP_STATE_PAGE_WORDS)
+#define PGXP_STATE_MEMORY_BUDGET ((size_t)128 << 20)
+
+struct pgxp_memory_page
+{
+	unsigned refs;
+	PGXP_value words[PGXP_STATE_PAGE_WORDS];
+};
+
+struct pgxp_memory_state
+{
+	struct pgxp_memory_page *pages[PGXP_STATE_PAGES];
+	uint32_t initialized[(PGXP_MEM_TOTAL + 31) / 32];
+#ifdef HAVE_LIGHTREC
+	bool isolated_valid;
+#endif
+};
+
+static size_t pgxp_memory_page_bytes;
+
+void PGXP_MemoryStateFree(struct pgxp_memory_state *state)
+{
+	unsigned i;
+	if (!state)
+		return;
+	for (i = 0; i < PGXP_STATE_PAGES; i++)
+	{
+		struct pgxp_memory_page *page = state->pages[i];
+		if (page && !--page->refs)
+		{
+			pgxp_memory_page_bytes -= sizeof(*page);
+			free(page);
+		}
+	}
+	free(state);
+}
+
+struct pgxp_memory_state *PGXP_MemoryStateSave(const struct pgxp_memory_state *previous)
+{
+	struct pgxp_memory_state *state;
+	size_t bytes = sizeof(*state);
+	unsigned i;
+
+#ifdef HAVE_LIGHTREC
+	if (PGXP_IsolatedRAMValid)
+		bytes += sizeof(isolated_ram) + sizeof(isolated_initialized);
+#endif
+	state = (struct pgxp_memory_state *)calloc(1, bytes);
+	if (!state)
+		return NULL;
+	memcpy(state->initialized, PGXP_MemInitialized, sizeof(state->initialized));
+	for (i = 0; i < PGXP_STATE_PAGES; i++)
+	{
+		const uint32_t *bits = &state->initialized[i * PGXP_STATE_PAGE_BITS];
+		struct pgxp_memory_page *page;
+		const PGXP_value *src;
+		unsigned j;
+
+		for (j = 0; j < PGXP_STATE_PAGE_BITS && !bits[j]; j++)
+			;
+		if (j == PGXP_STATE_PAGE_BITS)
+			continue;
+
+		src = MemSlot(i * PGXP_STATE_PAGE_WORDS);
+		page = previous ? previous->pages[i] : NULL;
+		if (page && !memcmp(page->words, src, sizeof(page->words)))
+			page->refs++;
+		else
+		{
+			page = pgxp_memory_page_bytes + sizeof(*page) <= PGXP_STATE_MEMORY_BUDGET ?
+				(struct pgxp_memory_page *)malloc(sizeof(*page)) : NULL;
+			if (!page)
+			{
+				PGXP_MemoryStateFree(state);
+				return NULL;
+			}
+			pgxp_memory_page_bytes += sizeof(*page);
+			page->refs = 1;
+			memcpy(page->words, src, sizeof(page->words));
+		}
+		state->pages[i] = page;
+	}
+
+#ifdef HAVE_LIGHTREC
+	state->isolated_valid = PGXP_IsolatedRAMValid != 0;
+	if (state->isolated_valid)
+	{
+		uint8_t *extra = (uint8_t *)(state + 1);
+		memcpy(extra, isolated_ram, sizeof(isolated_ram));
+		memcpy(extra + sizeof(isolated_ram), isolated_initialized,
+			sizeof(isolated_initialized));
+	}
+#endif
+	return state;
+}
+
+void PGXP_MemoryStateLoad(const struct pgxp_memory_state *state)
+{
+	unsigned i;
+	for (i = 0; i < PGXP_STATE_PAGES; i++)
+	{
+		const struct pgxp_memory_page *page = state->pages[i];
+		if (page)
+			memcpy(MemSlot(i * PGXP_STATE_PAGE_WORDS), page->words, sizeof(page->words));
+	}
+	memcpy(PGXP_MemInitialized, state->initialized, sizeof(state->initialized));
+
+#ifdef HAVE_LIGHTREC
+	PGXP_IsolatedRAMValid = state->isolated_valid;
+	if (state->isolated_valid)
+	{
+		const uint8_t *extra = (const uint8_t *)(state + 1);
+		memcpy(isolated_ram, extra, sizeof(isolated_ram));
+		memcpy(isolated_initialized, extra + sizeof(isolated_ram),
+			sizeof(isolated_initialized));
+	}
+#endif
 }

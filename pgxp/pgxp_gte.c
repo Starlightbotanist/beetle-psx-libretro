@@ -35,6 +35,7 @@
 #include "pgxp_main.h"
 #include "pgxp_value.h"
 #include "pgxp_mem.h"
+#include "pgxp_state.h"
 #include "pgxp_cpu.h"
 #include "pgxp_gpu.h"
 #include "../mednafen/psx/gte.h"
@@ -54,6 +55,7 @@ PGXP_value* GTE_ctrl_reg = GTE_ctrl_reg_mem;
 /* UINT32_MAX means no fog association. Never recycle an identity while
  * CPU, RAM or command-buffer shadows from the same timeline can survive. */
 static uint32_t pgxp_rgb_count;
+static uint32_t vertex_push_count;
 
 void PGXP_InitGTE()
 {
@@ -135,7 +137,6 @@ static float pgxp_normalize_depth(float depth)
 
 void PGXP_pushSXYZ2f(float _x, float _y, float _z, uint32_t _v)
 {
-	static uint32_t uCount = 0;
 	low_value temp;
 	uint32_t modes = PGXP_GetModes();
 	/* push values down FIFO */
@@ -152,7 +153,7 @@ void PGXP_pushSXYZ2f(float _x, float _y, float _z, uint32_t _v)
 		SXY2.z = _z;
 	SXY2.value	= _v;
 	SXY2.flags	= VALID_ALL;
-	SXY2.count	= uCount++;
+	SXY2.count	= vertex_push_count++;
 
 	if (modes & PGXP_NORMALIZE_STORED_DEPTH)
 	{
@@ -564,3 +565,25 @@ void PGXP_DiagDump(void)
 }
 
 #endif /* PGXP_DIAG */
+
+size_t PGXP_GTEStateSize(void)
+{
+	return sizeof(GTE_data_reg_mem) +
+		sizeof(GTE_ctrl_reg_mem) +
+		sizeof(pgxp_fog_ring) +
+		sizeof(pgxp_fog_pending) +
+		sizeof(pgxp_fog_pending_set) +
+		sizeof(vertex_push_count) +
+		sizeof(pgxp_rgb_count);
+}
+
+void PGXP_GTEState(uint8_t *data, bool load)
+{
+	pgxp_state_copy(&data, &GTE_data_reg_mem, sizeof(GTE_data_reg_mem), load);
+	pgxp_state_copy(&data, &GTE_ctrl_reg_mem, sizeof(GTE_ctrl_reg_mem), load);
+	pgxp_state_copy(&data, &pgxp_fog_ring, sizeof(pgxp_fog_ring), load);
+	pgxp_state_copy(&data, &pgxp_fog_pending, sizeof(pgxp_fog_pending), load);
+	pgxp_state_copy(&data, &pgxp_fog_pending_set, sizeof(pgxp_fog_pending_set), load);
+	pgxp_state_copy(&data, &vertex_push_count, sizeof(vertex_push_count), load);
+	pgxp_state_copy(&data, &pgxp_rgb_count, sizeof(pgxp_rgb_count), load);
+}

@@ -32,6 +32,7 @@ retro_input_state_t dbg_input_state_cb = 0;
 #include "mednafen/error.h"
 
 #include "pgxp/pgxp_main.h"
+#include "pgxp/pgxp_state.h"
 #include "pgxp/pgxp_gte.h"
 #include "rhi/hdr_display.h"
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN)
@@ -4010,8 +4011,8 @@ int StateAction(StateMem *sm, int load, int data_only)
 
    int ret;
 
-   /* Shadows are not serialized. Retire the previous timeline only after
-    * the state header has been accepted, before native state can change. */
+   /* Retire live shadows after accepting the state header. A managed
+    * load restores its own shadows after the native load succeeds. */
    if (load && PGXP_GetModes())
       PGXP_Init();
 
@@ -4558,7 +4559,16 @@ static void fallback_log(enum retro_log_level level, const char *fmt, ...)
  * resolution - instead of uploading the state's 1x VRAM. The state before
  * the token is an ordinary one: without its snapshot it loads as any other. */
 #define STATE_TOKEN_MAGIC 0x4d535042u /* "BPSM" */
-#define STATE_TOKEN_SIZE  16
+struct state_token
+{
+   uint32_t magic;
+   uint32_t flags;
+   uint32_t slot;
+   uint32_t gen;
+   uint32_t pgxp_slot;
+   uint32_t pgxp_gen;
+};
+#define STATE_TOKEN_SIZE  sizeof(struct state_token)
 
 static bool state_lifetime;
 
@@ -4599,38 +4609,98 @@ static bool state_managed(void)
       && context == RETRO_SAVESTATE_CONTEXT_SAME_INSTANCE_MANAGED;
 }
 
-/* magic, slot, generation, flags */
-#define STATE_TOKEN_SNAPSHOT 1u /* names a snapshot */
-#define STATE_TOKEN_VRAM_OLD 2u /* VRAM before the token not brought up to date */
+#define STATE_TOKEN_SNAPSHOT 1u
+#define STATE_TOKEN_VRAM_OLD 2u /* Native VRAM was left on the GPU. */
+#define STATE_TOKEN_PGXP     4u
+#define PGXP_STATE_SLOTS     16
 
-static void state_token_write(uint8_t *end, uint32_t flags, uint32_t slot, uint32_t gen)
+static struct
 {
-   uint32_t t[4];
-   t[0] = STATE_TOKEN_MAGIC;
-   t[1] = slot;
-   t[2] = gen;
-   t[3] = flags;
-   memcpy(end - STATE_TOKEN_SIZE, t, STATE_TOKEN_SIZE);
+   struct pgxp_saved_state *state;
+   uint32_t generation;
+} pgxp_states[PGXP_STATE_SLOTS];
+
+static bool pgxp_state_save(struct state_token *token)
+{
+   static uint32_t generation;
+   const struct pgxp_saved_state *previous = NULL;
+   unsigned i, slot = PGXP_STATE_SLOTS;
+   uint32_t youngest = UINT32_MAX;
+
+   for (i = 0; i < PGXP_STATE_SLOTS; i++)
+   {
+      if (!pgxp_states[i].state)
+      {
+         if (slot == PGXP_STATE_SLOTS)
+            slot = i;
+      }
+      else
+      {
+         uint32_t age = generation - pgxp_states[i].generation;
+         if (age < youngest)
+         {
+            youngest = age;
+            previous = pgxp_states[i].state;
+         }
+      }
+   }
+   if (slot == PGXP_STATE_SLOTS)
+      return false;
+   /* Use any retained predecessor for sharing. Page equality is checked
+    * against the live bytes, including after a load out of order. */
+   pgxp_states[slot].state = PGXP_StateSave(previous);
+   if (!pgxp_states[slot].state)
+      return false;
+   if (++generation == 0)
+      generation++;
+   pgxp_states[slot].generation = generation;
+   token->pgxp_slot = slot;
+   token->pgxp_gen = generation;
+   token->flags |= STATE_TOKEN_PGXP;
+   return true;
 }
 
-/* The token's flags, 0 when it names no snapshot */
-static uint32_t state_token_read(const uint8_t *end, uint32_t *slot, uint32_t *gen)
+static struct pgxp_saved_state *pgxp_state_lookup(const struct state_token *token)
 {
-   uint32_t t[4];
-   memcpy(t, end - STATE_TOKEN_SIZE, STATE_TOKEN_SIZE);
-   if (t[0] != STATE_TOKEN_MAGIC || !(t[3] & STATE_TOKEN_SNAPSHOT))
-      return 0;
-   *slot = t[1];
-   *gen  = t[2];
-   return t[3];
+   uint32_t slot = token->pgxp_slot;
+   if (slot >= PGXP_STATE_SLOTS ||
+       pgxp_states[slot].generation != token->pgxp_gen)
+      return NULL;
+   return pgxp_states[slot].state;
+}
+
+static void pgxp_states_clear(void)
+{
+   unsigned i;
+   for (i = 0; i < PGXP_STATE_SLOTS; i++)
+   {
+      PGXP_StateFree(pgxp_states[i].state);
+      pgxp_states[i].state = NULL;
+   }
+}
+
+static struct state_token state_token_read(const uint8_t *end)
+{
+   struct state_token t;
+   memcpy(&t, end - STATE_TOKEN_SIZE, sizeof(t));
+   if (t.magic != STATE_TOKEN_MAGIC)
+      t.flags = 0;
+   return t;
 }
 
 static void RETRO_CALLCONV state_release(const void *data, size_t size)
 {
-   uint32_t slot, gen;
-   if (data && size >= STATE_TOKEN_SIZE
-         && state_token_read((const uint8_t*)data + size, &slot, &gen) != 0)
-      rhi_intf_snapshot_release(slot, gen);
+   struct state_token t;
+   if (!data || size < STATE_TOKEN_SIZE)
+      return;
+   t = state_token_read((const uint8_t*)data + size);
+   if (t.flags & STATE_TOKEN_SNAPSHOT)
+      rhi_intf_snapshot_release(t.slot, t.gen);
+   if ((t.flags & STATE_TOKEN_PGXP) && pgxp_state_lookup(&t))
+   {
+      PGXP_StateFree(pgxp_states[t.pgxp_slot].state);
+      pgxp_states[t.pgxp_slot].state = NULL;
+   }
 }
 
 void retro_init(void)
@@ -6905,6 +6975,7 @@ bool retro_load_game(const struct retro_game_info *info)
 
 void retro_unload_game(void)
 {
+   pgxp_states_clear();
    VCD_SetMode(VCD_MODE_OFF);
    VCD_Reset();
 
@@ -7513,6 +7584,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
  * caused subtle misbehavior. */
 void retro_deinit(void)
 {
+   pgxp_states_clear();
    VCD_Kill();
    input_deinit_env();
 
@@ -7715,7 +7787,7 @@ bool retro_serialize(void *data, size_t size)
    StateMem st;
    bool     ret;
    bool     managed = state_managed();
-   uint32_t flags   = 0, slot = 0, gen = 0;
+   struct state_token token = { STATE_TOKEN_MAGIC, 0, 0, 0, 0, 0 };
 
    if (!data || size == 0)
       return false;
@@ -7741,11 +7813,11 @@ bool retro_serialize(void *data, size_t size)
 
    /* The snapshot first: the GPU's VRAM is then in it, and the state need
     * not fetch it back */
-   if (managed && rhi_intf_snapshot_save(&slot, &gen))
+   if (managed && rhi_intf_snapshot_save(&token.slot, &token.gen))
    {
-      flags = STATE_TOKEN_SNAPSHOT;
+      token.flags = STATE_TOKEN_SNAPSHOT;
       if (!rhi_intf_has_software_renderer())
-         flags |= STATE_TOKEN_VRAM_OLD;
+         token.flags |= STATE_TOKEN_VRAM_OLD;
       GPU_SetStateSnapshotSaved(true);
    }
 
@@ -7756,11 +7828,17 @@ bool retro_serialize(void *data, size_t size)
 
    if (managed)
    {
-      /* A refused save is never released: its slot goes back now */
-      if (!ret && flags)
-         rhi_intf_snapshot_release(slot, gen);
-      else if (ret)
-         state_token_write((uint8_t*)data + size + STATE_TOKEN_SIZE, flags, slot, gen);
+      if (ret && rhi_intf_is_type() == RHI_VULKAN && PGXP_GetModes() &&
+          !pgxp_state_save(&token))
+      {
+         log_cb(RETRO_LOG_WARN, "retro_serialize: PGXP snapshot unavailable\n");
+         ret = false;
+      }
+      /* A refused save is never released by the frontend. */
+      if (ret)
+         memcpy((uint8_t*)data + size, &token, sizeof(token));
+      else if (token.flags & STATE_TOKEN_SNAPSHOT)
+         rhi_intf_snapshot_release(token.slot, token.gen);
    }
 
    if (!ret)
@@ -7775,6 +7853,7 @@ bool retro_unserialize(const void *data, size_t size)
 {
    StateMem st;
    bool okay;
+   struct pgxp_saved_state *pgxp = NULL;
 
    /* Frontends should only call this when a game is loaded, but be
     * defensive: MDFNSS_LoadSM walks every subsystem's StateAction
@@ -7784,21 +7863,23 @@ bool retro_unserialize(const void *data, size_t size)
 
    if (state_managed())
    {
-      uint32_t slot, gen, flags;
+      struct state_token token;
+      bool gpu_snapshot;
       if (size <= STATE_TOKEN_SIZE)
          return false;
-      flags = state_token_read((const uint8_t*)data + size, &slot, &gen);
-      if (flags)
+      token = state_token_read((const uint8_t*)data + size);
+      gpu_snapshot = (token.flags & STATE_TOKEN_SNAPSHOT) &&
+            rhi_intf_snapshot_valid(token.slot, token.gen);
+      if (!gpu_snapshot && (token.flags & STATE_TOKEN_VRAM_OLD))
+         return false;
+      if (token.flags & STATE_TOKEN_PGXP)
       {
-         /* Without its snapshot, a state that left VRAM behind is no state */
-         if (!rhi_intf_snapshot_valid(slot, gen))
-         {
-            if (flags & STATE_TOKEN_VRAM_OLD)
-               return false;
-         }
-         else
-            GPU_SetStateSnapshot(true, slot, gen);
+         pgxp = pgxp_state_lookup(&token);
+         if (!pgxp || !PGXP_StatePrepare(pgxp))
+            return false;
       }
+      if (gpu_snapshot)
+         GPU_SetStateSnapshot(true, token.slot, token.gen);
       size -= STATE_TOKEN_SIZE;
    }
 
@@ -7816,6 +7897,8 @@ bool retro_unserialize(const void *data, size_t size)
    FrontIO_SetStateLoadMarksMemcardsDirty(true);
    FastSaveStates = false;
    GPU_SetStateSnapshot(false, 0, 0);
+   if (okay && pgxp)
+      PGXP_StateLoad(pgxp);
    return okay;
 }
 

@@ -1,4 +1,7 @@
+#include <stdlib.h>
+
 #include "pgxp_main.h"
+#include "pgxp_state.h"
 #include "pgxp_cpu.h"
 #include "pgxp_gpu.h"
 #include "pgxp_mem.h"
@@ -60,4 +63,65 @@ void PGXP_EnableModes(uint32_t modes)
 void PGXP_DisableModes(uint32_t modes)
 {
 	apply_modes(gMode & ~modes);
+}
+
+struct pgxp_saved_state
+{
+   struct pgxp_memory_state *memory;
+   struct pgxp_vertex_state *vertices;
+   void *vertex_reserve;
+   uint32_t modes;
+};
+
+static void pgxp_state_transfer(struct pgxp_saved_state *state, bool load)
+{
+   uint8_t *data = (uint8_t *)state + sizeof(*state);
+   PGXP_CPUState(data, load);
+   data += PGXP_CPUStateSize();
+   PGXP_GTEState(data, load);
+   data += PGXP_GTEStateSize();
+   PGXP_GPUState(data, load);
+}
+
+struct pgxp_saved_state *PGXP_StateSave(const struct pgxp_saved_state *previous)
+{
+   size_t bytes = PGXP_CPUStateSize() + PGXP_GTEStateSize() + PGXP_GPUStateSize();
+   struct pgxp_saved_state *state =
+         (struct pgxp_saved_state *)calloc(1, sizeof(*state) + bytes);
+   if (!state)
+      return NULL;
+   state->modes = gMode;
+   state->memory = PGXP_MemoryStateSave(previous ? previous->memory : NULL);
+   if (!state->memory || ((gMode & PGXP_VERTEX_CACHE) &&
+         !PGXP_VertexStateSave(&state->vertices)))
+   {
+      PGXP_StateFree(state);
+      return NULL;
+   }
+   pgxp_state_transfer(state, false);
+   return state;
+}
+
+bool PGXP_StatePrepare(struct pgxp_saved_state *state)
+{
+   return state->modes == gMode &&
+         PGXP_VertexStatePrepare(state->vertices, &state->vertex_reserve);
+}
+
+void PGXP_StateLoad(struct pgxp_saved_state *state)
+{
+   PGXP_MemoryStateLoad(state->memory);
+   PGXP_VertexStateLoad(state->vertices, &state->vertex_reserve);
+   pgxp_state_transfer(state, true);
+}
+
+void PGXP_StateFree(struct pgxp_saved_state *state)
+{
+   if (state)
+   {
+      PGXP_MemoryStateFree(state->memory);
+      PGXP_VertexStateFree(state->vertices);
+      free(state->vertex_reserve);
+      free(state);
+   }
 }
